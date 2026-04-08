@@ -103,6 +103,7 @@ def test_new_worker_modal_prefills_default_prompt(tmp_path: Path) -> None:
 
         async with app.run_test():
             app._set_active_tab("projects-tab")
+            app.service.suggest_worker_prompt = lambda *, project_key: f"Scoped kickoff for {project_key}"  # type: ignore[method-assign]
             app._replace_table_rows(
                 app.projects_table,
                 [(("promptmaster", "Prompt Master", "git", "", str(tmp_path)), "promptmaster")],
@@ -119,7 +120,7 @@ def test_new_worker_modal_prefills_default_prompt(tmp_path: Path) -> None:
 
             screen = captured["screen"]
             assert isinstance(screen, InputModal)
-            assert screen.request.value == "Inspect the repo and continue the next high-leverage task."
+            assert screen.request.value == "Scoped kickoff for promptmaster"
 
     asyncio.run(run())
 

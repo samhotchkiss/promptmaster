@@ -13,7 +13,7 @@ from promptmaster.models import (
     KnownProject,
 )
 from promptmaster.storage.state import StateStore
-from promptmaster.workers import auto_select_worker_account
+from promptmaster.workers import auto_select_worker_account, suggest_worker_prompt
 
 
 def _config(tmp_path: Path) -> tuple[PromptMasterConfig, Path]:
@@ -149,3 +149,31 @@ def test_auto_select_worker_uses_control_plane_account_before_controller_last_re
     selected = auto_select_worker_account(config_path)
 
     assert selected == "codex_backup"
+
+
+def test_suggest_worker_prompt_uses_tracked_ready_issue(tmp_path: Path) -> None:
+    config, config_path = _config(tmp_path)
+    project = config.projects["promptmaster"]
+    project.tracked = True
+    write_config(config, config_path, force=True)
+
+    issues_root = project.path / "issues"
+    (issues_root / "01-ready").mkdir(parents=True, exist_ok=True)
+    (issues_root / "01-ready" / "0017-build-launch-flow.md").write_text(
+        "# 0017 Build Launch Flow\n\nTighten launch behavior.\n"
+    )
+
+    prompt = suggest_worker_prompt(config_path, project_key="promptmaster")
+
+    assert "0017" in prompt
+    assert "Build Launch Flow" in prompt
+    assert "03-needs-review" in prompt
+
+
+def test_suggest_worker_prompt_for_untracked_project_is_concrete(tmp_path: Path) -> None:
+    _config_data, config_path = _config(tmp_path)
+
+    prompt = suggest_worker_prompt(config_path, project_key="promptmaster")
+
+    assert "single highest-leverage next slice" in prompt
+    assert "concrete handoff for Polly" in prompt

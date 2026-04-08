@@ -1635,13 +1635,14 @@ class PromptMasterApp(App[None]):
         self._prompt_new_worker_for_project(project_key)
 
     def _prompt_new_worker_for_project(self, project_key: str) -> None:
+        default_prompt = self.service.suggest_worker_prompt(project_key=project_key)
         self.push_screen(
             InputModal(
                 InputRequest(
                     title="New worker session",
                     prompt=f"Enter the initial prompt for project {project_key}.",
-                    value="Inspect the repo and continue the next high-leverage task.",
-                    placeholder="Inspect the repo and continue the next high-leverage task.",
+                    value=default_prompt,
+                    placeholder=default_prompt,
                     button_label="Create",
                 )
             ),

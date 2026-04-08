@@ -44,6 +44,17 @@ def test_service_create_and_launch_worker_uses_worker_api(monkeypatch, tmp_path:
     ]
 
 
+def test_service_suggest_worker_prompt_uses_worker_api(monkeypatch, tmp_path: Path) -> None:
+    service = PromptMasterService(tmp_path / "promptmaster.toml")
+
+    monkeypatch.setattr(
+        "promptmaster.service_api.suggest_worker_prompt",
+        lambda config_path, project_key: f"Kick off {project_key}",
+    )
+
+    assert service.suggest_worker_prompt(project_key="promptmaster") == "Kick off promptmaster"
+
+
 def test_service_focus_and_send_input_use_supervisor(monkeypatch, tmp_path: Path) -> None:
     service = PromptMasterService(tmp_path / "promptmaster.toml")
     calls: list[tuple[str, str, str | None]] = []

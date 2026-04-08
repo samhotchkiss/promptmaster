@@ -26,7 +26,13 @@ from promptmaster.schedulers.base import ScheduledJob
 from promptmaster.supervisor import Supervisor
 from promptmaster.transcript_ledger import recent_token_usage as list_recent_token_usage
 from promptmaster.transcript_ledger import sync_token_ledger
-from promptmaster.workers import create_worker_session, launch_worker_session, remove_worker_session, stop_worker_session
+from promptmaster.workers import (
+    create_worker_session,
+    launch_worker_session,
+    remove_worker_session,
+    stop_worker_session,
+    suggest_worker_prompt,
+)
 
 
 @dataclass(slots=True)
@@ -59,7 +65,7 @@ class PromptMasterService:
     def list_account_statuses(self) -> list[AccountStatus]:
         return list_account_statuses(self.config_path)
 
-    def create_and_launch_worker(self, *, project_key: str, prompt: str):
+    def create_and_launch_worker(self, *, project_key: str, prompt: str | None):
         session = create_worker_session(
             self.config_path,
             project_key=project_key,
@@ -69,6 +75,9 @@ class PromptMasterService:
         if supervisor.tmux.has_session(supervisor.config.project.tmux_session):
             launch_worker_session(self.config_path, session.name)
         return session
+
+    def suggest_worker_prompt(self, *, project_key: str) -> str:
+        return suggest_worker_prompt(self.config_path, project_key=project_key)
 
     def focus_session(self, session_name: str) -> None:
         self.load_supervisor().focus_session(session_name)
