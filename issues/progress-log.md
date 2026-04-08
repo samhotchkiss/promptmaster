@@ -24,3 +24,4 @@
 - Implemented issue `0003` by switching token accounting over to JSONL transcript ingestion for Claude/Codex, adding hourly token rollups, and moving the issue to review.
 - Began swapping user-facing naming from Prompt Master toward PollyPM and Polly in onboarding and control-session prompts.
 - Tightened the control room for issue `0006`: PollyPM branding now reaches the live tmux header and CLI help, the cockpit rail boots focused, dashboard rows act more intentionally, and the live tmux validation pass moved the issue to review.
+- Closed review on implemented platform seams and docs: `0003`, `0005`, `0008`, `0009`, `0010`, `0011`, `0012`, `0013`, `0014`, `0015`, and `0016` are now in `05-completed`.
