@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import shutil
 import subprocess
 import time
 from dataclasses import replace
@@ -26,6 +27,7 @@ class Supervisor:
     _CONTROL_ROLES = {"heartbeat-supervisor", "operator-pm"}
     _CONSOLE_WINDOW = "pm-control"
     _HEARTBEAT_SESSION_SUFFIX = "-heartbeat"
+    _CONTROL_HOMES_DIR = "control-homes"
     _RECOVERY_WINDOW = timedelta(minutes=30)
     _RECOVERY_LIMIT = 5
 
@@ -106,7 +108,7 @@ class Supervisor:
                         f"{existing} and {effective.name}"
                     )
                 worker_projects[effective.project] = effective.name
-            account = self.config.accounts[effective.account]
+            account = self._effective_account(effective, self.config.accounts[effective.account])
             if account.provider is not effective.provider:
                 raise ValueError(
                     f"Session {effective.name} uses provider {effective.provider.value} "
@@ -266,6 +268,15 @@ class Supervisor:
                 if account.provider is ProviderKind.CLAUDE:
                     _prime_claude_home(account.home)
                 self._refresh_account_runtime_metadata(account.name)
+        control_homes_root = self.config.project.base_dir / self._CONTROL_HOMES_DIR
+        control_homes_root.mkdir(parents=True, exist_ok=True)
+        for session in self.config.sessions.values():
+            if session.role not in self._CONTROL_ROLES:
+                continue
+            base_account = self.config.accounts.get(session.account)
+            if base_account is None or base_account.home is None:
+                continue
+            self._sync_control_home(base_account, session.name)
         self.store.prune_sessions(
             {session.name for session in self.config.sessions.values() if session.enabled}
         )
@@ -940,6 +951,8 @@ class Supervisor:
 
     def _probe_controller_account(self, account_name: str) -> None:
         account = self.config.accounts[account_name]
+        operator_session = self._effective_session(self.config.sessions["operator"], controller_account=account_name)
+        account = self._effective_account(operator_session, self.config.accounts[operator_session.account])
         output = self._run_probe(account)
         lowered = output.lower()
         if account.provider is ProviderKind.CLAUDE:
@@ -984,6 +997,39 @@ class Supervisor:
             executable="/bin/zsh",
         )
         return "\n".join(part for part in [result.stdout, result.stderr] if part)
+
+    def _control_home(self, session_name: str) -> Path:
+        return self.config.project.base_dir / self._CONTROL_HOMES_DIR / session_name
+
+    def _effective_account(self, session: SessionConfig, account: AccountConfig) -> AccountConfig:
+        if session.role not in self._CONTROL_ROLES or account.home is None:
+            return account
+        control_home = self._sync_control_home(account, session.name)
+        return replace(account, home=control_home)
+
+    def _sync_control_home(self, account: AccountConfig, session_name: str) -> Path:
+        if account.home is None:
+            raise RuntimeError(f"Account {account.name} has no home configured")
+        source_home = account.home
+        target_home = self._control_home(session_name)
+        target_home.mkdir(parents=True, exist_ok=True)
+
+        if account.provider is ProviderKind.CLAUDE:
+            self._sync_file(source_home / ".claude.json", target_home / ".claude.json")
+            self._sync_file(source_home / ".claude" / ".credentials.json", target_home / ".claude" / ".credentials.json")
+            self._sync_file(source_home / ".claude" / "settings.json", target_home / ".claude" / "settings.json")
+            _prime_claude_home(target_home)
+        elif account.provider is ProviderKind.CODEX:
+            self._sync_file(source_home / ".codex" / "auth.json", target_home / ".codex" / "auth.json")
+            self._sync_file(source_home / ".codex" / "config.toml", target_home / ".codex" / "config.toml")
+
+        return target_home
+
+    def _sync_file(self, source: Path, target: Path) -> None:
+        if not source.exists():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
     def _stabilize_launch(self, launch: SessionLaunchSpec, target: str) -> None:
         if launch.session.provider is ProviderKind.CLAUDE:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -188,6 +189,77 @@ def repository_last_commit_at(repo_path: Path) -> datetime | None:
         return None
 
 
+def _git_config_value(repo_path: Path, key: str) -> str | None:
+    for command in (
+        ["git", "-C", str(repo_path), "config", "--get", key],
+        ["git", "config", "--global", "--get", key],
+    ):
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            value = result.stdout.strip()
+            if value:
+                return value
+    return None
+
+
+def repository_local_identity_candidates(repo_path: Path) -> list[str]:
+    values: list[str] = []
+    for key in ("user.email", "user.name"):
+        value = _git_config_value(repo_path, key)
+        if value:
+            values.append(value)
+    try:
+        full_name = pwd.getpwuid(os.getuid()).pw_gecos.split(",", 1)[0].strip()
+        if full_name:
+            values.append(full_name)
+    except KeyError:
+        pass
+    login = os.environ.get("USER") or os.environ.get("LOGNAME")
+    if login:
+        values.append(login)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = value.strip()
+        if not normalized:
+            continue
+        lowered = normalized.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(normalized)
+    return deduped
+
+
+def repository_last_local_commit_at(repo_path: Path) -> datetime | None:
+    latest: datetime | None = None
+    for identity in repository_local_identity_candidates(repo_path):
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "log", "-1", f"--author={identity}", "--format=%ct"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            continue
+        output = result.stdout.strip()
+        if not output:
+            continue
+        try:
+            commit_at = datetime.fromtimestamp(int(output), tz=UTC)
+        except ValueError:
+            continue
+        if latest is None or commit_at > latest:
+            latest = commit_at
+    return latest
+
+
 def discover_recent_git_repositories(
     scan_root: Path,
     *,
@@ -198,7 +270,7 @@ def discover_recent_git_repositories(
     candidates = discover_git_repositories(scan_root, known_paths=known_paths)
     found: list[Path] = []
     for repo_path in candidates:
-        last_commit = repository_last_commit_at(repo_path)
+        last_commit = repository_last_local_commit_at(repo_path)
         if last_commit is None or last_commit < cutoff:
             continue
         found.append(repo_path)
@@ -267,7 +339,7 @@ def scan_projects(
     config = load_config(config_path)
     root = normalize_project_path(scan_root or DEFAULT_SCAN_ROOT)
     known_paths = {normalize_project_path(project.path) for project in config.projects.values()}
-    discovered = discover_git_repositories(root, known_paths=known_paths)
+    discovered = discover_recent_git_repositories(root, known_paths=known_paths, recent_days=14)
     added: list[KnownProject] = []
 
     for repo_path in discovered:

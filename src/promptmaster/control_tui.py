@@ -659,8 +659,6 @@ class PromptMasterApp(App[None]):
 
         project_session_map = self._project_session_map(launches)
         for project_key, project in config.projects.items():
-            if project_key == "promptmaster":
-                continue
             session_name = project_session_map.get(project_key)
             label = project.name or project.key
             state = self._cockpit_state_for_session(session_name, launches, windows, alerts) if session_name else "idle"
@@ -673,7 +671,7 @@ class PromptMasterApp(App[None]):
     def _project_session_map(self, launches) -> dict[str, str]:
         project_session_map: dict[str, str] = {}
         for launch in launches:
-            if launch.session.project == "promptmaster":
+            if launch.session.role in {"operator-pm", "heartbeat-supervisor"}:
                 continue
             if launch.session.role == "worker":
                 project_session_map.setdefault(launch.session.project, launch.session.name)
@@ -1171,7 +1169,12 @@ class PromptMasterApp(App[None]):
             session_name = project_session_map.get(project_key)
             if session_name:
                 return self._session_detail(supervisor, session_name)
-            return self._project_detail(config, project_key)
+            detail = self._project_detail(config, project_key)
+            return (
+                f"{detail}\n\n"
+                "No active session is running for this project.\n"
+                "Use N to kick off a worker for the selected project."
+            )
         return "Select a project to inspect it."
 
     def _session_detail(self, supervisor: Supervisor, session_name: str | None) -> str:
@@ -1605,7 +1608,13 @@ class PromptMasterApp(App[None]):
 
     def action_new_worker(self) -> None:
         active = self._active_tab()
-        if active == "projects-tab":
+        if active == "dashboard-tab":
+            selected = self._selected_row_key_from_snapshot(self.cockpit_table)
+            if selected and selected.startswith("project:"):
+                project_key = selected.split(":", 1)[1]
+            else:
+                project_key = None
+        elif active == "projects-tab":
             project_key = self._selected_value(self.projects_table)
         elif active == "sessions-tab":
             project_key = self._selected_value(self.sessions_table, 2)

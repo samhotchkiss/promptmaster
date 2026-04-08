@@ -45,7 +45,7 @@ def test_build_onboarded_config_uses_controller_for_promptmaster_sessions(tmp_pa
     assert config.sessions["heartbeat"].provider is ProviderKind.CLAUDE
     assert config.sessions["heartbeat"].project == "promptmaster"
     assert "true interactive CLI session" in config.sessions["operator"].prompt
-    assert "kick off and oversee a work session" in config.sessions["operator"].prompt
+    assert "kick off, resume, and oversee a work session" in config.sessions["operator"].prompt
     assert "supervision, not implementation" in config.sessions["heartbeat"].prompt
     assert config.projects["wire"].name == "Wire"
 

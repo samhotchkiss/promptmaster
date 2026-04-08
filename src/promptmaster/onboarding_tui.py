@@ -534,8 +534,8 @@ class OnboardingApp(App[Path | None]):
         self.eyebrow_widget.update("Setup Step 3")
         self.title_widget.update("Add active projects")
         self.intro_widget.update(
-            "Prompt Master looked through your home folder for git repos with commits in the last 14 days. These are "
-            "the repos most likely to matter right now."
+            "Prompt Master looked through your home folder for git repos where your local git identity made a commit "
+            "in the last 14 days. These are the repos most likely to matter right now."
         )
         stage = Vertical(classes="stage")
         self.step_host.mount(stage)

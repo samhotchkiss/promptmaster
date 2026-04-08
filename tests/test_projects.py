@@ -51,11 +51,20 @@ def test_discover_recent_git_repositories_filters_by_recent_commit(monkeypatch, 
             return recent_cutoff - timedelta(days=30)
         return None
 
-    monkeypatch.setattr("promptmaster.projects.repository_last_commit_at", fake_last_commit)
+    monkeypatch.setattr("promptmaster.projects.repository_last_local_commit_at", fake_last_commit)
 
     found = discover_recent_git_repositories(tmp_path, recent_days=14)
 
     assert found == [recent_repo.resolve()]
+
+
+def test_discover_recent_git_repositories_skips_repos_without_local_commits(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "dev" / "foreign"
+    (repo / ".git").mkdir(parents=True)
+
+    monkeypatch.setattr("promptmaster.projects.repository_last_local_commit_at", lambda _path: None)
+
+    assert discover_recent_git_repositories(tmp_path, recent_days=14) == []
 
 
 def test_make_project_key_adds_suffix_for_duplicates() -> None:

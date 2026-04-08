@@ -212,6 +212,31 @@ def test_control_session_args_follow_override_provider(tmp_path: Path) -> None:
         assert launch.session.args == ["--dangerously-bypass-approvals-and-sandbox"]
 
 
+def test_control_sessions_use_dedicated_control_homes(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    source_home = config.accounts["claude_controller"].home
+    assert source_home is not None
+    (source_home / ".claude").mkdir(parents=True, exist_ok=True)
+    (source_home / ".claude" / ".credentials.json").write_text('{"token":"base"}\n')
+    (source_home / ".claude" / "settings.json").write_text('{"theme":"dark"}\n')
+    (source_home / ".claude.json").write_text('{"hasCompletedOnboarding": true}\n')
+
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+
+    launches = {launch.session.name: launch for launch in supervisor.plan_launches()}
+    heartbeat_home = launches["heartbeat"].account.home
+    operator_home = launches["operator"].account.home
+
+    assert heartbeat_home == tmp_path / ".promptmaster" / "control-homes" / "heartbeat"
+    assert operator_home == tmp_path / ".promptmaster" / "control-homes" / "operator"
+    assert heartbeat_home != operator_home
+    assert (heartbeat_home / ".claude" / ".credentials.json").exists()
+    assert (operator_home / ".claude" / ".credentials.json").exists()
+    assert launches["heartbeat"].resume_marker == heartbeat_home / ".promptmaster" / "session-markers" / "heartbeat.resume"
+    assert launches["operator"].resume_marker == operator_home / ".promptmaster" / "session-markers" / "operator.resume"
+
+
 def test_open_permissions_default_can_disable_launch_args(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.promptmaster.open_permissions_by_default = False
