@@ -8,3 +8,5 @@
 - Completed issue `0007` by adding the inbox/thread model spec and moving the issue record to `05-completed`.
 - Drafted the skills and MCP integration proposal for issue 0005 and moved it to review.
 - Moved issue `0006` into `02-in-progress` while iterating on the cockpit UI and live self-hosting flow.
+- Added a first-pass extensibility/platform architecture in `docs/extensibility-architecture.md` and moved issue `0008` into review.
+- Added ready implementation issues for plugin host, service API/frontend transport, pluggable memory, pluggable task backend, and provider plugin SDK work.
