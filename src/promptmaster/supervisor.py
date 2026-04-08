@@ -186,7 +186,7 @@ class Supervisor:
                     if self.tmux.has_session(tmux_session):
                         self.tmux.kill_session(tmux_session)
 
-        raise RuntimeError("Prompt Master could not launch any controller account: " + "; ".join(failures))
+        raise RuntimeError("PollyPM could not launch any controller account: " + "; ".join(failures))
 
     def _bootstrap_launches(self, session_name: str, launches: list[SessionLaunchSpec]) -> None:
         grouped: dict[str, list[SessionLaunchSpec]] = {}
@@ -195,7 +195,7 @@ class Supervisor:
 
         main_launches = grouped.get(session_name, [])
         if not main_launches:
-            raise RuntimeError("No main-session launches found for Prompt Master bootstrap")
+            raise RuntimeError("No main-session launches found for PollyPM bootstrap")
 
         first = main_launches[0]
         self.tmux.create_session(session_name, first.window_name, first.command)

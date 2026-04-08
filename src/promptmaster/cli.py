@@ -79,7 +79,7 @@ def _first_run_setup_and_launch(config_path: Path) -> None:
 @app.callback()
 def main(
     ctx: typer.Context,
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     if ctx.invoked_subcommand is None:
         if not config_path.exists():
@@ -134,7 +134,7 @@ def doctor() -> None:
 
 @app.command()
 def accounts(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     for account in list_account_statuses(config_path):
         typer.echo(
@@ -157,7 +157,7 @@ def accounts(
 
 @app.command("account-doctor")
 def account_doctor(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     config = load_config(config_path)
     statuses = list_account_statuses(config_path)
@@ -181,7 +181,7 @@ def account_doctor(
 @app.command("refresh-usage")
 def refresh_usage(
     account: str = typer.Argument(..., help="Account key or email."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     status = probe_account_usage(config_path, account)
     typer.echo(
@@ -193,7 +193,7 @@ def refresh_usage(
 @app.command("tokens-sync")
 def tokens_sync(
     account: str | None = typer.Option(None, "--account", help="Optional account key or email to limit scanning."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     service = PromptMasterService(config_path)
     count = service.sync_token_ledger(account=account)
@@ -203,7 +203,7 @@ def tokens_sync(
 @app.command("tokens")
 def tokens(
     limit: int = typer.Option(10, "--limit", min=1, max=100, help="Maximum rows to show."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     service = PromptMasterService(config_path)
     rows = service.recent_token_usage(limit=limit)
@@ -218,21 +218,21 @@ def tokens(
 
 @app.command()
 def accounts_ui(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     AccountsApp(config_path).run()
 
 
 @app.command()
 def ui(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     PromptMasterApp(config_path).run()
 
 
 @app.command()
 def projects(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     config = load_config(config_path)
     typer.echo(f"Workspace root: {config.project.workspace_root}")
@@ -245,7 +245,7 @@ def projects(
 
 @app.command()
 def scan_projects(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     scan_root: Path = typer.Option(Path.home(), "--scan-root", help="Directory to scan for git repos."),
 ) -> None:
     added = scan_projects_registry(config_path, scan_root=scan_root, interactive=True)
@@ -261,7 +261,7 @@ def scan_projects(
 def add_project(
     repo_path: Path = typer.Argument(..., help="Path to the project folder."),
     name: str | None = typer.Option(None, "--name", help="Optional display name."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     project = register_project(config_path, repo_path, name=name)
     typer.echo(f"Registered project {project.name or project.key} at {project.path}")
@@ -270,7 +270,7 @@ def add_project(
 @app.command("init-tracker")
 def init_tracker(
     project: str = typer.Argument(..., help="Project key."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     tracked = enable_tracked_project(config_path, project)
     typer.echo(f"Enabled tracked-project mode for {tracked.name or tracked.key}")
@@ -281,7 +281,7 @@ def notify(
     subject: str = typer.Argument(..., help="Short message subject."),
     body: str = typer.Argument(..., help="Message body."),
     sender: str = typer.Option("pa", "--sender", help="Message sender."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     config = load_config(config_path)
     path = create_message(config.project.root_dir, sender=sender, subject=subject, body=body)
@@ -291,7 +291,7 @@ def notify(
 @app.command("mail")
 def mail(
     close: str | None = typer.Option(None, "--close", help="Close a specific open message by filename."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     config = load_config(config_path)
     if close:
@@ -309,7 +309,7 @@ def mail(
 @app.command("worktrees")
 def worktrees(
     project: str | None = typer.Option(None, "--project", help="Optional project key filter."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     items = list_project_worktrees(config_path, project)
     if not items:
@@ -325,7 +325,7 @@ def worktrees(
 @app.command()
 def add_account(
     provider: str = typer.Argument(..., help="Provider to add: codex or claude."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     provider_kind = ProviderKind(provider.lower())
     key, email = add_account_via_login(config_path, provider_kind)
@@ -335,7 +335,7 @@ def add_account(
 @app.command()
 def relogin(
     account: str = typer.Argument(..., help="Account key or email."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     key, email = relogin_account(config_path, account)
     typer.echo(f"Re-authenticated {email} ({key})")
@@ -345,7 +345,7 @@ def relogin(
 def remove_account(
     account: str = typer.Argument(..., help="Account key or email."),
     delete_home: bool = typer.Option(False, "--delete-home", help="Also delete the isolated account home."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     key, email = remove_account_entry(config_path, account, delete_home=delete_home)
     typer.echo(f"Removed {email} ({key})")
@@ -353,7 +353,7 @@ def remove_account(
 
 @app.command()
 def up(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     if not config_path.exists():
         typer.echo(f"Config not found at {config_path}. Starting onboarding.")
@@ -395,14 +395,14 @@ def up(
 
 @app.command()
 def launch(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     up(config_path=config_path)
 
 
 @app.command()
 def status(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     supervisor = _load_supervisor(config_path)
     _require_promptmaster_session(supervisor)
@@ -495,7 +495,7 @@ def status(
 
 @app.command()
 def plan(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     supervisor = _load_supervisor(config_path)
     _require_promptmaster_session(supervisor)
@@ -509,7 +509,7 @@ def plan(
 
 @app.command()
 def heartbeat(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     snapshot_lines: int = typer.Option(200, "--snapshot-lines", min=20, help="Lines to capture per pane."),
 ) -> None:
     supervisor = _load_supervisor(config_path)
@@ -522,7 +522,7 @@ def heartbeat(
 
 @app.command()
 def alerts(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     supervisor = _load_supervisor(config_path)
     _require_promptmaster_session(supervisor)
@@ -536,7 +536,7 @@ def alerts(
 
 @app.command()
 def events(
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     limit: int = typer.Option(20, "--limit", min=1, max=200, help="Maximum number of events to show."),
 ) -> None:
     supervisor = _load_supervisor(config_path)
@@ -554,7 +554,7 @@ def claim(
     session_name: str = typer.Argument(..., help="Session name from config."),
     owner: str = typer.Option("human", "--owner", help="Lease owner label."),
     note: str = typer.Option("", "--note", help="Optional note for the lease."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     supervisor = _load_supervisor(config_path)
     _require_promptmaster_session(supervisor)
@@ -565,7 +565,7 @@ def claim(
 @app.command()
 def release(
     session_name: str = typer.Argument(..., help="Session name from config."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     supervisor = _load_supervisor(config_path)
     _require_promptmaster_session(supervisor)
@@ -580,7 +580,7 @@ def send(
     owner: str = typer.Option("promptmaster", "--owner", help="Sender label for lease checks."),
     force: bool = typer.Option(False, "--force", help="Bypass a conflicting lease."),
     no_enter: bool = typer.Option(False, "--no-enter", help="Do not send Enter after the text."),
-    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     supervisor = _load_supervisor(config_path)
     _require_promptmaster_session(supervisor)

@@ -255,6 +255,8 @@ class RepoScanModal(ModalScreen[tuple[str, list[Path]]]):
 
 
 class PromptMasterApp(App[None]):
+    TITLE = "PollyPM"
+    SUB_TITLE = "Control Room"
     NAV_TABS = [
         ("dashboard-tab", "Dashboard"),
         ("accounts-tab", "Accounts"),
@@ -439,7 +441,7 @@ class PromptMasterApp(App[None]):
         with TabbedContent(id="tabs"):
             with TabPane("Dashboard", id="dashboard-tab"):
                 with Horizontal(classes="action-bar"):
-                    yield Button("Open", id="dashboard-open")
+                    yield Button("Go", id="dashboard-open")
                     yield Button("Heartbeat", id="dashboard-heartbeat")
                     yield Button("Permissions", id="dashboard-permissions")
                 with Horizontal(id="cockpit-layout"):
@@ -511,6 +513,7 @@ class PromptMasterApp(App[None]):
     def on_mount(self) -> None:
         self._init_tables()
         self._refresh_view(force=True)
+        self.cockpit_table.focus()
         self.set_interval(self.UI_REFRESH_INTERVAL_SECONDS, self._tick_refresh)
         self.set_interval(0.6, self._tick_spinner)
 
@@ -645,7 +648,7 @@ class PromptMasterApp(App[None]):
         rows.append((("Polly", self._cockpit_state_for_session("operator", launches, windows, alerts)), "polly"))
         inbox_count = len(list_open_messages(config.project.root_dir))
         rows.append(((f"Inbox ({inbox_count})", "mail" if inbox_count else "clear"), "inbox"))
-        rows.append((("", ""), "spacer:top"))
+        rows.append((("Projects", "browse"), "section:projects"))
 
         project_session_map = self._project_session_map(launches)
         for project_key, project in config.projects.items():
@@ -654,7 +657,7 @@ class PromptMasterApp(App[None]):
             state = self._cockpit_state_for_session(session_name, launches, windows, alerts) if session_name else "idle"
             rows.append(((label, state), f"project:{project_key}"))
 
-        rows.append((("", ""), "spacer:bottom"))
+        rows.append((("System", "tools"), "section:system"))
         rows.append((("Settings", "config"), "settings"))
         self._replace_table_rows(self.cockpit_table, rows)
 
@@ -743,7 +746,7 @@ class PromptMasterApp(App[None]):
     def _update_context_bar(self) -> None:
         active = self._active_tab()
         hint_map = {
-            "dashboard-tab": "Cockpit · Select Polly, Inbox, a project, or Settings · O opens a live session · 1-6 switch views",
+            "dashboard-tab": "Cockpit · Enter or click to act on Polly, Inbox, a project, or Settings · O follows the selected row · 1-6 switch views",
             "accounts-tab": "Accounts · C add Codex · L add Claude · Y usage · R relogin · J operator · M controller · V failover",
             "projects-tab": "Projects · S scan repos · A add project · T tracker · W workspace · N worker",
             "sessions-tab": "Sessions · O open window · I send input · P claim lease · R release · K stop · X remove",
@@ -1145,6 +1148,10 @@ class PromptMasterApp(App[None]):
                 ]
             )
             return "\n".join(lines)
+        if key == "section:projects":
+            return "Projects\n\nPick a project to open its live lane or start a new worker if it is idle."
+        if key == "section:system":
+            return "System\n\nSettings holds account controls, permissions, failover order, and other PollyPM runtime knobs."
         if key == "settings":
             recent_usage = supervisor.store.recent_token_usage(limit=5)
             lines = [
@@ -1261,7 +1268,9 @@ class PromptMasterApp(App[None]):
             widget.update(result.content)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        if event.data_table.id == "sessions-table":
+        if event.data_table.id == "cockpit-nav":
+            self.action_open_selected_session()
+        elif event.data_table.id == "sessions-table":
             self.action_open_selected_session()
         elif event.data_table.id == "alerts-table":
             self.action_focus_alert_session()
@@ -1623,7 +1632,9 @@ class PromptMasterApp(App[None]):
         if project_key is None:
             self._notify("Select a project first.")
             return
+        self._prompt_new_worker_for_project(project_key)
 
+    def _prompt_new_worker_for_project(self, project_key: str) -> None:
         self.push_screen(
             InputModal(
                 InputRequest(
@@ -1652,12 +1663,28 @@ class PromptMasterApp(App[None]):
             selected = self._selected_row_key_from_snapshot(self.cockpit_table)
             if selected == "polly":
                 session_name = "operator"
+            elif selected == "inbox":
+                self._notify("Inbox stays in the right pane. Use Polly to work through open messages.")
+                return
+            elif selected == "section:projects":
+                self._notify("Pick a project row below to open or start work.")
+                return
+            elif selected == "section:system":
+                self._notify("Open Settings below for runtime controls.")
+                return
+            elif selected == "settings":
+                self.action_show_accounts()
+                self._notify("Jumped to account and runtime controls.")
+                return
             elif selected and selected.startswith("project:"):
                 supervisor, _config = self._load_context()
                 session_name = None
                 if supervisor is not None:
                     project_key = selected.split(":", 1)[1]
                     session_name = self._project_session_map(supervisor.plan_launches()).get(project_key)
+                    if session_name is None:
+                        self._prompt_new_worker_for_project(project_key)
+                        return
             else:
                 session_name = None
         else:

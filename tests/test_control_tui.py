@@ -39,6 +39,7 @@ def test_control_tui_renders_cockpit_shell(tmp_path: Path) -> None:
         app = PromptMasterApp(tmp_path / "missing.toml")
 
         async with app.run_test():
+            assert app.title == "PollyPM"
             assert app.cockpit_table.id == "cockpit-nav"
             assert app.dashboard.id == "cockpit-body"
             assert app._active_tab() == "dashboard-tab"
@@ -54,9 +55,9 @@ def test_cockpit_table_contains_polly_inbox_and_settings(tmp_path: Path) -> None
             rows = [
                 (("Polly", "ready"), "polly"),
                 (("Inbox (0)", "clear"), "inbox"),
-                (("", ""), "spacer:top"),
+                (("Projects", "browse"), "section:projects"),
                 (("Demo Project", "idle"), "project:demo"),
-                (("", ""), "spacer:bottom"),
+                (("System", "tools"), "section:system"),
                 (("Settings", "config"), "settings"),
             ]
             app._replace_table_rows(app.cockpit_table, rows)
@@ -65,6 +66,32 @@ def test_cockpit_table_contains_polly_inbox_and_settings(tmp_path: Path) -> None
             assert tuple(app.cockpit_table.get_row_at(1)) == ("Inbox (0)", "clear")
             assert tuple(app.cockpit_table.get_row_at(3)) == ("Demo Project", "idle")
             assert tuple(app.cockpit_table.get_row_at(5)) == ("Settings", "config")
+
+    asyncio.run(run())
+
+
+def test_dashboard_settings_selection_jumps_to_accounts(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = PromptMasterApp(tmp_path / "missing.toml")
+
+        async with app.run_test():
+            app._replace_table_rows(
+                app.cockpit_table,
+                [
+                    (("Polly", "ready"), "polly"),
+                    (("Inbox (0)", "clear"), "inbox"),
+                    (("Projects", "browse"), "section:projects"),
+                    (("Demo Project", "idle"), "project:demo"),
+                    (("System", "tools"), "section:system"),
+                    (("Settings", "config"), "settings"),
+                ],
+            )
+            app.cockpit_table.move_cursor(row=5, animate=False, scroll=False)
+
+            app.action_open_selected_session()
+
+            assert app._active_tab() == "accounts-tab"
+            assert app.notice_text == "Jumped to account and runtime controls."
 
     asyncio.run(run())
 
