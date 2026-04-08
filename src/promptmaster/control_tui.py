@@ -26,7 +26,6 @@ from textual.widgets import Button, DataTable, Header, Input, Static, TabbedCont
 from promptmaster.accounts import (
     AccountStatus,
     add_account_via_login,
-    list_account_statuses,
     relogin_account,
     remove_account,
     set_open_permissions_default,
@@ -44,11 +43,10 @@ from promptmaster.projects import (
     remove_project,
     set_workspace_root,
 )
+from promptmaster.service_api import PromptMasterService
 from promptmaster.supervisor import Supervisor
 from promptmaster.worktrees import list_worktrees
 from promptmaster.workers import (
-    create_worker_session,
-    launch_worker_session,
     remove_worker_session,
     stop_worker_session,
 )
@@ -414,6 +412,7 @@ class PromptMasterApp(App[None]):
     def __init__(self, config_path: Path = DEFAULT_CONFIG_PATH) -> None:
         super().__init__()
         self.config_path = config_path
+        self.service = PromptMasterService(config_path)
         self.pending_usage_refreshes: dict[str, datetime] = {}
         self.account_statuses: list[AccountStatus] = []
         self.account_statuses_updated_at: datetime | None = None
@@ -605,7 +604,7 @@ class PromptMasterApp(App[None]):
             and now - self.account_statuses_updated_at < self.STATUS_REFRESH_INTERVAL
         ):
             return
-        self.account_statuses = list_account_statuses(self.config_path)
+        self.account_statuses = self.service.list_account_statuses()
         self.account_statuses_updated_at = now
 
     def _refresh_usage_due_in_background(self) -> None:
@@ -1395,7 +1394,7 @@ class PromptMasterApp(App[None]):
             supervisor, _config = self._load_context()
             if supervisor is None:
                 raise RuntimeError("Prompt Master is not configured.")
-            supervisor.run_heartbeat()
+            self.service.run_heartbeat()
 
         self._run("Heartbeat", _heartbeat)
 
@@ -1642,16 +1641,10 @@ class PromptMasterApp(App[None]):
     def _create_and_maybe_launch_worker(self, project_key: str, prompt: str) -> None:
         session = self._run(
             "Create worker session",
-            lambda: create_worker_session(self.config_path, project_key=project_key, prompt=prompt),
+            lambda: self.service.create_and_launch_worker(project_key=project_key, prompt=prompt),
         )
         if session is None:
             return
-
-        supervisor, _config = self._load_context()
-        if supervisor is None:
-            return
-        if supervisor.tmux.has_session(supervisor.config.project.tmux_session):
-            self._run("Launch worker session", lambda: launch_worker_session(self.config_path, session.name))
 
     def action_open_selected_session(self) -> None:
         active = self._active_tab()
@@ -1673,7 +1666,7 @@ class PromptMasterApp(App[None]):
         if session_name is None:
             self._notify("No session selected.")
             return
-        self._run("Focus session window", lambda: Supervisor(load_config(self.config_path)).focus_session(session_name))
+        self._run("Focus session window", lambda: self.service.focus_session(session_name))
 
     def action_stop_selected_session(self) -> None:
         session_name = self._selected_value(self.sessions_table)
@@ -1720,7 +1713,7 @@ class PromptMasterApp(App[None]):
             ),
             lambda value: self._run(
                 "Send input",
-                lambda: Supervisor(load_config(self.config_path)).send_input(session_name, value, owner="human"),
+                lambda: self.service.send_input(session_name, value, owner="human"),
             )
             if value else None,
         )
@@ -1752,4 +1745,4 @@ class PromptMasterApp(App[None]):
         if session_name is None:
             self._notify("No alert selected.")
             return
-        self._run("Focus alert session", lambda: Supervisor(load_config(self.config_path)).focus_session(session_name))
+        self._run("Focus alert session", lambda: self.service.focus_session(session_name))
