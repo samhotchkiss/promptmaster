@@ -923,8 +923,9 @@ class StateStore:
         model_name: str,
         project_key: str,
         cumulative_tokens: int,
+        observed_at: str | None = None,
     ) -> int:
-        now = self._now()
+        now = observed_at or self._now()
         previous = self.get_token_sample(session_name)
         delta = 0
         if previous is not None:
@@ -972,6 +973,69 @@ class StateStore:
             )
         self.conn.commit()
         return delta
+
+    def upsert_token_sample(
+        self,
+        *,
+        session_name: str,
+        account_name: str,
+        provider: str,
+        model_name: str,
+        project_key: str,
+        cumulative_tokens: int,
+        observed_at: str,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO token_samples (
+                session_name, account_name, provider, model_name, project_key, cumulative_tokens, observed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_name) DO UPDATE SET
+                account_name = excluded.account_name,
+                provider = excluded.provider,
+                model_name = excluded.model_name,
+                project_key = excluded.project_key,
+                cumulative_tokens = excluded.cumulative_tokens,
+                observed_at = excluded.observed_at
+            """,
+            (session_name, account_name, provider, model_name, project_key, cumulative_tokens, observed_at),
+        )
+        self.conn.commit()
+
+    def replace_token_usage_hourly(
+        self,
+        rows: list[TokenUsageHourlyRecord],
+        *,
+        account_names: list[str] | None = None,
+    ) -> None:
+        if account_names:
+            placeholders = ", ".join("?" for _ in account_names)
+            self.conn.execute(
+                f"DELETE FROM token_usage_hourly WHERE account_name IN ({placeholders})",
+                tuple(account_names),
+            )
+        else:
+            self.conn.execute("DELETE FROM token_usage_hourly")
+        for row in rows:
+            self.conn.execute(
+                """
+                INSERT INTO token_usage_hourly (
+                    hour_bucket, account_name, provider, model_name, project_key, tokens_used, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.hour_bucket,
+                    row.account_name,
+                    row.provider,
+                    row.model_name,
+                    row.project_key,
+                    row.tokens_used,
+                    row.updated_at,
+                ),
+            )
+        self.conn.commit()
 
     def recent_token_usage(self, limit: int = 24) -> list[TokenUsageHourlyRecord]:
         rows = self.conn.execute(

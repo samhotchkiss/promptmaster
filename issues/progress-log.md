@@ -21,4 +21,5 @@
 - Implemented issue `0014` by adding a pluggable scheduler seam with an inline backend, due-job execution, recurring jobs, and service/supervisor delegation.
 - Implemented issue `0015` by delegating heartbeat execution through a pluggable heartbeat backend and shipping the built-in local monitor backend.
 - Implemented issue `0016` by adding built-in agent profiles for Polly, heartbeat, and workers, then routing control-session prompts through the profile seam.
+- Implemented issue `0003` by switching token accounting over to JSONL transcript ingestion for Claude/Codex, adding hourly token rollups, and moving the issue to review.
 - Began swapping user-facing naming from Prompt Master toward PollyPM and Polly in onboarding and control-session prompts.

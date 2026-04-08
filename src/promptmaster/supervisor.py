@@ -22,6 +22,7 @@ from promptmaster.providers.base import LaunchCommand
 from promptmaster.projects import ensure_project_scaffold
 from promptmaster.runtimes import get_runtime
 from promptmaster.schedulers import ScheduledJob, get_scheduler_backend
+from promptmaster.transcript_ledger import sync_token_ledger_for_config
 from promptmaster.storage.state import AlertRecord, LeaseRecord, StateStore
 from promptmaster.tmux.client import TmuxClient, TmuxWindow
 
@@ -328,6 +329,13 @@ class Supervisor:
         self.tmux.select_window(f"{tmux_session}:{self._CONSOLE_WINDOW}")
 
     def run_heartbeat(self, snapshot_lines: int = 200) -> list[AlertRecord]:
+        transcript_samples = sync_token_ledger_for_config(self.config)
+        if transcript_samples:
+            self.store.record_event(
+                "heartbeat",
+                "token_ledger",
+                f"Synced {len(transcript_samples)} transcript token sample(s) before the heartbeat sweep",
+            )
         backend = get_heartbeat_backend(
             self.config.promptmaster.heartbeat_backend,
             root_dir=self.config.project.root_dir,

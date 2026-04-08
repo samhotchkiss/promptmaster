@@ -26,6 +26,7 @@ from promptmaster.messaging import close_message, create_message, list_open_mess
 from promptmaster.models import ProviderKind
 from promptmaster.onboarding import run_onboarding
 from promptmaster.control_tui import PromptMasterApp
+from promptmaster.service_api import PromptMasterService
 from promptmaster.projects import (
     enable_tracked_project,
     register_project,
@@ -187,6 +188,32 @@ def refresh_usage(
         f"{status.key}: plan={status.plan} health={status.health} "
         f"usage={status.usage_summary}"
     )
+
+
+@app.command("tokens-sync")
+def tokens_sync(
+    account: str | None = typer.Option(None, "--account", help="Optional account key or email to limit scanning."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+) -> None:
+    service = PromptMasterService(config_path)
+    count = service.sync_token_ledger(account=account)
+    typer.echo(f"Synced {count} transcript token sample(s).")
+
+
+@app.command("tokens")
+def tokens(
+    limit: int = typer.Option(10, "--limit", min=1, max=100, help="Maximum rows to show."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Prompt Master config path."),
+) -> None:
+    service = PromptMasterService(config_path)
+    rows = service.recent_token_usage(limit=limit)
+    if not rows:
+        typer.echo("No token usage recorded yet.")
+        return
+    for row in rows:
+        typer.echo(
+            f"- {row.hour_bucket} {row.project_key} {row.account_name} {row.provider}/{row.model_name}: {row.tokens_used} tokens"
+        )
 
 
 @app.command()

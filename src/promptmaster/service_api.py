@@ -24,6 +24,8 @@ from promptmaster.projects import (
 )
 from promptmaster.schedulers.base import ScheduledJob
 from promptmaster.supervisor import Supervisor
+from promptmaster.transcript_ledger import recent_token_usage as list_recent_token_usage
+from promptmaster.transcript_ledger import sync_token_ledger
 from promptmaster.workers import create_worker_session, launch_worker_session, remove_worker_session, stop_worker_session
 
 
@@ -132,6 +134,12 @@ class PromptMasterService:
 
     def run_scheduled_jobs(self) -> list[ScheduledJob]:
         return self.load_supervisor().run_scheduled_jobs()
+
+    def sync_token_ledger(self, *, account: str | None = None) -> int:
+        return len(sync_token_ledger(self.config_path, account=account))
+
+    def recent_token_usage(self, *, limit: int = 24):
+        return list_recent_token_usage(self.config_path, limit=limit)
 
     def register_project(self, path: Path) -> tuple[str, str]:
         return register_project(self.config_path, path)
