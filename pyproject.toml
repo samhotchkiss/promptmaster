@@ -1,0 +1,33 @@
+[project]
+name = "promptmaster"
+version = "0.1.0"
+description = "Tmux-first orchestration for interactive CLI coding agents."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "textual>=6.1.0",
+  "typer>=0.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.0",
+]
+
+[project.scripts]
+pm = "promptmaster.cli:app"
+promptmaster = "promptmaster.cli:app"
+
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

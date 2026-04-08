@@ -1,0 +1,129 @@
+from pathlib import Path
+
+from promptmaster.models import AccountConfig, ProjectSettings, ProviderKind, RuntimeKind, SessionConfig
+from promptmaster.providers.claude import ClaudeAdapter
+from promptmaster.providers.codex import CodexAdapter
+from promptmaster.runtimes.docker import DockerRuntimeAdapter
+from promptmaster.runtimes.local import LocalRuntimeAdapter
+
+
+def test_local_runtime_wraps_home_and_command(tmp_path: Path) -> None:
+    session = SessionConfig(
+        name="worker",
+        role="worker",
+        provider=ProviderKind.CODEX,
+        account="codex_primary",
+        cwd=tmp_path,
+        project="demo-project",
+        prompt="hello",
+    )
+    account = AccountConfig(
+        name="codex_primary",
+        provider=ProviderKind.CODEX,
+        email="codex@example.com",
+        runtime=RuntimeKind.LOCAL,
+        home=tmp_path / "home",
+    )
+
+    command = CodexAdapter().build_launch_command(session, account)
+    wrapped = LocalRuntimeAdapter().wrap_command(
+        command,
+        account,
+        ProjectSettings(root_dir=tmp_path),
+    )
+
+    assert "export HOME=" not in wrapped
+    assert "export CODEX_HOME=" in wrapped
+    assert "codex --no-alt-screen hello" in wrapped
+
+
+def test_docker_runtime_mounts_workspace_and_home(tmp_path: Path) -> None:
+    project_root = tmp_path / "repo"
+    cwd = project_root / "subdir"
+    home = tmp_path / "home"
+    cwd.mkdir(parents=True)
+    home.mkdir(parents=True)
+
+    session = SessionConfig(
+        name="worker",
+        role="worker",
+        provider=ProviderKind.CODEX,
+        account="codex_primary",
+        cwd=cwd,
+        project="demo-project",
+        prompt="hello",
+    )
+    account = AccountConfig(
+        name="codex_primary",
+        provider=ProviderKind.CODEX,
+        email="codex@example.com",
+        runtime=RuntimeKind.DOCKER,
+        home=home,
+        docker_image="ghcr.io/example/promptmaster-agent:latest",
+    )
+    project = ProjectSettings(root_dir=project_root)
+
+    command = CodexAdapter().build_launch_command(session, account)
+    wrapped = DockerRuntimeAdapter().wrap_command(command, account, project)
+
+    assert "docker run" in wrapped
+    assert "ghcr.io/example/promptmaster-agent:latest" in wrapped
+    assert f"{project_root.resolve()}:/workspace" in wrapped
+    assert f"{home.resolve()}:/home/promptmaster" in wrapped
+    assert "CODEX_HOME=/home/promptmaster/.codex" in wrapped
+
+
+def test_claude_runtime_sets_provider_native_config_dir(tmp_path: Path) -> None:
+    session = SessionConfig(
+        name="operator",
+        role="operator-pm",
+        provider=ProviderKind.CLAUDE,
+        account="claude_primary",
+        cwd=tmp_path,
+        project="promptmaster",
+        prompt="watch the project",
+    )
+    account = AccountConfig(
+        name="claude_primary",
+        provider=ProviderKind.CLAUDE,
+        email="claude@example.com",
+        runtime=RuntimeKind.LOCAL,
+        home=tmp_path / "home",
+    )
+
+    command = ClaudeAdapter().build_launch_command(session, account)
+    wrapped = LocalRuntimeAdapter().wrap_command(
+        command,
+        account,
+        ProjectSettings(root_dir=tmp_path),
+    )
+
+    assert "export CLAUDE_CONFIG_DIR=" in wrapped
+    assert "export HOME=" not in wrapped
+    assert "claude --verbose 'watch the project'" in wrapped
+
+
+def test_control_sessions_wrap_with_resume_fallback(tmp_path: Path) -> None:
+    session = SessionConfig(
+        name="operator",
+        role="operator-pm",
+        provider=ProviderKind.CODEX,
+        account="codex_primary",
+        cwd=tmp_path,
+        project="promptmaster",
+        prompt="watch the project",
+    )
+    account = AccountConfig(
+        name="codex_primary",
+        provider=ProviderKind.CODEX,
+        email="codex@example.com",
+        runtime=RuntimeKind.LOCAL,
+        home=tmp_path / "home",
+    )
+
+    command = CodexAdapter().build_launch_command(session, account)
+    wrapped = LocalRuntimeAdapter().wrap_command(command, account, ProjectSettings(root_dir=tmp_path))
+
+    assert "codex resume --last --no-alt-screen" in wrapped
+    assert "session-markers/operator.resume" in wrapped
+    assert "exec codex --no-alt-screen 'watch the project'" in wrapped
