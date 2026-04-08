@@ -417,7 +417,7 @@ def status(
     typer.echo("Provider availability:")
     seen: set[str] = set()
     for launch in launches:
-        provider = get_provider(launch.session.provider)
+        provider = get_provider(launch.session.provider, root_dir=supervisor.config.project.root_dir)
         if provider.name in seen:
             continue
         seen.add(provider.name)

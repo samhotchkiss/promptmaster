@@ -274,9 +274,9 @@ def _build_probe_command(config, account: AccountConfig) -> str:
         cwd=config.project.root_dir,
         args=[],
     )
-    provider = get_provider(account.provider)
+    provider = get_provider(account.provider, root_dir=config.project.root_dir)
     launch = provider.build_launch_command(session, account)
-    runtime = get_runtime(account.runtime)
+    runtime = get_runtime(account.runtime, root_dir=config.project.root_dir)
     return runtime.wrap_command(launch, account, config.project)
 
 

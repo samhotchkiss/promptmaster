@@ -10,3 +10,4 @@
 - Moved issue `0006` into `02-in-progress` while iterating on the cockpit UI and live self-hosting flow.
 - Added a first-pass extensibility/platform architecture in `docs/extensibility-architecture.md` and moved issue `0008` into review.
 - Added ready implementation issues for plugin host, service API/frontend transport, pluggable memory, pluggable task backend, and provider plugin SDK work.
+- Implemented the first plugin host with manifest discovery, built-in/user/repo precedence, API version checks, provider/runtime resolution, and safe observer/filter execution.

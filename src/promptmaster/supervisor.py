@@ -114,9 +114,9 @@ class Supervisor:
                     f"Session {effective.name} uses provider {effective.provider.value} "
                     f"but account {account.name} is configured for {account.provider.value}"
                 )
-            provider = get_provider(effective.provider)
+            provider = get_provider(effective.provider, root_dir=self.config.project.root_dir)
             launch = provider.build_launch_command(effective, account)
-            runtime = get_runtime(account.runtime)
+            runtime = get_runtime(account.runtime, root_dir=self.config.project.root_dir)
             window_name = effective.window_name or effective.name
             log_path = self.config.project.logs_dir / f"{window_name}.log"
             launches.append(
@@ -985,7 +985,7 @@ class Supervisor:
         else:
             raise RuntimeError(f"Unsupported controller provider: {account.provider.value}")
 
-        runtime = get_runtime(account.runtime)
+        runtime = get_runtime(account.runtime, root_dir=self.config.project.root_dir)
         command = runtime.wrap_command(probe, account, self.config.project)
         result = subprocess.run(
             command,
