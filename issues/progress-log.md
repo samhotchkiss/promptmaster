@@ -27,3 +27,4 @@
 - Closed review on implemented platform seams and docs: `0003`, `0005`, `0008`, `0009`, `0010`, `0011`, `0012`, `0013`, `0014`, `0015`, and `0016` are now in `05-completed`.
 - Split adjacent polish work out of `0002` into fresh ready slices: `0017` for onboarding/project-discovery wording and `0018` for worker-lane kickoff/project launch polish.
 - Implemented `0018` by making worker kickoff prompts project-aware, seeding tracked projects from the next real issue, and validating the new-worker modal in the live tmux control room before moving it to review.
+- Implemented `0017` by tightening onboarding copy around recent local commits, preselected project suggestions, and the handoff into PollyPM, then validated the setup shell in tmux before moving it to review.

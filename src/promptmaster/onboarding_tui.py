@@ -125,6 +125,8 @@ class ExitModal(ModalScreen[None]):
 
 
 class OnboardingApp(App[Path | None]):
+    TITLE = "PollyPM"
+    SUB_TITLE = "Setup"
     SCAN_FRAMES = [
         "Scanning your home folder for recently active repositories   ",
         "Scanning your home folder for recently active repositories.  ",
@@ -368,9 +370,9 @@ class OnboardingApp(App[Path | None]):
 
     def _progress_panel(self) -> Panel:
         stages = [
-            ("accounts", "1. Connect accounts"),
-            ("controller", "2. Choose control account"),
-            ("projects", "3. Add recent projects"),
+            ("accounts", "1. Connect agent accounts"),
+            ("controller", "2. Choose Polly's control account"),
+            ("projects", "3. Review suggested projects"),
         ]
         lines = []
         for step_id, label in stages:
@@ -405,8 +407,8 @@ class OnboardingApp(App[Path | None]):
         self.eyebrow_widget.update("Setup Step 1")
         self.title_widget.update("Connect your first agent account")
         self.intro_widget.update(
-            "PollyPM will open a real Claude or Codex login window, detect the account automatically, "
-            "and save it as a reusable profile."
+            "PollyPM opens the real Claude or Codex login flow, waits for it to finish, and saves the result "
+            "as a reusable profile for day-to-day work, failover, and recovery."
         )
         stage = Vertical(classes="stage")
         self.step_host.mount(stage)
@@ -434,7 +436,7 @@ class OnboardingApp(App[Path | None]):
             return
 
         intro_section = Static(
-            "Connect one account to begin. After that, you can keep adding accounts now or later from the Accounts tab.",
+            "Connect one real account to begin. After that, you can keep adding more now or later from the Accounts tab.",
             classes="section",
         )
         stage.mount(intro_section)
@@ -442,7 +444,7 @@ class OnboardingApp(App[Path | None]):
         provider_section = Vertical(classes="section")
         stage.mount(provider_section)
         provider_section.mount(Static("Available Providers", classes="section-title"))
-        provider_section.mount(Static("Click a provider to open a real login window."))
+        provider_section.mount(Static("Click a provider to open its native login window in tmux."))
         provider_section.mount(provider_buttons)
         for status in installed:
             provider_buttons.mount(
@@ -476,8 +478,8 @@ class OnboardingApp(App[Path | None]):
         self.eyebrow_widget.update("Setup Step 2")
         self.title_widget.update("Choose the account that runs PollyPM")
         self.intro_widget.update(
-            "The control account runs the operator and heartbeat sessions. If it runs low, PollyPM can fail over "
-            "to another healthy connected account."
+            "This account runs Polly and heartbeat. If it becomes unavailable, PollyPM can fail over to another "
+            "healthy connected account automatically."
         )
         stage = Vertical(classes="stage")
         if not self.state.accounts:
@@ -505,8 +507,8 @@ class OnboardingApp(App[Path | None]):
         control_section.mount(Static("Control Account", classes="section-title"))
         control_section.mount(
             Static(
-                "Pick the account that should own PollyPM itself. This can be a workhorse account, but it will "
-                "be treated as the last resort for new worker assignment."
+                "Pick the account PollyPM should live on. It can still do real work, but Polly will treat it "
+                "as the last resort for brand-new worker assignment."
             )
         )
         control_section.mount(self.controller_radio)
@@ -534,7 +536,7 @@ class OnboardingApp(App[Path | None]):
         self.eyebrow_widget.update("Setup Step 3")
         self.title_widget.update("Add active projects")
         self.intro_widget.update(
-            "PollyPM looked through your home folder for git repos where your local git identity made a commit "
+            "PollyPM looked through your home folder for git repos where your local git identity authored a commit "
             "in the last 14 days. These are the repos most likely to matter right now."
         )
         stage = Vertical(classes="stage")
@@ -584,7 +586,10 @@ class OnboardingApp(App[Path | None]):
             stage.mount(project_section)
             project_section.mount(Static("Recently Active Repositories", classes="section-title"))
             project_section.mount(
-                Static("Choose the repos you want PollyPM to start tracking now. You can add more later.")
+                Static(
+                    "Everything below is preselected as a suggestion. Deselect anything you do not want PollyPM "
+                    "to track yet. You can always add more later."
+                )
             )
             project_section.mount(self.project_selection)
 
@@ -598,7 +603,7 @@ class OnboardingApp(App[Path | None]):
         self.eyebrow_widget.update("Launch")
         self.title_widget.update("PollyPM is ready")
         self.intro_widget.update(
-            "You are done with setup. Here is the shape of the control room you are about to land in."
+            "Setup is complete. Launch PollyPM and you will land in the control room with Polly and heartbeat already online."
         )
         stage = Vertical(classes="stage")
         self.step_host.mount(stage)
@@ -611,17 +616,17 @@ class OnboardingApp(App[Path | None]):
         table.add_column(style="bold #c7d0d6", width=10)
         table.add_column(style="#f5f7fa")
         table.add_row("Heartbeat", "Runs in its own tmux session and stays out of your main interface.")
-        table.add_row("Operator", "The Polly session for guidance, interventions, and direction changes.")
+        table.add_row("Polly", "Your operator-facing PM session for strategy, direction changes, and starting work.")
         table.add_row("Control", "Your dashboard for accounts, projects, sessions, alerts, and events.")
         table.add_row("Projects", "Each project keeps PollyPM state in .promptmaster/ inside that folder.")
         table.add_row("Accounts", "You can add or reauth accounts later from the Accounts tab.")
-        table.add_row("Keys", "1-6 switch tabs. O opens a worker window. P claims a pane. I sends input.")
+        table.add_row("Keys", "1-6 switch tabs. O follows the selected rail row. P claims a pane. I sends input.")
         section.mount(Static(Panel(table, border_style="#4a525a")))
 
         actions = Horizontal(classes="button-row")
         stage.mount(actions)
         actions.mount(Button("Back", id="tour-back"))
-        self.launch_button = Button("Launch PollyPM", id="tour-launch", variant="success")
+        self.launch_button = Button("Open PollyPM", id="tour-launch", variant="success")
         actions.mount(self.launch_button)
         self.call_after_refresh(self._focus_launch_button)
 
@@ -772,6 +777,10 @@ class OnboardingApp(App[Path | None]):
         self.state.recent_projects = list(event.worker.result)
         self.state.selected_project_paths = list(event.worker.result)
         self.state.scan_complete = True
+        if self.state.recent_projects:
+            self._set_message(f"Found {len(self.state.recent_projects)} recently active repo suggestion(s).")
+        else:
+            self._set_message("No recent repos matched your local commit history. You can add projects later.")
         self._render_current_step()
 
 
