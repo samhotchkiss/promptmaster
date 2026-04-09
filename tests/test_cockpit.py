@@ -467,6 +467,9 @@ def test_cockpit_ui_arrow_and_enter_route_selected(tmp_path: Path) -> None:
         def selected_key(self) -> str:
             return "polly"
 
+        def _load_state(self) -> dict:
+            return {}
+
         def build_items(self, *, spinner_index: int = 0):
             from pollypm.cockpit import CockpitItem
 

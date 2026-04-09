@@ -460,19 +460,24 @@ class PollyCockpitApp(App[None]):
     def _update_hint(self) -> None:
         self.hint.update("j/k move \u00b7 \u21b5 open \u00b7 n new")
 
+    def _focus_right_if_live(self) -> None:
+        """Focus the right pane only if it shows a live agent session."""
+        state = self.router._load_state()
+        if state.get("mounted_session"):
+            self._focus_right_pane()
+
     def action_open_selected(self) -> None:
         key = self._selected_row_key()
         if key is None:
             return
         self.selected_key = key
         self.router.route_selected(key)
-        self._focus_right_pane()
+        self._focus_right_if_live()
         self._refresh_rows()
 
     def action_open_settings(self) -> None:
         self.selected_key = "settings"
         self.router.route_selected("settings")
-        self._focus_right_pane()
         self._refresh_rows()
 
     def action_new_worker(self) -> None:
@@ -520,7 +525,7 @@ class PollyCockpitApp(App[None]):
             return
         self.selected_key = row.cockpit_key
         self.router.route_selected(row.cockpit_key)
-        self._focus_right_pane()
+        self._focus_right_if_live()
         self._refresh_rows()
 
     @on(events.Click, "#settings-row")
