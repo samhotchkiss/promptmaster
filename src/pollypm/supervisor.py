@@ -288,7 +288,10 @@ class Supervisor:
         mounted_session = data.get("mounted_session")
         if not isinstance(mounted_session, str) or not mounted_session:
             return None
-        launch = self._launch_by_session(mounted_session)
+        try:
+            launch = self._launch_by_session(mounted_session)
+        except KeyError:
+            return None
         target = f"{self.config.project.tmux_session}:{self._CONSOLE_WINDOW}"
         try:
             panes = self.tmux.list_panes(target)
