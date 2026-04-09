@@ -171,7 +171,7 @@ def test_cockpit_router_routes_idle_project_to_detail_pane(monkeypatch, tmp_path
     assert "cockpit-pane project demo" in calls["respawn"][1]
 
 
-def test_cockpit_router_prefers_visible_boot_over_storage_mount(monkeypatch, tmp_path: Path) -> None:
+def test_cockpit_router_joins_session_from_storage(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, object] = {}
     (tmp_path / "pollypm.toml").write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")
 
@@ -199,9 +199,28 @@ def test_cockpit_router_prefers_visible_boot_over_storage_mount(monkeypatch, tmp
         def __init__(self, name: str) -> None:
             self.name = name
 
+    class FakePane:
+        def __init__(self, pane_id, pane_left):
+            self.pane_id = pane_id
+            self.pane_left = pane_left
+            self.pane_current_command = "bash"
+            self.pane_width = 30
+
     class FakeTmux:
         def list_windows(self, target: str):
             return [FakeWindow("pm-operator")]
+
+        def kill_pane(self, target: str):
+            calls["killed"] = target
+
+        def join_pane(self, source: str, target: str, *, horizontal: bool = True):
+            calls["joined"] = (source, target)
+
+        def list_panes(self, target: str):
+            return [FakePane("%1", 0), FakePane("%9", 31)]
+
+        def resize_pane_width(self, target: str, width: int):
+            pass
 
     router = CockpitRouter(tmp_path / "pollypm.toml")
     router.tmux = FakeTmux()  # type: ignore[assignment]
@@ -209,23 +228,14 @@ def test_cockpit_router_prefers_visible_boot_over_storage_mount(monkeypatch, tmp
     monkeypatch.setattr(router, "set_selected_key", lambda key: None)
     monkeypatch.setattr(router, "ensure_cockpit_layout", lambda: None)
     monkeypatch.setattr(router, "_park_mounted_session", lambda supervisor, target: None)
+    monkeypatch.setattr(router, "_mounted_session_name", lambda supervisor, target: None)
     monkeypatch.setattr(router, "_left_pane_id", lambda target: "%1")
     monkeypatch.setattr(router, "_right_pane_id", lambda target: "%2")
-    monkeypatch.setattr(router, "_should_boot_visible", lambda launch: True)
-    monkeypatch.setattr(
-        router,
-        "_launch_visible_session",
-        lambda supervisor, launch, window_target, left_pane_id, right_pane_id: (
-            calls.setdefault("visible", (window_target, left_pane_id, right_pane_id)),
-            type("Pane", (), {"pane_id": "%9"})(),
-        )[1],
-    )
-    monkeypatch.setattr(router, "_mark_ui_initialized", lambda session_name: calls.setdefault("marked", session_name))
 
     router.route_selected("polly")
 
-    assert calls["visible"] == ("pollypm:PollyPM", "%1", "%2")
-    assert calls["marked"] == "operator"
+    assert calls["killed"] == "%2"
+    assert calls["joined"] == ("pollypm-storage-closet:pm-operator.0", "%1")
 
 
 def test_cockpit_router_infers_mounted_session_from_live_right_pane(monkeypatch, tmp_path: Path) -> None:
@@ -378,8 +388,8 @@ def test_cockpit_router_project_click_does_not_launch_configured_but_unmounted_w
     assert "live" not in calls
 
 
-def test_cockpit_router_visible_boot_preserves_ui_initialized_on_state_write(monkeypatch, tmp_path: Path) -> None:
-    """Regression: _show_live_session must not overwrite ui_initialized_sessions saved by _mark_ui_initialized."""
+def test_cockpit_router_falls_back_to_static_when_session_not_in_storage(monkeypatch, tmp_path: Path) -> None:
+    """When a configured session is not running in storage, show the static project detail instead of auto-launching."""
     calls: dict[str, object] = {}
     (tmp_path / "pollypm.toml").write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")
 
@@ -412,13 +422,21 @@ def test_cockpit_router_visible_boot_preserves_ui_initialized_on_state_write(mon
         def plan_launches(self):
             return [FakeLaunch()]
 
-    class FakeWindow:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
     class FakeTmux:
         def list_windows(self, target: str):
-            return [FakeWindow("pm-operator")]
+            return []  # Session NOT in storage
+
+        def respawn_pane(self, target: str, command: str):
+            calls["respawn"] = (target, command)
+
+        def list_panes(self, target: str):
+            return [
+                type("Pane", (), {"pane_id": "%1", "pane_left": 0, "pane_width": 30})(),
+                type("Pane", (), {"pane_id": "%2", "pane_left": 31, "pane_width": 49})(),
+            ]
+
+        def resize_pane_width(self, target: str, width: int):
+            pass
 
     router = CockpitRouter(tmp_path / "pollypm.toml")
     router.tmux = FakeTmux()  # type: ignore[assignment]
@@ -429,26 +447,13 @@ def test_cockpit_router_visible_boot_preserves_ui_initialized_on_state_write(mon
     monkeypatch.setattr(router, "_mounted_session_name", lambda supervisor, target: None)
     monkeypatch.setattr(router, "_left_pane_id", lambda target: "%1")
     monkeypatch.setattr(router, "_right_pane_id", lambda target: "%2")
-    monkeypatch.setattr(router, "_should_boot_visible", lambda launch: True)
-    monkeypatch.setattr(
-        router,
-        "_launch_visible_session",
-        lambda supervisor, launch, window_target, left_pane_id, right_pane_id: (
-            type("Pane", (), {"pane_id": "%9"})()
-        ),
-    )
-    monkeypatch.setattr(router, "_mark_ui_initialized", lambda session_name: (
-        calls.setdefault("marked", session_name),
-        router._write_state({**router._load_state(), "ui_initialized_sessions": [session_name]}),
-    ))
 
     router.route_selected("polly")
 
+    # Should fall back to static detail, not auto-launch
+    assert "respawn" in calls
     state = router._load_state()
-    assert state.get("mounted_session") == "operator"
-    assert "operator" in state.get("ui_initialized_sessions", []), (
-        "ui_initialized_sessions was overwritten by stale state"
-    )
+    assert state.get("mounted_session") is None
 
 
 def test_cockpit_ui_arrow_and_enter_route_selected(tmp_path: Path) -> None:

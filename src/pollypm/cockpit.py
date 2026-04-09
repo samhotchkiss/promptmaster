@@ -247,7 +247,6 @@ class CockpitRouter:
         self.route_selected(f"project:{project_key}")
 
     def _show_live_session(self, supervisor: Supervisor, session_name: str, window_target: str) -> None:
-        state = self._load_state()
         mounted_session = self._mounted_session_name(supervisor, window_target)
         launch = next(item for item in supervisor.plan_launches() if item.session.name == session_name)
         if isinstance(mounted_session, str) and mounted_session == session_name:
@@ -264,30 +263,35 @@ class CockpitRouter:
         right_pane_id = self._right_pane_id(window_target)
         storage_session = supervisor.storage_closet_session_name()
         storage_windows = {window.name for window in self.tmux.list_windows(storage_session)}
-        if self._should_boot_visible(launch):
-            right_pane = self._launch_visible_session(supervisor, launch, window_target, left_pane_id, right_pane_id)
-            self._mark_ui_initialized(session_name)
-        elif launch.window_name in storage_windows:
-            if right_pane_id is not None:
-                self.tmux.kill_pane(right_pane_id)
-            source = f"{storage_session}:{launch.window_name}.0"
-            self.tmux.join_pane(source, left_pane_id, horizontal=True)
-            panes = self.tmux.list_panes(window_target)
-            left_pane = min(panes, key=self._pane_left)
+        if launch.window_name not in storage_windows:
+            # Session is not running -- fall back to static detail view instead of auto-launching
+            if right_pane_id is None:
+                right_pane_id = self.tmux.split_window(
+                    left_pane_id,
+                    self._right_pane_command("project", launch.session.project),
+                    horizontal=True,
+                    detached=True,
+                    percent=80,
+                )
+            else:
+                self.tmux.respawn_pane(right_pane_id, self._right_pane_command("project", launch.session.project))
+            left_pane = min(self.tmux.list_panes(window_target), key=self._pane_left)
             if hasattr(self.tmux, "resize_pane_width"):
                 self.tmux.resize_pane_width(left_pane.pane_id, self._LEFT_PANE_WIDTH)
-            right_pane = max(panes, key=self._pane_left)
-        else:
-            if right_pane_id is not None:
-                self.tmux.kill_pane(right_pane_id)
-            supervisor.launch_session(session_name)
-            source = f"{supervisor.storage_closet_session_name()}:{launch.window_name}.0"
-            self.tmux.join_pane(source, left_pane_id, horizontal=True)
-            panes = self.tmux.list_panes(window_target)
-            left_pane = min(panes, key=self._pane_left)
-            if hasattr(self.tmux, "resize_pane_width"):
-                self.tmux.resize_pane_width(left_pane.pane_id, self._LEFT_PANE_WIDTH)
-            right_pane = max(panes, key=self._pane_left)
+            state = self._load_state()
+            state.pop("mounted_session", None)
+            state["right_pane_id"] = self._right_pane_id(window_target)
+            self._write_state(state)
+            return
+        if right_pane_id is not None:
+            self.tmux.kill_pane(right_pane_id)
+        source = f"{storage_session}:{launch.window_name}.0"
+        self.tmux.join_pane(source, left_pane_id, horizontal=True)
+        panes = self.tmux.list_panes(window_target)
+        left_pane = min(panes, key=self._pane_left)
+        if hasattr(self.tmux, "resize_pane_width"):
+            self.tmux.resize_pane_width(left_pane.pane_id, self._LEFT_PANE_WIDTH)
+        right_pane = max(panes, key=self._pane_left)
         state = self._load_state()
         state["mounted_session"] = session_name
         state["right_pane_id"] = right_pane.pane_id
@@ -392,6 +396,7 @@ class CockpitRouter:
         return getattr(pane, "pane_current_command", "") in {"node", "claude", "codex"}
 
     def _session_available_for_mount(self, supervisor: Supervisor, session_name: str, window_target: str) -> bool:
+        """Return True only if the session is already running (mounted or in storage)."""
         mounted = self._mounted_session_name(supervisor, window_target)
         if mounted == session_name:
             return True
