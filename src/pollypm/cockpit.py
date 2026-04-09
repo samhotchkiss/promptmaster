@@ -318,17 +318,19 @@ class CockpitRouter:
         storage_session = supervisor.storage_closet_session_name()
         storage_windows = {window.name for window in self.tmux.list_windows(storage_session)}
         if launch.window_name not in storage_windows:
-            # Session is not running -- fall back to static detail view instead of auto-launching
+            # Session is not running -- fall back to static detail view
+            fallback_kind = "polly" if launch.session.role in {"operator-pm", "heartbeat-supervisor"} else "project"
+            fallback_target = launch.session.project if fallback_kind == "project" else None
             if right_pane_id is None:
                 right_pane_id = self.tmux.split_window(
                     left_pane_id,
-                    self._right_pane_command("project", launch.session.project),
+                    self._right_pane_command(fallback_kind, fallback_target),
                     horizontal=True,
                     detached=True,
                     percent=80,
                 )
             else:
-                self.tmux.respawn_pane(right_pane_id, self._right_pane_command("project", launch.session.project))
+                self.tmux.respawn_pane(right_pane_id, self._right_pane_command(fallback_kind, fallback_target))
             left_pane = min(self.tmux.list_panes(window_target), key=self._pane_left)
             if hasattr(self.tmux, "resize_pane_width"):
                 self.tmux.resize_pane_width(left_pane.pane_id, self._LEFT_PANE_WIDTH)
@@ -514,6 +516,15 @@ def _build_cockpit_detail_inner(config_path: Path, kind: str, target: str | None
     supervisor = Supervisor(load_config(config_path))
     supervisor.ensure_layout()
     config = supervisor.config
+    if kind == "polly":
+        return (
+            "Polly\n\n"
+            "Polly is your AI project manager. She runs as an interactive\n"
+            "Claude session and can start, steer, and review worker sessions.\n\n"
+            "The Polly session is not currently running.\n"
+            "Use `pm up` to restart all sessions."
+        )
+
     if kind == "inbox":
         messages = list_open_messages(config.project.root_dir)
         if not messages:
