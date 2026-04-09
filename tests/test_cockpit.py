@@ -79,7 +79,7 @@ def test_cockpit_router_ensure_layout_splits_when_missing_right_pane(tmp_path: P
     router = CockpitRouter(tmp_path / "pollypm.toml")
     router.tmux = FakeTmux()  # type: ignore[assignment]
     config_path = tmp_path / "pollypm.toml"
-    config_path.write_text("[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\n")
+    config_path.write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")
 
     router.ensure_cockpit_layout()
 
@@ -115,7 +115,7 @@ def test_cockpit_router_ensure_layout_resizes_existing_left_pane(tmp_path: Path)
     router = CockpitRouter(tmp_path / "pollypm.toml")
     router.tmux = FakeTmux()  # type: ignore[assignment]
     config_path = tmp_path / "pollypm.toml"
-    config_path.write_text("[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\n")
+    config_path.write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")
     router._write_state({"right_pane_id": "%2"})
 
     router.ensure_cockpit_layout()
@@ -125,7 +125,7 @@ def test_cockpit_router_ensure_layout_resizes_existing_left_pane(tmp_path: Path)
 
 def test_cockpit_router_routes_idle_project_to_detail_pane(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, object] = {}
-    (tmp_path / "pollypm.toml").write_text("[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\n")
+    (tmp_path / "pollypm.toml").write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")
 
     class FakeTmux:
         def list_panes(self, target: str):
@@ -173,7 +173,7 @@ def test_cockpit_router_routes_idle_project_to_detail_pane(monkeypatch, tmp_path
 
 def test_cockpit_router_prefers_visible_boot_over_storage_mount(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, object] = {}
-    (tmp_path / "pollypm.toml").write_text("[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\n")
+    (tmp_path / "pollypm.toml").write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")
 
     class FakeLaunch:
         def __init__(self) -> None:
@@ -230,7 +230,7 @@ def test_cockpit_router_prefers_visible_boot_over_storage_mount(monkeypatch, tmp
 
 def test_cockpit_router_infers_mounted_session_from_live_right_pane(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, object] = {}
-    (tmp_path / "pollypm.toml").write_text("[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\n")
+    (tmp_path / "pollypm.toml").write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")
     worker_cwd = tmp_path / ".pollypm" / "worktrees" / "pollypm-pa-worker_pollypm"
     worker_cwd.mkdir(parents=True)
 
@@ -281,6 +281,15 @@ def test_cockpit_router_infers_mounted_session_from_live_right_pane(monkeypatch,
         def list_windows(self, target: str):
             return []
 
+        def respawn_pane(self, target: str, command: str):
+            calls["respawn"] = (target, command)
+
+        def split_window(self, target: str, command: str, *, horizontal: bool = True, detached: bool = True, percent: int | None = None):
+            return "%3"
+
+        def resize_pane_width(self, target: str, width: int):
+            pass
+
     router = CockpitRouter(tmp_path / "pollypm.toml")
     router.tmux = FakeTmux()  # type: ignore[assignment]
     monkeypatch.setattr(router, "_load_supervisor", lambda: FakeSupervisor())
@@ -298,7 +307,7 @@ def test_cockpit_router_infers_mounted_session_from_live_right_pane(monkeypatch,
 
 def test_cockpit_router_project_click_does_not_launch_configured_but_unmounted_worker(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, object] = {}
-    (tmp_path / "pollypm.toml").write_text("[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\n")
+    (tmp_path / "pollypm.toml").write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")
 
     class FakeLaunch:
         def __init__(self) -> None:
@@ -372,7 +381,7 @@ def test_cockpit_router_project_click_does_not_launch_configured_but_unmounted_w
 def test_cockpit_router_visible_boot_preserves_ui_initialized_on_state_write(monkeypatch, tmp_path: Path) -> None:
     """Regression: _show_live_session must not overwrite ui_initialized_sessions saved by _mark_ui_initialized."""
     calls: dict[str, object] = {}
-    (tmp_path / "pollypm.toml").write_text("[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\n")
+    (tmp_path / "pollypm.toml").write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")
 
     class FakeLaunch:
         def __init__(self) -> None:

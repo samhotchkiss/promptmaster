@@ -379,8 +379,9 @@ class CockpitRouter:
         if not self._is_live_provider_pane(right_pane):
             return None
         for launch in supervisor.plan_launches():
-            session_cwd = str(launch.session.cwd.resolve())
-            if right_pane.pane_current_path == session_cwd:
+            session_cwd = str(Path(launch.session.cwd).resolve())
+            pane_path = str(Path(right_pane.pane_current_path).resolve())
+            if pane_path == session_cwd:
                 state["mounted_session"] = launch.session.name
                 state["right_pane_id"] = right_pane.pane_id
                 self._write_state(state)

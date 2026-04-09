@@ -41,18 +41,14 @@ def test_root_command_runs_onboarding_when_config_missing(monkeypatch, tmp_path:
     assert called["config_path"] == tmp_path / "pollypm.toml"
 
 
-def test_discover_config_path_walks_up_parents(monkeypatch, tmp_path: Path) -> None:
-    root = tmp_path / "repo"
-    nested = root / "a" / "b"
-    nested.mkdir(parents=True)
-    config_path = root / "pollypm.toml"
-    config_path.write_text("[project]\nname = \"PollyPM\"\n")
+def test_discover_config_path_returns_global_default(monkeypatch, tmp_path: Path) -> None:
+    from pollypm.config import DEFAULT_CONFIG_PATH
 
-    monkeypatch.chdir(nested)
+    monkeypatch.chdir(tmp_path)
 
-    resolved = cli._discover_config_path(Path("pollypm.toml"))
+    resolved = cli._discover_config_path(DEFAULT_CONFIG_PATH)
 
-    assert resolved == config_path
+    assert resolved == DEFAULT_CONFIG_PATH
 
 
 def test_root_command_attaches_existing_session_when_default_config_missing(monkeypatch, tmp_path: Path) -> None:
@@ -69,6 +65,10 @@ def test_root_command_attaches_existing_session_when_default_config_missing(monk
             called["attached"] = name
             return 0
 
+    from pollypm.config import GLOBAL_CONFIG_DIR
+    fake_default = tmp_path / "no-such-dir" / "pollypm.toml"
+    monkeypatch.setattr(cli, "DEFAULT_CONFIG_PATH", fake_default)
+    monkeypatch.setattr(cli, "_discover_config_path", lambda p: fake_default)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "TmuxClient", lambda: FakeTmux())
     monkeypatch.setattr(cli, "_first_run_setup_and_launch", lambda config_path: (_ for _ in ()).throw(AssertionError("should not onboard")))

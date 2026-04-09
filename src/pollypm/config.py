@@ -18,7 +18,8 @@ from pollypm.models import (
 )
 
 
-DEFAULT_CONFIG_PATH = Path("pollypm.toml")
+GLOBAL_CONFIG_DIR = Path.home() / ".pollypm"
+DEFAULT_CONFIG_PATH = GLOBAL_CONFIG_DIR / "pollypm.toml"
 
 
 def _normalize_project_display_name(key: str, name: str | None) -> str | None:
@@ -74,7 +75,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> PollyPMConfig:
     raw = tomllib.loads(config_path.read_text())
 
     project_raw = raw.get("project", {})
-    base_dir = _resolve_path(base, project_raw.get("base_dir", ".pollypm"))
+    base_dir = _resolve_path(base, project_raw.get("base_dir", str(GLOBAL_CONFIG_DIR)))
     project = ProjectSettings(
         name=_normalize_project_display_name("pollypm", project_raw.get("name")) or "PollyPM",
         root_dir=base,
@@ -352,5 +353,6 @@ def write_example_config(path: Path = DEFAULT_CONFIG_PATH, force: bool = False) 
 def write_config(config: PollyPMConfig, path: Path = DEFAULT_CONFIG_PATH, force: bool = False) -> Path:
     if path.exists() and not force:
         raise FileExistsError(f"Config already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_config(config))
     return path

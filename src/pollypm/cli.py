@@ -47,30 +47,13 @@ def _session_name_candidates() -> list[str]:
 
 
 def _discover_config_path(config_path: Path) -> Path:
-    if config_path.exists() or config_path.is_absolute() or config_path != DEFAULT_CONFIG_PATH:
+    if config_path.exists():
         return config_path
-
-    for candidate_dir in [Path.cwd(), *Path.cwd().parents]:
-        candidate = candidate_dir / DEFAULT_CONFIG_PATH
-        if candidate.exists():
-            return candidate
-
-    tmux = TmuxClient()
-    for session_name in _session_name_candidates():
-        if not tmux.has_session(session_name):
-            continue
-        try:
-            windows = tmux.list_windows(session_name)
-        except Exception:  # noqa: BLE001
-            continue
-        for window in windows:
-            window_path = Path(window.pane_current_path)
-            for candidate_dir in [window_path, *window_path.parents]:
-                candidate = candidate_dir / DEFAULT_CONFIG_PATH
-                if candidate.exists():
-                    return candidate
-
-    return config_path
+    # If an explicit non-default path was given, respect it as-is
+    if config_path != DEFAULT_CONFIG_PATH:
+        return config_path
+    # The global config lives at ~/.pollypm/pollypm.toml
+    return DEFAULT_CONFIG_PATH
 
 
 def _attach_existing_session_without_config() -> bool:

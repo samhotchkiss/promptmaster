@@ -8,12 +8,14 @@ from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, ListItem, ListView, Static
 
 from pollypm.models import ProviderKind
 from pollypm.config import load_config
 from pollypm.service_api import PollyPMService
 from pollypm.cockpit import CockpitItem, CockpitRouter, build_cockpit_detail
+from pollypm.supervisor import Supervisor
 
 
 ASCII_POLLY = "\n".join(
@@ -203,6 +205,66 @@ class RailItem(ListItem):
         return "\u25cb", "#4a5568"
 
 
+class QuitModal(ModalScreen[bool]):
+    CSS = """
+    Screen {
+        align: center middle;
+    }
+    #quit-dialog {
+        width: 56;
+        height: auto;
+        padding: 1 2;
+        background: #141a20;
+        border: heavy #ff5f6d;
+    }
+    #quit-title {
+        color: #ff5f6d;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+    #quit-body {
+        color: #b8c4cf;
+        padding-bottom: 1;
+    }
+    #quit-hint {
+        color: #5c6a77;
+        padding-bottom: 1;
+    }
+    #quit-buttons {
+        height: auto;
+        padding-top: 1;
+        align-horizontal: right;
+    }
+    #quit-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Stay")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="quit-dialog"):
+            yield Static("Shut down PollyPM?", id="quit-title")
+            yield Static(
+                "This will stop all running agent sessions,\n"
+                "including Polly, heartbeat, and any workers.",
+                id="quit-body",
+            )
+            yield Static(
+                "Tip: press Ctrl-W to detach and keep\neverything running in the background.",
+                id="quit-hint",
+            )
+            with Horizontal(id="quit-buttons"):
+                yield Button("Cancel", id="quit-stay", variant="primary")
+                yield Button("Shut Down", id="quit-confirm", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "quit-confirm")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class PollyCockpitApp(App[None]):
     TITLE = "PollyPM"
     SUB_TITLE = "Cockpit"
@@ -305,6 +367,8 @@ class PollyCockpitApp(App[None]):
         Binding("n", "new_worker", "New Worker"),
         Binding("r", "refresh", "Refresh"),
         Binding("s", "open_settings", "Settings"),
+        Binding("ctrl+q", "request_quit", "Quit", priority=True),
+        Binding("ctrl+w", "detach", "Detach", priority=True),
     ]
 
     def __init__(self, config_path: Path) -> None:
@@ -485,6 +549,23 @@ class PollyCockpitApp(App[None]):
     def action_refresh(self) -> None:
         self.router.ensure_cockpit_layout()
         self._refresh_rows()
+
+    def action_request_quit(self) -> None:
+        def _on_quit_result(confirmed: bool) -> None:
+            if not confirmed:
+                return
+            try:
+                config = load_config(self.config_path)
+                supervisor = Supervisor(config)
+                supervisor.shutdown_tmux()
+            except Exception:  # noqa: BLE001
+                pass
+            self.exit()
+
+        self.push_screen(QuitModal(), callback=_on_quit_result)
+
+    def action_detach(self) -> None:
+        self.router.tmux.run("detach-client", check=False)
 
     @on(ListView.Selected, "#nav")
     def on_nav_selected(self, event: ListView.Selected) -> None:
