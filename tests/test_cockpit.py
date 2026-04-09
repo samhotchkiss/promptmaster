@@ -84,7 +84,7 @@ def test_cockpit_router_ensure_layout_splits_when_missing_right_pane(tmp_path: P
     router.ensure_cockpit_layout()
 
     assert calls["split"][0] == "pollypm:PollyPM"
-    assert "cockpit-pane inbox" in calls["split"][1]
+    assert "cockpit-pane polly" in calls["split"][1]
 
 
 def test_cockpit_router_ensure_layout_resizes_existing_left_pane(tmp_path: Path) -> None:

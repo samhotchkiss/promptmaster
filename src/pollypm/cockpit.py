@@ -145,7 +145,7 @@ class CockpitRouter:
         if len(panes) < 2:
             right_pane_id = self.tmux.split_window(
                 target,
-                self._right_pane_command("inbox"),
+                self._right_pane_command("polly"),
                 horizontal=True,
                 detached=True,
                 percent=80,
