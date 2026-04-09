@@ -1076,6 +1076,10 @@ class Supervisor:
 
     def _console_command(self) -> str:
         root = shlex.quote(str(self.config.project.root_dir))
+        # Use 'pm' directly if installed globally; fall back to 'uv run pm' for dev
+        import shutil
+        if shutil.which("pm"):
+            return f"sh -lc 'cd {root} && pm cockpit'"
         return f"sh -lc 'cd {root} && uv run pm cockpit'"
 
     def _controller_candidates(self) -> list[str]:
