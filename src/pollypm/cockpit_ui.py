@@ -357,7 +357,21 @@ class PollyCockpitApp(App[None]):
             self._slogan_tick = 0
             self.slogan_index = (self.slogan_index + 1) % len(POLLY_SLOGANS)
             self.tagline.update("\n" + POLLY_SLOGANS[self.slogan_index])
+        self._enforce_rail_width()
         self._refresh_rows()
+
+    def _enforce_rail_width(self) -> None:
+        try:
+            from pollypm.config import load_config
+            config = load_config(self.config_path)
+            target = f"{config.project.tmux_session}:{self.router._COCKPIT_WINDOW}"
+            panes = self.router.tmux.list_panes(target)
+            if len(panes) >= 2:
+                left_pane = min(panes, key=lambda p: p.pane_left)
+                if left_pane.pane_width != self.router._LEFT_PANE_WIDTH:
+                    self.router.tmux.resize_pane_width(left_pane.pane_id, self.router._LEFT_PANE_WIDTH)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _nav_items(self) -> list[CockpitItem]:
         return [item for item in self._items if item.key != "settings"]
