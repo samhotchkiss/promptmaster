@@ -3,6 +3,18 @@ import json
 import shlex
 from pathlib import Path
 
+
+def _decode_launch_payload(command: str) -> dict:
+    """Extract and decode the base64 runtime_launcher payload from a launch command."""
+    # Command may be wrapped in sh -lc '...'
+    parts = shlex.split(command)
+    if parts[0] == "sh" and "-lc" in parts:
+        inner = parts[-1]
+        parts = shlex.split(inner)
+    payload = parts[-1]
+    raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    return json.loads(raw.decode("utf-8"))
+
 from pollypm.models import (
     AccountConfig,
     KnownProject,
@@ -387,9 +399,7 @@ def test_codex_control_launches_use_agents_md_instead_of_visible_prompt(tmp_path
 
     launch = next(item for item in supervisor.plan_launches() if item.session.name == "operator")
 
-    payload = shlex.split(launch.command)[-1]
-    raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
-    decoded = json.loads(raw.decode("utf-8"))
+    decoded = _decode_launch_payload(launch.command)
     argv = decoded["argv"]
     env = decoded["env"]
 
@@ -414,9 +424,7 @@ def test_codex_worker_launches_do_not_auto_send_prompt(tmp_path: Path) -> None:
     supervisor = Supervisor(config)
 
     launch = next(item for item in supervisor.plan_launches() if item.session.name == "worker")
-    payload = shlex.split(launch.command)[-1]
-    raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
-    decoded = json.loads(raw.decode("utf-8"))
+    decoded = _decode_launch_payload(launch.command)
 
     # Worker prompt should NOT be baked into argv
     assert not any("do some work" in arg for arg in decoded["argv"])

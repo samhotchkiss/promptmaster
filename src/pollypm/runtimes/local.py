@@ -54,4 +54,5 @@ class LocalRuntimeAdapter:
             prefix = f"PYTHONPATH={pythonpath}${{PYTHONPATH:+:${{PYTHONPATH}}}} "
         else:
             prefix = ""
-        return f"{prefix}exec {python} -m pollypm.runtime_launcher {payload}"
+        inner = f"{prefix}exec {python} -m pollypm.runtime_launcher {payload}"
+        return f"sh -lc {shlex.quote(inner)}"
