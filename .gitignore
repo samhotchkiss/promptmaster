@@ -8,3 +8,5 @@ __pycache__/
 src/*.egg-info/
 promptmaster.toml
 /promptmaster/
+
+.pollypm/

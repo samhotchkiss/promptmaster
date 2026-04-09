@@ -99,6 +99,9 @@ def test_up_surfaces_bootstrap_failure_cleanly(monkeypatch, tmp_path: Path) -> N
         def ensure_layout(self) -> None:
             return None
 
+        def storage_closet_session_name(self) -> str:
+            return "pollypm-storage-closet"
+
         def bootstrap_tmux(self) -> str:
             raise RuntimeError("PollyPM could not launch any controller account: claude_demo: probe failed")
 
