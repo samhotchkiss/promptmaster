@@ -95,7 +95,11 @@ def _detected_claude_version() -> str:
 
 def _prime_claude_home(home: Path) -> None:
     home.mkdir(parents=True, exist_ok=True)
-    state_path = home / ".claude.json"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+
+    # Claude Code reads .claude.json from INSIDE CLAUDE_CONFIG_DIR (home/.claude/)
+    state_path = claude_dir / ".claude.json"
     data: dict[str, object] = {}
     if state_path.exists():
         try:
@@ -112,8 +116,7 @@ def _prime_claude_home(home: Path) -> None:
 
     state_path.write_text(json.dumps(data, indent=2) + "\n")
 
-    settings_path = home / ".claude" / "settings.json"
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path = claude_dir / "settings.json"
     if not settings_path.exists():
         settings_path.write_text("{}\n")
 
