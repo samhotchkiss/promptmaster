@@ -494,10 +494,12 @@ class CockpitRouter:
 
     def _right_pane_command(self, kind: str, project_key: str | None = None) -> str:
         root = shlex.quote(str(self.config_path.parent.resolve()))
-        args = ["uv", "run", "pm", "cockpit-pane", kind]
+        import shutil
+        pm_cmd = "pm" if shutil.which("pm") else "uv run pm"
+        args = [pm_cmd, "cockpit-pane", kind]
         if project_key is not None:
             args.append(project_key)
-        joined = " ".join(shlex.quote(arg) for arg in args)
+        joined = " ".join(args)
         return f"sh -lc 'cd {root} && {joined}'"
 
 
