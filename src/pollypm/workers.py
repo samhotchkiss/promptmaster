@@ -132,37 +132,12 @@ def create_worker_session(
 
 
 def suggest_worker_prompt(config_path: Path, *, project_key: str) -> str:
+    """Return an empty prompt -- workers wait for the heartbeat to assign work."""
     config = load_config(config_path)
     project = config.projects.get(project_key)
     if project is None:
         raise typer.BadParameter(f"Unknown project: {project_key}")
-
-    task_backend = get_task_backend(project.path)
-    if project.tracked and task_backend.exists():
-        active_tasks = task_backend.list_tasks(states=["02-in-progress"])
-        ready_tasks = task_backend.list_tasks(states=["01-ready"])
-        selected_task = active_tasks[0] if active_tasks else (ready_tasks[0] if ready_tasks else None)
-        if selected_task is not None:
-            state_instruction = (
-                "Resume the active issue"
-                if selected_task.state == "02-in-progress"
-                else "Start the next ready issue"
-            )
-            return (
-                f"{state_instruction} {selected_task.task_id} ({selected_task.title}) for project "
-                f"{project.name or project.key} at {project.path}. "
-                f"If the issue is not already in 02-in-progress, move it there first. "
-                "Keep the work scoped to one small, testable, modular slice. "
-                "Run the relevant checks before stopping, then move the issue to 03-needs-review "
-                "with a concise handoff for Polly."
-            )
-
-    return (
-        f"Work on the {project.name or project.key} project at {project.path}. "
-        "First identify the single highest-leverage next slice that can be completed and verified in one lane. "
-        "State that slice in one sentence, then execute only that slice end-to-end, run the relevant checks, "
-        "and stop with a concrete handoff for Polly."
-    )
+    return ""
 
 
 def launch_worker_session(config_path: Path, session_name: str) -> SessionConfig:

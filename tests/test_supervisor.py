@@ -403,7 +403,7 @@ def test_codex_control_launches_use_agents_md_instead_of_visible_prompt(tmp_path
     assert launch.initial_input is None
 
 
-def test_codex_worker_launches_still_use_compact_prompt_argument(tmp_path: Path) -> None:
+def test_codex_worker_launches_do_not_auto_send_prompt(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.sessions["worker"] = SessionConfig(
         name="worker",
@@ -412,7 +412,7 @@ def test_codex_worker_launches_still_use_compact_prompt_argument(tmp_path: Path)
         account="codex_backup",
         cwd=tmp_path,
         project="pollypm",
-        prompt="x" * 400,
+        prompt="do some work",
         window_name="worker-pollypm",
     )
     supervisor = Supervisor(config)
@@ -422,8 +422,8 @@ def test_codex_worker_launches_still_use_compact_prompt_argument(tmp_path: Path)
     raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
     decoded = json.loads(raw.decode("utf-8"))
 
-    assert decoded["argv"][-1].startswith("Read .pollypm/control-prompts/worker.md")
-    assert launch.initial_input is None
+    # Worker prompt should NOT be baked into argv
+    assert not any("do some work" in arg for arg in decoded["argv"])
 
 
 def test_switch_session_account_restarts_in_place(monkeypatch, tmp_path: Path) -> None:

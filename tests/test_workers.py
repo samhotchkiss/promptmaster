@@ -151,29 +151,9 @@ def test_auto_select_worker_uses_control_plane_account_before_controller_last_re
     assert selected == "codex_backup"
 
 
-def test_suggest_worker_prompt_uses_tracked_ready_issue(tmp_path: Path) -> None:
-    config, config_path = _config(tmp_path)
-    project = config.projects["pollypm"]
-    project.tracked = True
-    write_config(config, config_path, force=True)
-
-    issues_root = project.path / "issues"
-    (issues_root / "01-ready").mkdir(parents=True, exist_ok=True)
-    (issues_root / "01-ready" / "0017-build-launch-flow.md").write_text(
-        "# 0017 Build Launch Flow\n\nTighten launch behavior.\n"
-    )
-
-    prompt = suggest_worker_prompt(config_path, project_key="pollypm")
-
-    assert "0017" in prompt
-    assert "Build Launch Flow" in prompt
-    assert "03-needs-review" in prompt
-
-
-def test_suggest_worker_prompt_for_untracked_project_is_concrete(tmp_path: Path) -> None:
+def test_suggest_worker_prompt_returns_empty(tmp_path: Path) -> None:
     _config_data, config_path = _config(tmp_path)
 
     prompt = suggest_worker_prompt(config_path, project_key="pollypm")
 
-    assert "single highest-leverage next slice" in prompt
-    assert "concrete handoff for Polly" in prompt
+    assert prompt == ""

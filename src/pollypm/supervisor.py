@@ -150,12 +150,6 @@ class Supervisor:
                 env = dict(launch.env)
                 env["PM_CODEX_HOME_AGENTS_MD"] = launch.initial_input
                 launch = replace(launch, env=env, initial_input=None)
-            elif effective.provider is ProviderKind.CODEX and launch.initial_input:
-                launch = replace(
-                    launch,
-                    argv=[*launch.argv, self._prepare_initial_input(effective.name, launch.initial_input)],
-                    initial_input=None,
-                )
             runtime = get_runtime(account.runtime, root_dir=self.config.project.root_dir)
             window_name = effective.window_name or effective.name
             log_path = self.config.project.logs_dir / f"{window_name}.log"
@@ -1174,6 +1168,8 @@ class Supervisor:
         marker.write_text(datetime.now(UTC).isoformat().replace("+00:00", "Z") + "\n")
 
     def _send_initial_input_if_fresh(self, launch: SessionLaunchSpec, target: str) -> None:
+        if launch.session.role not in self._CONTROL_ROLES:
+            return
         initial_input = launch.initial_input
         fresh_marker = launch.fresh_launch_marker
         if not initial_input or fresh_marker is None or not fresh_marker.exists():
