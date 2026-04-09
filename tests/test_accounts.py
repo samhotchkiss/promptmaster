@@ -56,9 +56,9 @@ def test_add_account_reuses_orphaned_home_with_same_email(monkeypatch, tmp_path:
 
     assert key == "claude_s_example_com"
     assert email == "s@example.com"
-    assert orphan_home.exists()
-    assert (orphan_home / "stale.txt").exists()
-    assert not any(path.name.startswith("ad-hoc-claude") for path in (tmp_path / ".pollypm" / "homes").iterdir())
+    # Claude keeps the ad-hoc home in place (keychain auth is tied to the path)
+    ad_hoc_home = next(path for path in (tmp_path / ".pollypm" / "homes").iterdir() if path.name.startswith("ad-hoc-claude"))
+    assert ad_hoc_home.exists()
 
 
 def test_add_account_replaces_orphaned_home_when_stale(monkeypatch, tmp_path: Path) -> None:
@@ -87,9 +87,10 @@ def test_add_account_replaces_orphaned_home_when_stale(monkeypatch, tmp_path: Pa
     key, _email = add_account_via_login(config_path, ProviderKind.CLAUDE)
 
     assert key == "claude_s_example_com"
-    assert orphan_home.exists()
-    assert (orphan_home / "fresh.txt").exists()
-    assert not (orphan_home / "stale.txt").exists()
+    # Claude keeps the ad-hoc home in place (keychain auth is tied to the path)
+    ad_hoc_home = next(path for path in (tmp_path / ".pollypm" / "homes").iterdir() if path.name.startswith("ad-hoc-claude"))
+    assert ad_hoc_home.exists()
+    assert (ad_hoc_home / "fresh.txt").exists()
 
 
 def test_add_account_rejects_duplicate_configured_account(monkeypatch, tmp_path: Path) -> None:

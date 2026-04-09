@@ -743,12 +743,16 @@ def _connect_account_via_tmux(
         typer.echo("PollyPM could not auto-detect the account email from the completed login.")
         email = typer.prompt(f"Email address for this {label} account").strip().lower()
 
-    final_home = _promote_onboarding_home(
-        home,
-        _final_account_home(root_dir, _slugify_email(provider, email)),
-    )
     if provider is ProviderKind.CLAUDE:
+        # Claude auth lives in the macOS Keychain, keyed to the CLAUDE_CONFIG_DIR path hash.
+        # Renaming the home directory would invalidate the keychain entry, so keep it in place.
+        final_home = home
         _prime_claude_home(final_home)
+    else:
+        final_home = _promote_onboarding_home(
+            home,
+            _final_account_home(root_dir, _slugify_email(provider, email)),
+        )
 
     return ConnectedAccount(
         provider=provider,

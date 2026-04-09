@@ -418,25 +418,30 @@ def add_account_via_login(config_path: Path, provider: ProviderKind) -> tuple[st
         raise typer.BadParameter(f"Could not detect the logged-in email for the new {provider.value} account.")
 
     key = _slugify_email(provider, email)
-    final_home = config.project.base_dir / "homes" / key
     if key in config.accounts:
-        if home.exists() and home != final_home:
+        if home.exists() and home != config.accounts[key].home:
             shutil.rmtree(home, ignore_errors=True)
         raise typer.BadParameter(f"Account {email} already exists.")
 
-    if home.exists() and home != final_home:
-        final_home.parent.mkdir(parents=True, exist_ok=True)
-        if final_home.exists():
-            existing_email = _detect_account_email(provider, final_home)
-            if existing_email == email:
-                shutil.rmtree(home, ignore_errors=True)
+    if provider is ProviderKind.CLAUDE:
+        # Claude auth lives in macOS Keychain, keyed to the CLAUDE_CONFIG_DIR path hash.
+        # Renaming the directory would invalidate the keychain entry, so keep it in place.
+        final_home = home
+    else:
+        final_home = config.project.base_dir / "homes" / key
+        if home.exists() and home != final_home:
+            final_home.parent.mkdir(parents=True, exist_ok=True)
+            if final_home.exists():
+                existing_email = _detect_account_email(provider, final_home)
+                if existing_email == email:
+                    shutil.rmtree(home, ignore_errors=True)
+                else:
+                    shutil.rmtree(final_home, ignore_errors=True)
+                    home.rename(final_home)
             else:
-                shutil.rmtree(final_home, ignore_errors=True)
                 home.rename(final_home)
         else:
-            home.rename(final_home)
-    else:
-        final_home = home
+            final_home = home
     if provider is ProviderKind.CLAUDE:
         _prime_claude_home(final_home)
 
