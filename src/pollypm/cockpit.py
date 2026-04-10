@@ -35,11 +35,13 @@ class CockpitRouter:
         self.config_path = config_path
         self.service = PollyPMService(config_path)
         self.tmux = TmuxClient()
+        self._supervisor: Supervisor | None = None
 
-    def _load_supervisor(self) -> Supervisor:
-        supervisor = self.service.load_supervisor()
-        supervisor.ensure_layout()
-        return supervisor
+    def _load_supervisor(self, *, fresh: bool = False) -> Supervisor:
+        if fresh or self._supervisor is None:
+            self._supervisor = self.service.load_supervisor()
+            self._supervisor.ensure_layout()
+        return self._supervisor
 
     def _state_path(self) -> Path:
         config = load_config(self.config_path)
@@ -341,7 +343,7 @@ class CockpitRouter:
                 project_key=project_key, prompt=prompt, on_status=on_status, skip_stabilize=True,
             )
             # Re-read launches to pick up the newly created session
-            supervisor = self._load_supervisor()
+            supervisor = self._load_supervisor(fresh=True)
             launches = supervisor.plan_launches()
             session_name = self._project_session_map(launches).get(project_key)
             if session_name is not None:
