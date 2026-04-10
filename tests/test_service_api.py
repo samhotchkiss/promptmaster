@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from pollypm.service_api import PollyPMService
+from pollypm.service_api import PollyPMService, render_json
 
 
 def test_service_create_and_launch_worker_uses_worker_api(monkeypatch, tmp_path: Path) -> None:
@@ -135,3 +135,11 @@ def test_service_ensure_pollypm_ensures_console_and_heartbeat(monkeypatch, tmp_p
 
     assert account == "claude_controller"
     assert calls == ["console", "heartbeat"]
+
+
+def test_render_json_serializes_datetime() -> None:
+    payload = {"run_at": datetime(2026, 4, 10, 12, 0, tzinfo=UTC)}
+
+    rendered = render_json(payload)
+
+    assert '"run_at": "2026-04-10T12:00:00+00:00"' in rendered

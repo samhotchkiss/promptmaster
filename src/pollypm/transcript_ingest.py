@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -15,8 +16,10 @@ from pollypm.projects import ensure_session_lock, project_transcripts_dir, sessi
 
 
 POLL_INTERVAL_SECONDS = 1.0
+MAX_BACKOFF_SECONDS = 30.0
 _INGESTORS: dict[Path, "TranscriptIngestor"] = {}
 _INGESTORS_LOCK = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -574,11 +577,17 @@ class TranscriptIngestor:
         self._thread.start()
 
     def _run(self) -> None:
+        backoff_seconds = POLL_INTERVAL_SECONDS
         while not self._stop.wait(POLL_INTERVAL_SECONDS):
             try:
                 sync_transcripts_once(self.config)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Transcript ingestion sync failed: %s", exc)
+                if self._stop.wait(backoff_seconds):
+                    break
+                backoff_seconds = min(backoff_seconds * 2, MAX_BACKOFF_SECONDS)
                 continue
+            backoff_seconds = POLL_INTERVAL_SECONDS
 
     def stop(self) -> None:
         self._stop.set()

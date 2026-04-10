@@ -6,7 +6,13 @@ from pathlib import Path
 import typer
 
 from pollypm.config import load_config
-from pollypm.projects import ensure_project_scaffold, ensure_session_lock, project_worktrees_dir, session_scoped_dir
+from pollypm.projects import (
+    ensure_project_scaffold,
+    ensure_session_lock,
+    project_worktrees_dir,
+    release_session_lock,
+    session_scoped_dir,
+)
 from pollypm.storage.state import StateStore, WorktreeRecord
 
 
@@ -96,6 +102,7 @@ def cleanup_worktree(
         text=True,
         capture_output=True,
     )
+    release_session_lock(path.parent, record.session_name)
     store.update_worktree_status(project_key, lane_kind, lane_key, "closed")
     return path
 

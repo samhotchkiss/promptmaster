@@ -3,6 +3,7 @@ from pathlib import Path
 
 from pollypm.config import write_config
 from pollypm.models import ProjectSettings, PollyPMConfig, PollyPMSettings
+import pytest
 
 from pollypm.projects import (
     default_persona_name,
@@ -11,8 +12,10 @@ from pollypm.projects import (
     discover_recent_git_repositories,
     enable_tracked_project,
     ensure_project_scaffold,
+    ensure_session_lock,
     make_project_key,
     normalize_project_path,
+    release_session_lock,
     register_project,
 )
 
@@ -111,3 +114,17 @@ def test_ensure_project_scaffold_copies_project_instructions(tmp_path: Path) -> 
     instructions_path = project_path / ".pollypm" / "INSTRUCT.md"
     assert instructions_path.exists()
     assert "Test and operate PollyPM through Polly chat" in instructions_path.read_text()
+
+
+def test_session_lock_is_atomic_idempotent_and_releasable(tmp_path: Path) -> None:
+    lock_root = tmp_path / "locks" / "worker"
+
+    first = ensure_session_lock(lock_root, "worker")
+    second = ensure_session_lock(lock_root, "worker")
+
+    assert first == second
+    with pytest.raises(RuntimeError, match="Session lock conflict"):
+        ensure_session_lock(lock_root, "other")
+
+    release_session_lock(lock_root, "worker")
+    assert not first.exists()

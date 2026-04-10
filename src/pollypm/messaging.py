@@ -14,14 +14,8 @@ CLOSED_DIR = "closed"
 MESSAGES_DIR = "messages"
 STATE_FILE = "state.json"
 HANDOFF_FILE = "handoff.json"
-THREAD_STATES = {
-    "open",
-    "threaded",
-    "waiting-on-pa",
-    "waiting-on-pm",
-    "resolved",
-    "closed",
-}
+THREAD_STATES = ("open", "threaded", "waiting-on-pa", "waiting-on-pm", "resolved", "closed")
+THREAD_STATE_INDEX = {state: index for index, state in enumerate(THREAD_STATES)}
 
 
 @dataclass(slots=True)
@@ -210,11 +204,13 @@ def transition_thread(
     actor: str,
     note: str = "",
 ) -> InboxThread:
-    if state not in THREAD_STATES:
+    if state not in THREAD_STATE_INDEX:
         raise ValueError(f"Unknown inbox state: {state}")
     root = ensure_inbox(root_dir)
     thread_root = _thread_dir(root, thread_id)
     payload = _read_json(thread_root / STATE_FILE)
+    current_state = str(payload.get("state", "threaded"))
+    _validate_transition(current_state, state)
     transition = _transition_record(state, actor, note)
     transitions = payload.get("transitions", [])
     if not isinstance(transitions, list):
@@ -356,6 +352,15 @@ def _transition_record(state: str, actor: str, note: str) -> dict[str, object]:
         "at": _now(),
         "note": note,
     }
+
+
+def _validate_transition(current_state: str, next_state: str) -> None:
+    current_index = THREAD_STATE_INDEX.get(current_state)
+    next_index = THREAD_STATE_INDEX.get(next_state)
+    if current_index is None or next_index is None:
+        raise ValueError(f"Unknown inbox state transition: {current_state} -> {next_state}")
+    if next_index != current_index + 1:
+        raise ValueError(f"Illegal inbox state transition: {current_state} -> {next_state}")
 
 
 def _now() -> str:
