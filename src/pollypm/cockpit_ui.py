@@ -194,6 +194,8 @@ class RailItem(ListItem):
     def _indicator(self) -> tuple[str, str]:
         if self.item.state.endswith("working"):
             return self.item.state.split(" ", 1)[0], "#3ddc84"
+        if self.item.state == "unread":
+            return "\u25cf", "#f0a030"
         if self.item.state.endswith("live"):
             return "\u25cf", "#3ddc84"
         if self.item.state.startswith("!"):
@@ -350,6 +352,8 @@ class PollyCockpitApp(App[None]):
         self._section_sep: ListItem | None = None
         self._suspend_selection_events = False
         self._scheduler_tick_running = False
+        self._working_keys: set[str] = set()
+        self._unread_keys: set[str] = set()
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -434,6 +438,20 @@ class PollyCockpitApp(App[None]):
 
     def _refresh_rows(self) -> None:
         self._items = self.router.build_items(spinner_index=self.spinner_index)
+        # Track working→idle transitions for unread indicators
+        new_working: set[str] = set()
+        for item in self._items:
+            if item.state.endswith("working"):
+                new_working.add(item.key)
+        for key in self._working_keys - new_working:
+            # Session stopped working — mark unread if not currently viewing it
+            if key != self.selected_key:
+                self._unread_keys.add(key)
+        self._working_keys = new_working
+        # Apply unread state to items
+        for item in self._items:
+            if item.key in self._unread_keys and not item.state.endswith("working"):
+                item.state = "unread"
         nav_items = self._nav_items()
         previous_key = self._selected_row_key()
         selected_key = None if self.selected_key == "settings" else (previous_key or self.selected_key)
@@ -601,6 +619,7 @@ class PollyCockpitApp(App[None]):
         if not isinstance(row, RailItem):
             return
         self.selected_key = row.cockpit_key
+        self._unread_keys.discard(row.cockpit_key)
         try:
             self.router.route_selected(row.cockpit_key)
             self._focus_right_if_live()
