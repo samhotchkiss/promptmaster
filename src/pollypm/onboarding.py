@@ -96,12 +96,15 @@ def default_control_args(provider: ProviderKind, *, open_permissions: bool = Tru
 
 
 def _detected_claude_version() -> str:
-    result = subprocess.run(
-        ["claude", "--version"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["claude", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return "2.1.92"
     match = re.search(r"(\d+\.\d+\.\d+)", result.stdout)
     if match:
         return match.group(1)
