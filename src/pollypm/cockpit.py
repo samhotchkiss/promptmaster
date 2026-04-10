@@ -191,24 +191,23 @@ class CockpitRouter:
             return False
         tail = stripped[-200:]
         lowered = tail.lower()
+        # Universal working indicator — both Claude and Codex show this during active turns
+        if "esc to interrupt" in lowered:
+            return True
+        # Universal idle indicators — if any are present, the session is idle regardless of provider
+        idle_markers = (
+            "bypass permissions", "new task?", "/clear to save", "shift+tab to cycle",  # Claude
+            "press enter to confirm", "% left",  # Codex
+        )
+        if any(marker in lowered for marker in idle_markers):
+            return False
+        # Provider-specific prompt detection
         provider_value = provider.value if hasattr(provider, "value") else str(provider)
         if provider_value == "claude":
-            if "esc to interrupt" in lowered:
-                return True
-            # Idle indicators — if any of these are in the tail, the session is not working
-            idle_markers = ("bypass permissions", "new task?", "/clear to save", "shift+tab to cycle")
-            if any(marker in lowered for marker in idle_markers):
-                return False
             return "\u276f" not in tail
         if provider_value == "codex":
-            if "working" in lowered and "esc to interrupt" in lowered:
-                return True
-            # Codex idle: › prompt, or permission prompt, or "% left" usage line
+            # Codex idle: › prompt
             if "\u203a" in tail:
-                return False
-            if "press enter to confirm" in lowered:
-                return False
-            if "% left" in lowered:
                 return False
             return bool(stripped)
         return False
