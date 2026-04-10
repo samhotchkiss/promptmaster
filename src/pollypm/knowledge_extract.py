@@ -5,12 +5,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import re
-import shutil
-import subprocess
 from typing import Any
 
+from pollypm.llm_runner import HAIKU_MODEL, run_haiku_json
 
-HAIKU_MODEL = "claude-3-5-haiku-latest"
 EXTRACTION_INTERVAL_SECONDS = 15 * 60
 SUMMARY_HEADER = "## Summary"
 SECTION_ORDER = (
@@ -140,29 +138,17 @@ def _extract_with_haiku_or_fallback(events: list[dict[str, Any]]) -> KnowledgeDe
 
 
 def _extract_with_haiku(events: list[dict[str, Any]], *, max_events: int = 200) -> KnowledgeDelta | None:
-    if shutil.which("claude") is None:
-        return None
-    # Truncate to avoid exceeding CLI argument limits or excessive token usage
     truncated = events[:max_events]
-    prompt_lines = [
+    prompt = "\n".join([
         "Extract project knowledge from transcript events as compact JSON.",
-        f"Use model {HAIKU_MODEL}.",
-        "Return keys: goals, architecture_changes, convention_shifts, decisions, risks, ideas.",
+        "Return ONLY valid JSON (no markdown fences) with keys: goals, architecture_changes, convention_shifts, decisions, risks, ideas.",
         "Each value must be an array of short bullet strings.",
+        "Be specific and concrete — extract actual project details.",
         "Never include secrets or tokens.",
         json.dumps(truncated, indent=2),
-    ]
-    result = subprocess.run(
-        ["claude", "-p", "\n".join(prompt_lines), "--model", HAIKU_MODEL],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    try:
-        payload = json.loads(result.stdout)
-    except Exception:  # noqa: BLE001
+    ])
+    payload = run_haiku_json(prompt)
+    if payload is None:
         return None
     return KnowledgeDelta(
         goals=_sanitize_items(payload.get("goals")),
