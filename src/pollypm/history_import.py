@@ -23,14 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from pollypm.knowledge_extract import _sanitize_text
+from pollypm.llm_runner import run_haiku_json
 from pollypm.projects import project_transcripts_dir
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-HAIKU_MODEL = "claude-3-5-haiku-latest"
 
 PROVIDER_TRANSCRIPT_DIRS = (".claude", ".codex")
 
@@ -372,48 +366,34 @@ def _extract_with_llm(
     timeline: list[TimelineEntry],
     project_name: str,
 ) -> ExtractedUnderstanding | None:
-    """Use Haiku CLI to extract understanding from the timeline."""
-    if shutil.which("claude") is None:
-        return None
-
+    """Use Haiku via PollyPM's account system to extract understanding."""
     # Build a compact representation of the timeline
     compact_entries: list[dict[str, str]] = []
-    for entry in timeline[:500]:  # Limit to avoid huge prompts
+    for entry in timeline[:500]:
         compact_entries.append({
             "ts": entry.timestamp,
             "type": entry.source_type,
             "summary": entry.summary[:200],
         })
 
-    prompt_lines = [
+    prompt = "\n".join([
         f"Analyze this project timeline for '{project_name}' and extract understanding.",
-        "Return JSON with these keys:",
-        "- overview: 2-5 sentence project overview",
-        "- decisions: array of key decisions with rationale",
-        "- architecture: array of architecture observations",
-        "- history: array of chronological milestones",
-        "- conventions: array of coding patterns and conventions",
-        "- goals: array of stated or implied goals",
-        "- open_questions: array of things that could not be determined",
+        "Return ONLY valid JSON (no markdown fences, no explanation) with these keys:",
+        "- overview: 2-5 sentence project overview describing what the project does and its current state",
+        "- decisions: array of key technical decisions with rationale (strings)",
+        "- architecture: array describing system components, data flow, and boundaries (strings)",
+        "- history: array of chronological milestones in the project's evolution (strings)",
+        "- conventions: array of coding patterns, naming conventions, and testing approaches (strings)",
+        "- goals: array of stated or implied project goals and priorities (strings)",
+        "- open_questions: array of things that could not be determined from the timeline (strings)",
+        "Be specific and concrete. Extract actual project details, not generic observations.",
         "Never include secrets, tokens, or credentials.",
+        "",
         json.dumps(compact_entries),
-    ]
+    ])
 
-    result = subprocess.run(
-        ["claude", "-p", "\n".join(prompt_lines), "--model", HAIKU_MODEL],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-
-    try:
-        payload = json.loads(result.stdout)
-    except Exception:  # noqa: BLE001
-        return None
-
-    if not isinstance(payload, dict):
+    payload = run_haiku_json(prompt)
+    if payload is None:
         return None
 
     return ExtractedUnderstanding(
