@@ -138,16 +138,41 @@ def ensure_session_lock(base_dir: Path, session_id: str) -> Path:
     base_dir.mkdir(parents=True, exist_ok=True)
     lock_path = session_lock_path(base_dir)
     payload = {"session_id": session_id}
-    if lock_path.exists():
+    try:
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        try:
+            existing = json.loads(lock_path.read_text())
+        except Exception:  # noqa: BLE001
+            existing = {}
+        existing_session = existing.get("session_id")
+        if isinstance(existing_session, str) and existing_session == session_id:
+            return lock_path
+        raise RuntimeError(f"Session lock conflict at {base_dir}: owned by {existing_session or 'unknown'}")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    return lock_path
+
+
+def release_session_lock(base_dir: Path, session_id: str | None = None) -> None:
+    lock_path = session_lock_path(base_dir)
+    if not lock_path.exists():
+        return
+    if session_id is not None:
         try:
             existing = json.loads(lock_path.read_text())
         except Exception:  # noqa: BLE001
             existing = {}
         existing_session = existing.get("session_id")
         if isinstance(existing_session, str) and existing_session and existing_session != session_id:
-            raise RuntimeError(f"Session lock conflict at {base_dir}: owned by {existing_session}")
-    lock_path.write_text(json.dumps(payload, indent=2) + "\n")
-    return lock_path
+            return
+    lock_path.unlink(missing_ok=True)
+    try:
+        if base_dir.exists() and not any(base_dir.iterdir()):
+            base_dir.rmdir()
+    except OSError:
+        pass
 
 
 def project_issues_dir(project_path: Path) -> Path:

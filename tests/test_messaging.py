@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from pollypm.messaging import (
     append_thread_message,
@@ -62,6 +63,18 @@ def test_thread_lifecycle_persists_state_and_handoff(tmp_path) -> None:
     recovered = get_thread(tmp_path, thread.thread_id)
     assert recovered.state == "closed"
     assert len(recovered.message_paths) == 2
+
+
+def test_thread_transition_rejects_skips_and_backwards_moves(tmp_path) -> None:
+    message_path = create_message(tmp_path, sender="pa", subject="Review needed", body="Issue 012 is ready.")
+    thread = create_thread(tmp_path, message_path.name, actor="pm", owner="pm")
+
+    with pytest.raises(ValueError, match="Illegal inbox state transition"):
+        transition_thread(tmp_path, thread.thread_id, "closed", actor="pm")
+
+    transition_thread(tmp_path, thread.thread_id, "waiting-on-pa", actor="pm")
+    with pytest.raises(ValueError, match="Illegal inbox state transition"):
+        transition_thread(tmp_path, thread.thread_id, "threaded", actor="pa")
 
 
 def test_inbox_root_migrates_old_pollypm_directory(tmp_path) -> None:

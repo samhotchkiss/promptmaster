@@ -23,6 +23,7 @@ from pollypm.onboarding import _prime_claude_home, default_control_args, default
 from pollypm.providers import get_provider
 from pollypm.providers.base import LaunchCommand
 from pollypm.projects import ensure_project_scaffold, ensure_session_lock
+from pollypm.projects import project_checkpoints_dir, project_transcripts_dir, project_worktrees_dir, release_session_lock
 from pollypm.runtimes import get_runtime
 from pollypm.schedulers import ScheduledJob, get_scheduler_backend
 from pollypm.transcript_ledger import sync_token_ledger_for_config
@@ -1169,6 +1170,7 @@ class Supervisor:
         if launch.window_name not in window_map:
             return
         self.tmux.kill_window(f"{tmux_session}:{launch.window_name}")
+        self._release_session_locks(launch)
         self.store.record_event(session_name, "stop", f"Stopped tmux window {launch.window_name}")
 
     def focus_session(self, session_name: str) -> None:
@@ -1217,6 +1219,26 @@ class Supervisor:
         raise RuntimeError(
             f"Cannot {action} {session_name}: session is currently leased to {lease.owner}; use --force to bypass"
         )
+
+    def _release_session_locks(self, launch: SessionLaunchSpec) -> None:
+        release_session_lock(self.config.project.logs_dir / launch.session.name, launch.session.name)
+        project_path = self._project_path_for_session(launch.session.project)
+        release_session_lock(project_checkpoints_dir(project_path) / launch.session.name, launch.session.name)
+        release_session_lock(project_transcripts_dir(project_path) / launch.session.name, launch.session.name)
+        worktrees_root = project_worktrees_dir(project_path)
+        try:
+            relative = launch.session.cwd.resolve().relative_to(worktrees_root.resolve())
+        except ValueError:
+            return
+        parts = relative.parts
+        if parts:
+            release_session_lock(worktrees_root / parts[0], launch.session.name)
+
+    def _project_path_for_session(self, project_key: str) -> Path:
+        project = self.config.projects.get(project_key)
+        if project is not None:
+            return project.path
+        return self.config.project.root_dir
 
     def _console_command(self) -> str:
         root = shlex.quote(str(self.config.project.root_dir))
