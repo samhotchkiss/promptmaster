@@ -130,3 +130,25 @@ def test_ensure_heartbeat_schedule_is_idempotent(tmp_path: Path) -> None:
     assert len(jobs) == 1
     assert jobs[0].interval_seconds == 60
     assert jobs[0].status == "pending"
+
+
+def test_knowledge_extract_schedule_is_idempotent_and_runs(monkeypatch, tmp_path: Path) -> None:
+    supervisor = Supervisor(_config(tmp_path))
+    supervisor.ensure_layout()
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        "pollypm.schedulers.inline.extract_knowledge_once",
+        lambda config: calls.append(config.project.root_dir) or {"processed_events": 1, "updated_docs": 1},
+    )
+
+    supervisor.ensure_knowledge_extraction_schedule()
+    supervisor.ensure_knowledge_extraction_schedule()
+
+    backend = get_scheduler_backend("inline", root_dir=tmp_path)
+    jobs = [job for job in backend.list_jobs(supervisor) if job.kind == "knowledge_extract"]
+    assert len(jobs) == 1
+    assert jobs[0].interval_seconds == 900
+
+    ran = backend.run_due(supervisor, now=datetime.now(UTC) + timedelta(seconds=901))
+    assert len(ran) == 1
+    assert calls == [tmp_path]

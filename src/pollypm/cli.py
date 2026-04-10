@@ -483,6 +483,8 @@ def up(
         supervisor.ensure_console_window()
 
     supervisor.ensure_heartbeat_schedule()
+    if hasattr(supervisor, "ensure_knowledge_extraction_schedule"):
+        supervisor.ensure_knowledge_extraction_schedule()
 
     if current_tmux == session_name:
         supervisor.focus_console()

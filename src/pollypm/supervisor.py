@@ -17,6 +17,7 @@ from pollypm.checkpoints import record_checkpoint, snapshot_hash, write_mechanic
 from pollypm.config import PollyPMConfig
 from pollypm.heartbeats import get_heartbeat_backend
 from pollypm.heartbeats.api import SupervisorHeartbeatAPI
+from pollypm.knowledge_extract import EXTRACTION_INTERVAL_SECONDS
 from pollypm.messaging import ensure_inbox
 from pollypm.models import AccountConfig, ProviderKind, SessionConfig, SessionLaunchSpec
 from pollypm.onboarding import _prime_claude_home, default_control_args, default_session_args
@@ -197,6 +198,7 @@ class Supervisor:
                     self._probe_controller_account(controller_account)
                 self._bootstrap_launches(session_name, launches, on_status=on_status)
                 self.ensure_heartbeat_schedule()
+                self.ensure_knowledge_extraction_schedule()
                 self.store.record_event(
                     "pollypm",
                     "controller_selected",
@@ -515,6 +517,22 @@ class Supervisor:
             run_at=datetime.now(UTC) + timedelta(minutes=1),
             payload={},
             interval_seconds=60,
+        )
+
+    def ensure_knowledge_extraction_schedule(self) -> None:
+        backend = get_scheduler_backend(
+            self.config.pollypm.scheduler_backend,
+            root_dir=self.config.project.root_dir,
+        )
+        for job in backend.list_jobs(self):
+            if job.kind == "knowledge_extract" and job.interval_seconds == EXTRACTION_INTERVAL_SECONDS and job.status == "pending":
+                return
+        backend.schedule(
+            self,
+            kind="knowledge_extract",
+            run_at=datetime.now(UTC) + timedelta(seconds=EXTRACTION_INTERVAL_SECONDS),
+            payload={"model": "haiku"},
+            interval_seconds=EXTRACTION_INTERVAL_SECONDS,
         )
 
     def _run_heartbeat_local(self, snapshot_lines: int = 200) -> list[AlertRecord]:
