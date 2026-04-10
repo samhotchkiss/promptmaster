@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from pollypm.knowledge_extract import extract_knowledge_once
 from pollypm.schedulers.base import ScheduledJob, SchedulerBackend
 
 
@@ -93,6 +94,9 @@ class InlineSchedulerBackend(SchedulerBackend):
                 str(job.payload["session_name"]),
                 str(job.payload.get("owner", "human")),
             )
+            return
+        if job.kind == "knowledge_extract":
+            extract_knowledge_once(supervisor.config)
             return
         raise RuntimeError(f"Unsupported scheduled job kind: {job.kind}")
 
