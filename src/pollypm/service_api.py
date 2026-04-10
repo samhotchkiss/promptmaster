@@ -17,6 +17,7 @@ from pollypm.accounts import (
     set_open_permissions_default,
     toggle_failover_account,
 )
+from pollypm.config_patches import apply_preference_patch, detect_preference_patch, list_project_overrides
 from pollypm.config import load_config
 from pollypm.messaging import (
     append_thread_message,
@@ -291,6 +292,35 @@ class PollyPMService:
     def register_project(self, path: Path) -> tuple[str, str]:
         return register_project(self.config_path, path)
 
+    def detect_preference_override(self, project_key: str, text: str) -> object | None:
+        config = load_config(self.config_path)
+        project_root = self._project_root(config, project_key)
+        patch = detect_preference_patch(project_root, text)
+        if patch is None:
+            return None
+        return {
+            "kind": patch.kind,
+            "target_name": patch.target_name,
+            "path": str(patch.path),
+            "offer_text": patch.offer_text,
+        }
+
+    def apply_preference_override(self, project_key: str, text: str) -> object:
+        config = load_config(self.config_path)
+        project_root = self._project_root(config, project_key)
+        patch = apply_preference_patch(project_root, text)
+        return {
+            "kind": patch.kind,
+            "target_name": patch.target_name,
+            "path": str(patch.path),
+            "offer_text": patch.offer_text,
+        }
+
+    def list_overrides(self, project_key: str) -> list[str]:
+        config = load_config(self.config_path)
+        project_root = self._project_root(config, project_key)
+        return [str(path) for path in list_project_overrides(project_root)]
+
     def enable_tracked_project(self, key: str) -> tuple[str, bool]:
         return enable_tracked_project(self.config_path, key)
 
@@ -442,6 +472,12 @@ class PollyPMService:
         if "?" not in text:
             return False
         return any(marker in text for marker in ("what", "which", "why", "should", "priority", "scope"))
+
+    def _project_root(self, config, project_key: str) -> Path:
+        project = config.projects.get(project_key)
+        if project is not None:
+            return project.path
+        return config.project.root_dir
 
 
 def render_json(data: object) -> str:

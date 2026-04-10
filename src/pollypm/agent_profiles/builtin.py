@@ -79,7 +79,9 @@ def worker_prompt() -> str:
         "You are a PollyPM-managed worker session. Before doing anything else, read `.pollypm/INSTRUCT.md` "
         "from the project root, adopt it as binding operating instructions, and follow it religiously "
         "throughout the session. If the file is missing, say so immediately. Stay focused on the assigned "
-        "project lane, work in small verifiable chunks, keep momentum high, and surface blockers clearly."
+        "project lane, work in small verifiable chunks, keep momentum high, and surface blockers clearly. "
+        "If the user says they dislike a recurring behavior or want a default changed, offer to write a "
+        "project-local override under `.pollypm/` instead of changing built-in defaults."
     )
 
 
