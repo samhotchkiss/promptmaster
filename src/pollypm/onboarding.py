@@ -143,9 +143,23 @@ def _prime_claude_home(home: Path) -> None:
 
     state_path.write_text(json.dumps(data, indent=2) + "\n")
 
+    # Ensure settings.json has the flags needed for unattended operation:
+    # - skipDangerousModePermissionPrompt: skip the "are you sure?" dialog
+    # - bypassWorkspaceTrust: skip the "is this a project you trust?" dialog
+    # - permissions.dangerouslySkipPermissions: match the --dangerously-skip-permissions flag
     settings_path = claude_dir / "settings.json"
-    if not settings_path.exists():
-        settings_path.write_text("{}\n")
+    settings: dict[str, object] = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except json.JSONDecodeError:
+            settings = {}
+    settings["skipDangerousModePermissionPrompt"] = True
+    settings["bypassWorkspaceTrust"] = True
+    if not isinstance(settings.get("permissions"), dict):
+        settings["permissions"] = {}
+    settings["permissions"]["dangerouslySkipPermissions"] = True  # type: ignore[index]
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 
 
 def _available_clis() -> list[CliAvailability]:
