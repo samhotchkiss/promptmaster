@@ -84,6 +84,7 @@ class Supervisor:
                 args=default_control_args(
                     account.provider,
                     open_permissions=self.config.pollypm.open_permissions_by_default,
+                    role=effective.role,
                 ),
             )
         else:

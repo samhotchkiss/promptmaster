@@ -414,8 +414,10 @@ def test_open_permissions_default_can_disable_launch_args(tmp_path: Path) -> Non
 
     launches = {launch.session.name: launch for launch in supervisor.plan_launches()}
 
-    assert launches["heartbeat"].session.args == []
-    assert launches["operator"].session.args == []
+    # Heartbeat always gets --disallowedTools even without open permissions
+    assert "--disallowedTools" in launches["heartbeat"].session.args
+    assert "--dangerously-skip-permissions" not in launches["heartbeat"].session.args
+    assert "--dangerously-skip-permissions" not in launches["operator"].session.args
     assert launches["worker"].session.args == []
 
 
