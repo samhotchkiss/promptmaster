@@ -96,5 +96,7 @@ def test_build_onboarded_config_can_disable_open_permissions(tmp_path: Path) -> 
     )
 
     assert config.pollypm.open_permissions_by_default is False
-    assert config.sessions["heartbeat"].args == []
-    assert config.sessions["operator"].args == []
+    # Heartbeat always gets --disallowedTools regardless of permissions
+    assert "--disallowedTools" in config.sessions["heartbeat"].args
+    assert "--dangerously-skip-permissions" not in config.sessions["heartbeat"].args
+    assert "--dangerously-skip-permissions" not in config.sessions["operator"].args

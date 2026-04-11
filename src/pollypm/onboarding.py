@@ -91,8 +91,17 @@ def default_session_args(provider: ProviderKind, *, open_permissions: bool = Tru
     return []
 
 
-def default_control_args(provider: ProviderKind, *, open_permissions: bool = True) -> list[str]:
-    return default_session_args(provider, open_permissions=open_permissions)
+def default_control_args(
+    provider: ProviderKind,
+    *,
+    open_permissions: bool = True,
+    role: str = "",
+) -> list[str]:
+    args = default_session_args(provider, open_permissions=open_permissions)
+    # Add role-based tool restrictions for Claude sessions
+    if provider is ProviderKind.CLAUDE and role == "heartbeat-supervisor":
+        args.extend(["--disallowedTools", "Edit,Write,NotebookEdit"])
+    return args
 
 
 def _detected_claude_version() -> str:
@@ -868,7 +877,7 @@ def build_onboarded_config(
                 window_name="pm-heartbeat",
                 prompt=heartbeat_prompt(),
                 agent_profile="heartbeat",
-                args=default_control_args(controller.provider, open_permissions=open_permissions_by_default),
+                args=default_control_args(controller.provider, open_permissions=open_permissions_by_default, role="heartbeat-supervisor"),
             ),
             "operator": SessionConfig(
                 name="operator",
@@ -880,7 +889,7 @@ def build_onboarded_config(
                 window_name="pm-operator",
                 prompt=polly_prompt(),
                 agent_profile="polly",
-                args=default_control_args(controller.provider, open_permissions=open_permissions_by_default),
+                args=default_control_args(controller.provider, open_permissions=open_permissions_by_default, role="operator-pm"),
             ),
         },
         projects=dict(projects or {}),
