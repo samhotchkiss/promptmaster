@@ -932,7 +932,14 @@ class Supervisor:
         if account.home is None:
             return False
         if account.provider is ProviderKind.CLAUDE:
-            return (account.home / ".claude" / ".credentials.json").exists()
+            claude_dir = account.home / ".claude"
+            # Claude Code may use .credentials.json (file auth) or macOS
+            # Keychain (.claude.json contains the session config).  Accept
+            # either as evidence the account has been set up.
+            return (
+                (claude_dir / ".credentials.json").exists()
+                or (claude_dir / ".claude.json").exists()
+            )
         if account.provider is ProviderKind.CODEX:
             return (account.home / ".codex" / "auth.json").exists()
         return False
