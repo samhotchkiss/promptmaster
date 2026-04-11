@@ -131,6 +131,42 @@ def test_human_input_creates_automatic_lease(monkeypatch, tmp_path: Path) -> Non
     assert lease.owner == "human"
 
 
+def test_send_input_prefixes_heartbeat_messages(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(supervisor.tmux, "send_keys", lambda target, text, **kw: sent.append((target, text)))
+
+    supervisor.send_input("operator", "check session", owner="heartbeat")
+    assert len(sent) == 1
+    assert sent[0][1] == "H: check session"
+
+
+def test_send_input_prefixes_polly_messages(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(supervisor.tmux, "send_keys", lambda target, text, **kw: sent.append((target, text)))
+
+    supervisor.send_input("operator", "do this task", owner="polly")
+    assert len(sent) == 1
+    assert sent[0][1] == "P: do this task"
+
+
+def test_send_input_no_prefix_for_human(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(supervisor.tmux, "send_keys", lambda target, text, **kw: sent.append((target, text)))
+
+    supervisor.send_input("operator", "hello", owner="human")
+    assert len(sent) == 1
+    assert sent[0][1] == "hello"
+
+
 def test_claim_lease_rejects_conflicting_owner(tmp_path: Path) -> None:
     config = _config(tmp_path)
     supervisor = Supervisor(config)
@@ -553,3 +589,35 @@ def test_recovery_waits_on_non_pollypm_lease(tmp_path: Path) -> None:
     assert len(alerts) == 1
     assert alerts[0].alert_type == "recovery_waiting_on_human"
     assert "lease owner human" in alerts[0].message
+
+
+def test_recovery_hard_limit_stops_after_many_failures(tmp_path: Path) -> None:
+    from datetime import datetime, UTC
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+
+    # Simulate many recovery attempts within the current window
+    # so _record_recovery_attempt increments past the hard limit.
+    now = datetime.now(UTC).isoformat()
+    supervisor.store.upsert_session_runtime(
+        session_name="operator",
+        status="recovering",
+        recovery_attempts=21,  # already past hard limit of 20
+        recovery_window_started_at=now,  # current window so attempts accumulate
+    )
+
+    launch = next(item for item in supervisor.plan_launches() if item.session.name == "operator")
+    supervisor._maybe_recover_session(
+        launch,
+        failure_type="missing_window",
+        failure_message="window gone",
+    )
+
+    runtime = supervisor.store.get_session_runtime("operator")
+    assert runtime.status == "degraded"
+    alerts = supervisor.open_alerts()
+    recovery_alerts = [a for a in alerts if a.alert_type == "recovery_limit"]
+    assert len(recovery_alerts) == 1
+    assert "STOPPED" in recovery_alerts[0].message
+    assert "manual intervention" in recovery_alerts[0].message
