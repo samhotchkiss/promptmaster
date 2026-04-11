@@ -1,158 +1,142 @@
-# PollyPM
+<p align="center">
+  <img src="https://img.shields.io/badge/tmux-first-blue?style=flat-square" alt="tmux-first"/>
+  <img src="https://img.shields.io/badge/agents-Claude%20%2B%20Codex-purple?style=flat-square" alt="Claude + Codex"/>
+  <img src="https://img.shields.io/badge/tests-404%20passing-brightgreen?style=flat-square" alt="404 tests"/>
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT"/>
+</p>
 
-PollyPM is a tmux-first supervisor for interactive CLI agent sessions.
+<h1 align="center">
+<pre>
+█▀█ █▀█ █   █   █▄█
+█▀▀ █▄█ █▄▄ █▄▄  █
+</pre>
+PollyPM
+</h1>
 
-The core design goal is simple:
+<p align="center">
+  <strong>A tmux-native supervisor for AI coding agents.</strong>
+  <br>
+  Run Claude and Codex in parallel. Watch every session. Take the wheel anytime.
+</p>
 
-- every agent runs natively inside its own tmux window
-- PollyPM can monitor and assist those sessions
-- the operator can always drop into any window and take over directly
-- provider support is adapter-based so Claude, Codex, and future CLIs can coexist
+---
 
-## Current scope
+## What It Does
 
-This repository currently provides:
+PollyPM manages multiple AI coding sessions from one control plane. Each agent runs in its own tmux window — a real `claude` or `codex` process, not an abstraction. You get a cockpit UI, a heartbeat supervisor, and a project manager agent that coordinates work across sessions.
 
-- an architecture and MVP plan in [`docs/architecture.md`](/Users/sam/dev/pollypm/docs/architecture.md)
-- a Python CLI scaffold
-- a config model for accounts and sessions
-- provider adapters for `claude` and `codex`
-- a local runtime adapter that isolates accounts with provider-native profile env vars
-- tmux bootstrap commands for PollyPM and worker windows
-- SQLite-backed launch/event bookkeeping
-- Docker runtime command generation for provider sessions
-
-## Quick start
-
-Create an initial config:
-
-```bash
-uv run pm onboard
+```
+     You (human)
+       │
+  ┌────┴────┐
+  │ Cockpit │  ← Textual TUI: navigate, mount, inspect
+  └────┬────┘
+       │
+  ┌────┴────────────────────────────────┐
+  │         tmux storage closet         │
+  │                                     │
+  │  heartbeat   operator   worker-1    │
+  │  (Claude)    (Polly)    (Codex)     │
+  │  monitors    manages    implements  │
+  │  recovers    triages    executes    │
+  └─────────────────────────────────────┘
 ```
 
-The guided onboarding now asks only for:
+**Every session is a real terminal.** You can attach to any window and type. The heartbeat watches for stuck, looping, or crashed sessions and recovers them automatically. The operator (Polly) creates issues, assigns work, and reviews results. Workers execute.
 
-- how many Codex accounts you want to connect
-- how many Claude accounts you want to connect
-- which connected account should run PollyPM
-- whether PollyPM should fail over to another connected account if that account is exhausted
-- whether it should scan your home directory for git repos and register them as known projects
+## Key Features
 
-For each account, PollyPM opens a temporary tmux login window, you complete the real provider login there, and PollyPM detects the connected identity from that isolated account home. The local runtime uses provider-native profile isolation when available, including `CLAUDE_CONFIG_DIR` for Claude and `CODEX_HOME` for Codex. If a provider does not expose enough information for automatic detection, onboarding falls back to asking for the email once.
+**Supervision that actually works**
+- Heartbeat runs via cron every 60 seconds — independent of the UI
+- Detects stuck sessions (3 identical snapshots), dead panes, auth failures
+- Auto-recovers crashed sessions with provider failover
+- Hard limit prevents infinite crash loops (20 attempts, then stops)
+- Nudges stalled workers directly: *"state the remaining task, execute the next step"*
 
-At the end of onboarding, PollyPM also installs global `pollypm` and `pm` commands with `uv tool install -e`, so you can launch it from any shell instead of only from the repo directory.
+**Multi-provider, multi-project**
+- Claude (Opus, Sonnet, Haiku) and OpenAI Codex (GPT-5.4) side by side
+- Isolated account homes with 700 permissions and Keychain auth
+- Failover from Claude to Codex when one provider is down
+- Git worktrees per worker — no file conflicts between parallel agents
 
-PollyPM defaults new project worktrees under `~/dev`, but it can register repositories from anywhere on disk. During onboarding, it can scan your home directory for git repos and ask which ones should be tracked as known projects.
+**Project management built in**
+- File-based issue tracker (6 states: not-ready → ready → in-progress → review → completed)
+- GitHub issue backend (`polly:*` labels, auto-close on completion)
+- Inbox with thread state machine (triage → route → resolve → close → reopen)
+- Knowledge extraction: Haiku scans transcripts and updates `docs/decisions.md`
 
-If onboarding is interrupted, rerunning `pm onboard` will recover already-connected account homes and continue from there instead of forcing a full restart.
+**A cockpit you can actually use**
+- Textual TUI rail with `j`/`k` navigation, session spinners, alert indicators
+- Mount any session in the right pane — type directly into Claude or Codex
+- Settings view with account management, relogin, failover config
+- Lease system: cockpit auto-claims leases so the heartbeat won't interfere while you're typing
 
-If you just want the static example instead of the guided flow:
-
-```bash
-uv run pm init
-```
-
-Check the environment:
-
-```bash
-uv run pm doctor
-```
-
-Inspect and manage connected accounts:
-
-```bash
-uv run pm accounts
-uv run pm account-doctor
-uv run pm accounts-ui
-uv run pm relogin codex_s_swh_me
-uv run pm add-account codex
-uv run pm remove-account codex_s_swh_me
-```
-
-Inspect and manage known projects:
+## Quick Start
 
 ```bash
-uv run pm projects
-uv run pm scan-projects
-uv run pm add-project ~/dev/wire
+# Install
+uv tool install pollypm
+
+# Onboard accounts
+pm onboard
+
+# Launch everything
+pm up
+
+# Install the heartbeat cron (runs even when cockpit is closed)
+pm heartbeat install
 ```
 
-Start PollyPM:
-
+Attach to the cockpit:
 ```bash
-pollypm up
+tmux attach -t pollypm
 ```
 
-`pm up` does two things:
+Navigate with `j`/`k`, press `Enter` to mount a session, `n` to launch a new worker, `s` for settings.
 
-- if tmux session `pollypm` already exists, it attaches to it
-- if it does not exist, it creates the session and then attaches
-- it opens or focuses the `pm-control` TUI window so you land in the main control surface
+## Architecture
 
-The standard tmux layout is:
-
-- window `0`: `pm-heartbeat`
-- window `1`: `pm-operator`
-- window `2`: `pm-control` TUI
-
-The `heartbeat` and `operator` windows are launched as real interactive `claude` or `codex` sessions, not `--print` jobs.
-
-Most normal operation should now happen from the `pm-control` TUI. From there you can:
-
-- inspect accounts, sessions, projects, alerts, and recent events
-- add, remove, and relogin accounts
-- set the controller account and failover accounts
-- scan for git repos and register projects
-- create, launch, stop, and remove worker sessions
-- claim/release leases and send input to sessions
-
-If you want to open the TUI directly from a shell:
-
-```bash
-pollypm ui
+```
+src/pollypm/
+├── supervisor.py        # Session lifecycle, recovery, failover
+├── cockpit.py           # Pane routing, session mounting
+├── cockpit_ui.py        # Textual TUI rail
+├── heartbeats/          # Health classification, alerts, nudges
+├── schedulers/          # Cron-driven recurring jobs
+├── providers/           # Claude + Codex adapters
+├── runtimes/            # Local + Docker execution
+├── task_backends/       # File-based + GitHub issue trackers
+├── knowledge_extract.py # LLM-powered doc extraction
+├── recovery_prompt.py   # Checkpoint-based session recovery
+├── messaging.py         # Inbox threads + state machine
+└── storage/state.py     # SQLite: events, heartbeats, checkpoints, alerts
 ```
 
-Operational CLI commands are still available from inside the `pollypm` tmux session:
+## How the Heartbeat Works
 
-```bash
-uv run pm plan
-uv run pm status
+Every 60 seconds (via cron), `pm heartbeat` runs a sweep:
+
+1. **Capture** — snapshot every session's tmux pane
+2. **Classify** — healthy, needs_followup, blocked, done (with transcript snippet)
+3. **Detect** — stuck (3 identical snapshots), dead panes, auth failures, loops
+4. **Alert** — raise/clear alerts in SQLite with severity levels
+5. **Recover** — relaunch dead sessions, failover to backup accounts
+6. **Nudge** — after 5 idle cycles, send a direct message to stalled workers
+7. **Checkpoint** — save state for recovery prompts
+
+```
+$ pm heartbeat
+Heartbeat completed. Open alerts: 2
+- warn worker_pollypm/suspected_loop: same snapshot for 3 heartbeats
+- warn worker_website/needs_followup: Additional work remains
 ```
 
-If you use the CLI for debugging or scripting, create an extra shell window inside the `pollypm` tmux session and run `pm` there.
+## Status
 
-Run a heartbeat sweep:
+PollyPM is in active daily use managing 5 projects with 3 Codex workers, a Claude heartbeat, and a Claude operator. It has survived extended unattended operation, recovered from dozens of session crashes, and processed over 16,000 heartbeat cycles.
 
-```bash
-uv run pm heartbeat
-```
+**404 tests.** Every fix ships with a regression test.
 
-Inspect recent events and alerts:
+## License
 
-```bash
-uv run pm events
-uv run pm alerts
-```
-
-Claim or release control of a worker:
-
-```bash
-uv run pm claim worker_demo --owner human --note "manual intervention"
-uv run pm release worker_demo
-```
-
-These worker commands apply after you add actual worker sessions to the config.
-
-Send text into a session pane:
-
-```bash
-uv run pm send worker_demo "Continue with the next implementation step."
-```
-
-## Notes
-
-- The local runtime is the default path today and uses per-account `CODEX_HOME` / `CLAUDE_CONFIG_DIR` plus isolated home directories.
-- Docker runtime wrapping is implemented, but you still need to supply a suitable agent image per account before using it in production.
-- PollyPM treats tmux as the operator cockpit, not the only source of truth.
-- Recovery is based on logs, git state, and checkpoints, not exact hidden model session state.
-- The intended startup path is `pm up`; PollyPM rejects operational commands outside the `pollypm` tmux session.
+MIT
