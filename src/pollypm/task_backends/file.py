@@ -83,25 +83,24 @@ class FileTaskBackend(TaskBackend):
         (self.issues_root() / ".latest_issue_number").write_text(f"{next_id}\n")
         return TaskRecord(task_id=task_id, title=title, state=state, path=path)
 
-    def move_task(self, task_id: str, to_state: str) -> TaskRecord:
+    def move_task(self, task_id: str, to_state: str, *, strict: bool = False) -> TaskRecord:
         for task in self.list_tasks():
             if task.task_id != task_id:
                 continue
-            # Validate: warn if states are skipped or reversed
+            # Validate state transitions
             if task.state in TRACKER_STATES and to_state in TRACKER_STATES:
                 from_idx = TRACKER_STATES.index(task.state)
                 to_idx = TRACKER_STATES.index(to_state)
                 if to_idx < from_idx:
-                    logger.warning(
-                        "Issue %s moving backward: %s → %s (rework?)",
-                        task_id, task.state, to_state,
-                    )
+                    msg = f"Issue {task_id} moving backward: {task.state} → {to_state} (rework?)"
+                    logger.warning(msg)
+                    # Backward moves are always allowed (rework)
                 elif to_idx > from_idx + 1:
                     skipped = TRACKER_STATES[from_idx + 1 : to_idx]
-                    logger.warning(
-                        "Issue %s skipping states %s → %s (skipped: %s)",
-                        task_id, task.state, to_state, ", ".join(skipped),
-                    )
+                    msg = f"Issue {task_id} skipping states {task.state} → {to_state} (skipped: {', '.join(skipped)})"
+                    if strict:
+                        raise ValueError(msg)
+                    logger.warning(msg)
             destination = self.issues_root() / to_state / task.path.name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(task.path), str(destination))
