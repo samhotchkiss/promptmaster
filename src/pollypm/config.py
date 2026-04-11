@@ -114,7 +114,9 @@ def _parse_sessions(
     *,
     base: Path,
     default_project: str = "pollypm",
+    workspace_root: Path | None = None,
 ) -> dict[str, SessionConfig]:
+    _CONTROL_ROLES = {"heartbeat-supervisor", "operator-pm"}
     sessions: dict[str, SessionConfig] = {}
     sessions_raw = raw.get("sessions", {})
     if not isinstance(sessions_raw, dict):
@@ -122,12 +124,21 @@ def _parse_sessions(
     for session_name, session_raw in sessions_raw.items():
         if not isinstance(session_raw, dict):
             continue
+        role = session_raw["role"]
+        raw_cwd = session_raw.get("cwd", ".")
+        # Control sessions (heartbeat, operator) with cwd="." should resolve
+        # to the workspace root so they can see project files and issue
+        # trackers, rather than being stuck in the config base directory.
+        if raw_cwd == "." and role in _CONTROL_ROLES and workspace_root is not None:
+            cwd = workspace_root
+        else:
+            cwd = _resolve_path(base, raw_cwd)
         sessions[session_name] = SessionConfig(
             name=session_name,
-            role=session_raw["role"],
+            role=role,
             provider=ProviderKind(session_raw["provider"]),
             account=session_raw["account"],
-            cwd=_resolve_path(base, session_raw.get("cwd", ".")),
+            cwd=cwd,
             project=session_raw.get("project", default_project),
             prompt=_normalize_session_prompt(session_name, session_raw.get("prompt")),
             agent_profile=session_raw.get("agent_profile"),
@@ -242,7 +253,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> PollyPMConfig:
     raw = _load_raw_toml(config_path)
     project = _parse_project_settings(raw, base=base)
     accounts = _parse_accounts(raw, base=base)
-    sessions = _parse_sessions(raw, base=base)
+    sessions = _parse_sessions(raw, base=base, workspace_root=project.workspace_root)
     pollypm = _parse_pollypm_settings(raw, sessions)
     memory = _parse_memory_settings(raw)
     projects = _parse_known_projects(raw, base=base)
