@@ -67,3 +67,13 @@ Verify that creating a new issue via the CLI results in a correctly formatted is
 - 19 existing issues in the tracker from previous work
 
 **Issues found:** None
+
+### Re-test — 2026-04-10 1:38 PM (via tmux)
+
+**Result: STALE / NOT REPRODUCED ON CURRENT CODE**
+
+Asked Polly (operator) to create issue #0022 in issues/01-ready/. Polly wrote a well-formatted issue file with title, description, acceptance criteria. BUT:
+
+Recorded result at the time: file was created at `~/.pollypm/issues/01-ready/` instead of `/Users/sam/dev/pollypm/issues/01-ready/`.
+
+**Current verification:** this root-cause note is stale against the current codebase. `load_config()` resolves control-session `cwd="."` to `workspace_root`, onboarding writes operator `cwd=root_dir`, and the current operator launch command resolves to `/Users/sam/dev`, not `~/.pollypm`. This needs re-test evidence before treating it as an active bug.
