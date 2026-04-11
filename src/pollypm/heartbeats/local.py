@@ -227,7 +227,19 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             return True
         if cursor.last_verdict != "needs_followup":
             return True
-        return cursor.last_snapshot_hash != context.snapshot_hash
+        if cursor.last_snapshot_hash == context.snapshot_hash:
+            return False
+        # The snapshot changed, but if the ONLY new content is our own
+        # heartbeat messages, skip the followup to avoid a feedback loop.
+        delta = (context.transcript_delta or "").strip()
+        if delta:
+            non_heartbeat_lines = [
+                line for line in delta.splitlines()
+                if line.strip() and not line.strip().startswith(("H:", "H: Heartbeat"))
+            ]
+            if not non_heartbeat_lines:
+                return False
+        return True
 
     def _classify(self, context: HeartbeatSessionContext) -> tuple[str, str]:
         text = (context.transcript_delta or context.pane_text or "").strip()
