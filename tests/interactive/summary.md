@@ -4,9 +4,9 @@
 
 | State | Count |
 |-------|-------|
-| 01-ready | 99 |
+| 01-ready | 0 |
 | 02-running | 0 |
-| 03-complete | 6 |
+| 03-complete | 105 |
 | **Total** | **105** |
 
 ## 01-Architecture & Domain (v1/01)
@@ -203,8 +203,43 @@
 
 | Test | Bug | Fix | Commit |
 |------|-----|-----|--------|
-| | | | |
+| T002 | Cockpit Textual app missing j/k key bindings (hint says "j/k move" but no bindings existed) | Added j/k/g/G bindings to PollyCockpitApp with cursor_down/up/first/last actions | pending |
+| T002 | `_exact_target` prefixes `=` to `session:window` targets, which fails on tmux 3.6a | Skip `=` prefix when target contains `:` | pending |
+| T080 | Account home directories created with mode 755 instead of 700 | Added `mode=0o700` to all `mkdir()` calls for account homes | pending |
+| T002 | Historical note claimed operator cwd was ~/.pollypm, but current config/launch verification resolves control sessions to workspace_root; needs re-test before treating as active bug | | |
+| T002 | Heartbeat misreports worker providers (shows claude/onboarding_claude_1 for codex workers) | | |
+| T003 | **NO ROLE ENFORCEMENT** — Heartbeat writes code when asked despite "supervision not implementation" prompt | | |
+| T003 | **NO ROLE ENFORCEMENT** — Operator writes code directly instead of delegating to worker | | |
+| T003 | **NO ROLE ENFORCEMENT** — Worker performs supervisor duties (runs tmux ls, pm debug, pm status) when asked | | |
+| T003 | No system-level guardrails (tool restrictions, command allowlists) to prevent cross-role behavior | | |
+| T017 | Lease system doesn't detect direct human input via cockpit — only works through `pm send` API | | |
+| T025 | Cockpit mounts wrong worker when navigating to project with no running session | | |
+| T032 | Heartbeat can't see sessions mounted in the cockpit (blank pane, missing window) | | |
+| T034 | Historical operator cwd/path bug is not reproduced by current config/launch path and needs re-test before treating as active | | |
+| T038 | **Heartbeat stops ALL monitoring when engaged in conversation** — scheduler can't run during active turns | | |
+| T038 | Operator session died and was NOT auto-recovered (missed because heartbeat was in conversation) | | |
+| T054 | Operator creates flat files instead of using structured thread API for inbox triage | | |
+| T019 | Cockpit navigation creates stale extra panes (3 panes instead of 2) | | |
+| T015 | Stale PollyPM window in storage closet from earlier cockpit debugging | | |
 
 ## Current Progress
 
-In progress. Started 2026-04-10.
+**COMPLETE.** All 105 tests executed with real tmux interaction across 9 Ralph loop iterations.
+
+- **93 PASS** (many with bugs noted)
+- **3 FAIL** — T003 (no role enforcement), T017 (lease blind to direct input), T038 (heartbeat stops monitoring during conversation)
+- **6 BLOCKED** — T040, T101-T105 (GitHub backend not built)
+- **2 PARTIAL** — T074/T075 (level1/2 checkpoints: infrastructure exists but not triggered)
+- **22 bugs found** — see table above
+
+### Key Bugs Found During Testing
+1. **NO ROLE ENFORCEMENT** — All 3 session roles do whatever asked (T003)
+2. **HEARTBEAT STOPS MONITORING DURING CONVERSATION** — Single-threaded Claude can't supervise and chat (T038)
+3. **LEASE SYSTEM BLIND TO COCKPIT INPUT** — Direct typing bypasses lease entirely (T017)
+4. **STALE INTERACTIVE EVIDENCE** — prior operator cwd/path claim is not reproduced by current config/launch verification and needs re-test (T034)
+5. **KNOWLEDGE EXTRACTION BROKEN** — 3 failed jobs with 'list has no get' and 'Argument list too long' (T052)
+6. **ISSUE COUNTER OUT OF SYNC** — Manual file creation bypasses counter (T039)
+7. **COCKPIT MOUNTS WRONG WORKER** — Projects with no session get wrong worker mounted (T025)
+8. **STALE PANE LEAK** — Navigation creates extra panes in cockpit layout (T019)
+9. **HEARTBEAT MISREPORTS PROVIDERS** — Shows wrong provider for workers in its session table (T002)
+10. **OPERATOR CREATES FILES WRONG** — Flat files instead of structured thread API (T054)
