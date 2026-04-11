@@ -365,6 +365,15 @@ class Supervisor:
         if len(panes) < 2:
             return None
         right_pane = max(panes, key=lambda pane: pane.pane_left)
+        # Validate the mounted pane looks like the expected session.
+        # A stale cockpit_state can claim a session is mounted when the
+        # right pane is actually a static bash shell or a different session.
+        pane_cmd = right_pane.pane_current_command or ""
+        expected_provider = launch.session.provider.value
+        if expected_provider == "claude" and pane_cmd in {"bash", "zsh", "sh", "fish"}:
+            return None
+        if expected_provider == "codex" and pane_cmd not in {"node"}:
+            return None
         return TmuxWindow(
             session=self.config.project.tmux_session,
             index=0,
