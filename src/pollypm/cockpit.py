@@ -665,13 +665,39 @@ def _build_cockpit_detail_inner(config_path: Path, kind: str, target: str | None
     supervisor.ensure_layout()
     config = supervisor.config
     if kind == "polly":
-        return (
-            "Polly\n\n"
-            "Polly is your AI project manager. She runs as an interactive\n"
-            "Claude session and can start, steer, and review worker sessions.\n\n"
-            "The Polly session is not currently running.\n"
-            "Use `pm up` to restart all sessions."
-        )
+        # Check WHY the operator isn't running
+        runtime = supervisor.store.get_session_runtime("operator")
+        lines = [
+            "Polly",
+            "",
+            "Polly is your AI project manager. She runs as an interactive",
+            "Claude session and can start, steer, and review worker sessions.",
+            "",
+            "The Polly session is not currently running.",
+        ]
+        if runtime and runtime.status == "degraded":
+            lines.extend([
+                "",
+                f"Status: DEGRADED after {runtime.recovery_attempts} recovery attempts.",
+                f"Last failure: {runtime.last_failure_type or 'unknown'}",
+                "",
+                "This usually means Claude needs to be re-authenticated.",
+                "To fix:",
+                "  1. Press S to open Settings",
+                "  2. Select the Claude account",
+                "  3. Press R to re-authenticate",
+                "",
+                "Or from a terminal: pm relogin claude_claude_swh_me",
+            ])
+        elif runtime and runtime.recovery_attempts and runtime.recovery_attempts > 0:
+            lines.extend([
+                "",
+                f"Recovery in progress ({runtime.recovery_attempts} attempts).",
+                "The heartbeat is trying to relaunch the session.",
+            ])
+        else:
+            lines.append("Use `pm up` to restart all sessions.")
+        return "\n".join(lines)
 
     if kind == "inbox":
         messages = list_open_messages(config.project.root_dir)
