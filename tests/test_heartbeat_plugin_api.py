@@ -320,7 +320,11 @@ def test_local_heartbeat_backend_queues_operator_followup_once_per_unfinished_tu
 
     LocalHeartbeatBackend().run(api)
 
-    assert api.messages == [("operator", "Heartbeat follow-up for worker_pollypm: Last turn suggests additional work remains", "heartbeat")]
+    assert len(api.messages) == 1
+    assert api.messages[0][0] == "operator"
+    assert "Additional work remains" in api.messages[0][1]
+    assert "add coverage" in api.messages[0][1]  # snippet from transcript
+    assert api.messages[0][2] == "heartbeat"
 
 
 def test_local_heartbeat_backend_does_not_repeat_followup_for_same_snapshot() -> None:
@@ -330,7 +334,7 @@ def test_local_heartbeat_backend_does_not_repeat_followup_for_same_snapshot() ->
         last_offset=64,
         last_snapshot_hash="hash-1",
         last_verdict="needs_followup",
-        last_reason="Last turn suggests additional work remains",
+        last_reason="Additional work remains — Implemented the parser. Next step: add coverage.",
     )
     api = FakeHeartbeatAPI([_context(transcript_delta="Implemented the parser. Next step: add coverage.", cursor=cursor)])
 

@@ -226,15 +226,17 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         text = (context.transcript_delta or context.pane_text or "").strip()
         if not text:
             return "unclear", "No new transcript or pane output to classify"
+        # Extract a useful snippet from the tail of the text for the reason
+        snippet = text.strip().splitlines()[-1][:120] if text.strip() else ""
         lowered = text.lower()
         if any(pattern in lowered for pattern in self._WAITING_PATTERNS):
-            return "blocked", "Last turn appears to be waiting on operator input"
+            return "blocked", f"Waiting on operator input — {snippet}"
         if any(pattern in lowered for pattern in self._FOLLOWUP_PATTERNS):
-            return "needs_followup", "Last turn suggests additional work remains"
+            return "needs_followup", f"Additional work remains — {snippet}"
         if any(pattern in lowered for pattern in self._DONE_PATTERNS):
-            return "done", "Last turn appears complete"
+            return "done", f"Last turn appears complete — {snippet}"
         if re.search(r"\b(next|remaining|follow-up|follow up|still need)\b", lowered):
-            return "needs_followup", "Last turn suggests additional work remains"
+            return "needs_followup", f"Additional work remains — {snippet}"
         if lowered.endswith("?"):
-            return "blocked", "Last turn ended with a question for the operator"
-        return "unclear", "Could not confidently classify the last turn"
+            return "blocked", f"Last turn ended with a question — {snippet}"
+        return "unclear", f"Could not confidently classify the last turn — {snippet}"
