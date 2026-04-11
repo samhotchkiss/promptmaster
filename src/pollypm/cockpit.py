@@ -410,6 +410,7 @@ class CockpitRouter:
                 if self._is_live_provider_pane(right_pane):
                     return
         self._park_mounted_session(supervisor, window_target)
+        self._cleanup_extra_panes(window_target)
         left_pane_id = self._left_pane_id(window_target)
         if left_pane_id is None:
             raise RuntimeError("Cockpit left pane is not available.")
@@ -601,7 +602,7 @@ class CockpitRouter:
         project_key: str | None = None,
     ) -> None:
         self._park_mounted_session(supervisor, window_target)
-        panes = self.tmux.list_panes(window_target)
+        self._cleanup_extra_panes(window_target)
         left_pane_id = self._left_pane_id(window_target)
         if left_pane_id is None:
             raise RuntimeError("Cockpit left pane is not available.")
@@ -622,6 +623,24 @@ class CockpitRouter:
         state.pop("mounted_session", None)
         state["right_pane_id"] = self._right_pane_id(window_target)
         self._write_state(state)
+
+    def _cleanup_extra_panes(self, window_target: str) -> None:
+        """Kill any extra panes beyond the expected 2 (rail + right)."""
+        try:
+            panes = self.tmux.list_panes(window_target)
+        except Exception:  # noqa: BLE001
+            return
+        if len(panes) <= 2:
+            return
+        left_pane = min(panes, key=self._pane_left)
+        # Keep the leftmost (rail) and rightmost (content) panes, kill the rest
+        right_pane = max(panes, key=self._pane_left)
+        for pane in panes:
+            if pane.pane_id not in {left_pane.pane_id, right_pane.pane_id}:
+                try:
+                    self.tmux.kill_pane(pane.pane_id)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _right_pane_command(self, kind: str, project_key: str | None = None) -> str:
         root = shlex.quote(str(self.config_path.parent.resolve()))
