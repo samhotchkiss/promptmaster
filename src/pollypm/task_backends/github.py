@@ -194,6 +194,17 @@ class GitHubTaskBackend(TaskBackend):
             path=self.project_path / f"#{task_id}",
         )
 
+    def read_task(self, task: TaskRecord) -> str:
+        result = _gh(
+            "issue", "view", task.task_id,
+            "--json", "title,body,number",
+            "--repo", self.repo,
+        )
+        issue = json.loads(result.stdout)
+        body = str(issue.get("body", "")).strip()
+        title = str(issue.get("title", task.title)).strip()
+        return f"# {task.task_id} {title}\n\n{body}".rstrip() + "\n"
+
     def append_note(self, name: str, text: str) -> Path:
         """Append a comment to a GitHub issue. 'name' should be the issue number."""
         # If name looks like an issue number, comment on it

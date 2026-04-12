@@ -143,9 +143,13 @@ def _read_active_issue(project_root: Path) -> str:
     if not tasks:
         return ""
     task = tasks[0]
-    relative = task.path.relative_to(project_root)
-    body = task.path.read_text().strip()
-    return f"## Active Issue\nSource: `{relative}`\n\n{body}"
+    try:
+        relative = task.path.relative_to(project_root)
+        source = f"`{relative}`"
+    except ValueError:
+        source = f"`{task.path}`"
+    body = backend.read_task(task).strip()
+    return f"## Active Issue\nSource: {source}\n\n{body}"
 
 
 def _read_latest_checkpoint(context: AgentProfileContext) -> str:

@@ -107,6 +107,9 @@ class FileTaskBackend(TaskBackend):
             return TaskRecord(task_id=task.task_id, title=task.title, state=to_state, path=destination)
         raise FileNotFoundError(f"Unknown task id: {task_id}")
 
+    def read_task(self, task: TaskRecord) -> str:
+        return task.path.read_text()
+
     def append_note(self, name: str, text: str) -> Path:
         self.ensure_tracker()
         target = self.issues_root() / name
