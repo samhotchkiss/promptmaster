@@ -92,3 +92,101 @@ def test_worker_prompt_assembles_overview_manifest_issue_and_checkpoint(tmp_path
     assert "Source: `issues/02-in-progress/0007-fix-deploy.md`" in prompt
     assert "Ship the deployment fix." in prompt
     assert "Recent handoff notes." in prompt
+
+
+def test_worker_prompt_reads_active_issue_from_github_backend(monkeypatch, tmp_path: Path) -> None:
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    (project_root / "docs").mkdir()
+    (project_root / "docs" / "project-overview.md").write_text("# Project Overview\n\nGitHub-backed issue flow.\n")
+    def fake_gh(*args: str, check: bool = True):
+        class Result:
+            def __init__(self, stdout: str) -> None:
+                self.stdout = stdout
+
+        if args[:3] == ("repo", "view", "--json"):
+            return Result('{"name":"widgets"}')
+        if args[:2] == ("issue", "list"):
+            return Result('[{"number":42,"title":"Wire the backend","state":"OPEN"}]')
+        if args[:2] == ("issue", "view"):
+            return Result('{"number":42,"title":"Wire the backend","body":"Implement the gh-backed tracker."}')
+        raise AssertionError(f"Unexpected gh call: {args}")
+
+    monkeypatch.setattr("pollypm.task_backends.github._gh", fake_gh)
+
+    config = PollyPMConfig(
+        project=ProjectSettings(
+            name="pollypm",
+            root_dir=control_root,
+            base_dir=control_root / ".pollypm-state",
+            logs_dir=control_root / ".pollypm-state/logs",
+            snapshots_dir=control_root / ".pollypm-state/snapshots",
+            state_db=control_root / ".pollypm-state/state.db",
+        ),
+        pollypm=PollyPMSettings(controller_account="claude_main"),
+        accounts={
+            "claude_main": AccountConfig(
+                name="claude_main",
+                provider=ProviderKind.CLAUDE,
+                home=control_root / ".pollypm-state" / "homes" / "claude_main",
+            )
+        },
+        sessions={
+            "worker_demo": SessionConfig(
+                name="worker_demo",
+                role="worker",
+                provider=ProviderKind.CLAUDE,
+                account="claude_main",
+                cwd=project_root,
+                project="demo",
+                agent_profile="worker",
+            )
+        },
+        projects={
+            "demo": KnownProject(
+                key="demo",
+                path=project_root,
+                name="Demo",
+                kind=ProjectKind.GIT,
+            )
+        },
+    )
+    config_path = control_root / "pollypm.toml"
+    write_config(config, config_path, force=True)
+    config_dir = project_root / ".pollypm" / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "project.toml").write_text(
+        """
+[project]
+display_name = "Demo"
+
+[plugins]
+issue_backend = "github"
+
+[plugins.github_issues]
+repo = "acme/widgets"
+
+[sessions.worker_demo]
+role = "worker"
+provider = "claude"
+account = "claude_main"
+cwd = "."
+agent_profile = "worker"
+"""
+    )
+    store = StateStore(config.project.state_db)
+    store.upsert_session_runtime(
+        session_name="worker_demo",
+        status="healthy",
+    )
+
+    supervisor = PollyPMService(config_path).load_supervisor()
+    launches = {launch.session.name: launch for launch in supervisor.plan_launches()}
+    prompt = launches["worker_demo"].session.prompt or ""
+
+    assert "## Active Issue" in prompt
+    assert "Source: `#42`" in prompt
+    assert "# 42 Wire the backend" in prompt
+    assert "Implement the gh-backed tracker." in prompt

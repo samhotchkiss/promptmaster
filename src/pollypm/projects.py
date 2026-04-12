@@ -13,7 +13,7 @@ import typer
 
 from pollypm.config import PROJECT_CONFIG_DIRNAME, load_config, write_config
 from pollypm.models import KnownProject, ProjectKind
-from pollypm.task_backends import get_task_backend
+from pollypm.task_backends import FileTaskBackend, get_task_backend
 
 
 DEFAULT_WORKSPACE_ROOT = Path.home() / "dev"
@@ -207,10 +207,11 @@ def scaffold_issue_tracker(project_path: Path) -> Path:
     ensure_project_scaffold(project_root)
     backend = get_task_backend(project_root)
     issues_dir = backend.ensure_tracker()
-    instructions_target = issues_dir / "instructions.md"
-    if TRACKER_TEMPLATE.exists() and not instructions_target.exists():
-        shutil.copyfile(TRACKER_TEMPLATE, instructions_target)
-    _ensure_gitignore_entry(project_root, "issues/")
+    if isinstance(backend, FileTaskBackend):
+        instructions_target = issues_dir / "instructions.md"
+        if TRACKER_TEMPLATE.exists() and not instructions_target.exists():
+            shutil.copyfile(TRACKER_TEMPLATE, instructions_target)
+        _ensure_gitignore_entry(project_root, "issues/")
     return issues_dir
 
 

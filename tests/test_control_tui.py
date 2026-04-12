@@ -1,8 +1,9 @@
 import asyncio
 from pathlib import Path
 
+from pollypm.config import load_config, write_config
 from pollypm.control_tui import InputModal, PollyPMApp
-from pollypm.models import AccountConfig, ProviderKind, SessionConfig, SessionLaunchSpec
+from pollypm.models import AccountConfig, KnownProject, PollyPMConfig, PollyPMSettings, ProjectKind, ProjectSettings, ProviderKind, SessionConfig, SessionLaunchSpec
 
 
 def test_accounts_table_preserves_selection_by_row_key(tmp_path: Path) -> None:
@@ -205,6 +206,76 @@ def test_session_detail_uses_role_specific_tmux_session(tmp_path: Path) -> None:
 
     assert "heartbeat preview" in detail
     assert supervisor.tmux.targets == ["pollypm-storage-closet:pm-heartbeat"]
+
+
+def test_project_detail_shows_github_backend_state_counts(monkeypatch, tmp_path: Path) -> None:
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    config = PollyPMConfig(
+        project=ProjectSettings(
+            root_dir=control_root,
+            base_dir=control_root / ".pollypm-state",
+            logs_dir=control_root / ".pollypm-state/logs",
+            snapshots_dir=control_root / ".pollypm-state/snapshots",
+            state_db=control_root / ".pollypm-state/state.db",
+        ),
+        pollypm=PollyPMSettings(controller_account="claude_main"),
+        accounts={
+            "claude_main": AccountConfig(
+                name="claude_main",
+                provider=ProviderKind.CLAUDE,
+                home=control_root / ".pollypm-state" / "homes" / "claude_main",
+            )
+        },
+        sessions={},
+        projects={
+            "demo": KnownProject(key="demo", path=project_root, name="Demo", kind=ProjectKind.GIT, tracked=True),
+        },
+    )
+    config_path = control_root / "pollypm.toml"
+    write_config(config, config_path, force=True)
+    (project_root / ".pollypm" / "config").mkdir(parents=True, exist_ok=True)
+    (project_root / ".pollypm" / "config" / "project.toml").write_text(
+        """
+[project]
+display_name = "Demo"
+
+[plugins]
+issue_backend = "github"
+
+[plugins.github_issues]
+repo = "acme/widgets"
+"""
+    )
+
+    def fake_gh(*args: str, check: bool = True):
+        class Result:
+            def __init__(self, stdout: str) -> None:
+                self.stdout = stdout
+
+        if args[:3] == ("repo", "view", "--json"):
+            return Result('{"name":"widgets"}')
+        label = args[args.index("--label") + 1]
+        payloads = {
+            "polly:not-ready": "0",
+            "polly:ready": "1",
+            "polly:in-progress": "2",
+            "polly:needs-review": "0",
+            "polly:in-review": "1",
+            "polly:completed": "0",
+        }
+        return Result(payloads[label])
+
+    monkeypatch.setattr("pollypm.task_backends.github._gh", fake_gh)
+    monkeypatch.setattr("pollypm.control_tui.list_worktrees", lambda config_path, project_key: [])
+
+    app = PollyPMApp(config_path)
+    detail = app._project_detail(load_config(config_path), "demo")
+
+    assert f"Issue Tracker: {project_root}" in detail
+    assert "Task States: 01-ready=1, 02-in-progress=2, 04-in-review=1" in detail
 
 
 def test_numeric_keys_switch_tabs_even_with_table_focus(tmp_path: Path) -> None:

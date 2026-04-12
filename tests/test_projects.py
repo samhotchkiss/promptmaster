@@ -17,6 +17,7 @@ from pollypm.projects import (
     normalize_project_path,
     release_session_lock,
     register_project,
+    scaffold_issue_tracker,
 )
 
 
@@ -114,6 +115,29 @@ def test_ensure_project_scaffold_copies_project_instructions(tmp_path: Path) -> 
     instructions_path = project_path / ".pollypm" / "INSTRUCT.md"
     assert instructions_path.exists()
     assert "Test and operate PollyPM through Polly chat" in instructions_path.read_text()
+
+
+def test_scaffold_issue_tracker_for_github_backend_does_not_create_local_issue_tracker(tmp_path: Path) -> None:
+    project_path = tmp_path / "sample-project"
+    project_path.mkdir()
+    config_dir = project_path / ".pollypm" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "project.toml").write_text(
+        """
+[plugins]
+issue_backend = "github"
+
+[plugins.github_issues]
+repo = "acme/widgets"
+"""
+    )
+
+    issues_root = scaffold_issue_tracker(project_path)
+
+    assert issues_root == project_path
+    assert not (project_path / "issues").exists()
+    gitignore_text = (project_path / ".gitignore").read_text() if (project_path / ".gitignore").exists() else ""
+    assert "issues/" not in gitignore_text
 
 
 def test_session_lock_is_atomic_idempotent_and_releasable(tmp_path: Path) -> None:
