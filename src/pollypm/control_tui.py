@@ -255,6 +255,12 @@ class RepoScanModal(ModalScreen[tuple[str, list[Path]]]):
 
 
 class PollyPMApp(App[None]):
+    _SILENT_ALERT_TYPES = frozenset({
+        "suspected_loop",
+        "stabilize_failed",
+        "needs_followup",
+    })
+
     TITLE = "PollyPM"
     SUB_TITLE = "Control Room"
     NAV_TABS = [
@@ -553,6 +559,8 @@ class PollyPMApp(App[None]):
         self.events_table.add_columns("When", "Session", "Type", "Message")
 
     def _load_context(self) -> tuple[Supervisor | None, object | None]:
+        if not self.config_path.exists():
+            return None, None
         try:
             config = load_config(self.config_path)
         except FileNotFoundError:
@@ -675,9 +683,13 @@ class PollyPMApp(App[None]):
     def _cockpit_state_for_session(self, session_name: str | None, launches, windows, alerts) -> str:
         if session_name is None:
             return "idle"
-        alert_count = sum(1 for alert in alerts if alert.session_name == session_name)
-        if alert_count:
-            return f"! {alert_count}"
+        actionable_alerts = [
+            alert
+            for alert in alerts
+            if alert.session_name == session_name and alert.alert_type not in self._SILENT_ALERT_TYPES
+        ]
+        if actionable_alerts:
+            return f"! {len(actionable_alerts)}"
         window_map = {window.name: window for window in windows}
         launch = next((item for item in launches if item.session.name == session_name), None)
         if launch is None:

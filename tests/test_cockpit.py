@@ -62,6 +62,43 @@ def test_cockpit_router_build_items_includes_core_entries(monkeypatch, tmp_path:
     assert items[3].state.endswith("live")
 
 
+def test_cockpit_router_session_state_ignores_silent_alerts(tmp_path: Path) -> None:
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm-state'}\"\n"
+    )
+
+    class FakeLaunch:
+        def __init__(self) -> None:
+            self.window_name = "worker-demo"
+            self.session = type(
+                "Session",
+                (),
+                {
+                    "name": "worker_demo",
+                    "role": "worker",
+                    "project": "demo",
+                    "provider": type("P", (), {"value": "codex"})(),
+                },
+            )()
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            self.name = "worker-demo"
+            self.pane_dead = False
+            self.pane_current_command = "codex"
+
+    def make_alert(alert_type: str):
+        return type("Alert", (), {"session_name": "worker_demo", "alert_type": alert_type})()
+
+    router = CockpitRouter(config_path)
+    launches = [FakeLaunch()]
+    windows = [FakeWindow()]
+
+    assert router._session_state("worker_demo", launches, windows, [make_alert("needs_followup")], 0).endswith("live")
+    assert router._session_state("worker_demo", launches, windows, [make_alert("pane_dead")], 0) == "! 1"
+
+
 def test_cockpit_router_selected_key_clears_missing_right_pane_state(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "pollypm.toml"
     config_path.write_text(

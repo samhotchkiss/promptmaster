@@ -251,7 +251,7 @@ After issues 0036 and 0037 land, re-audit the remaining rough edges and convert 
 - [x] Cockpit TUI with navigation
 - [x] Onboarding flow
 - [x] 5 managed projects
-- [x] Lease timeout handling
+- [x] Lease timeout handling — completed in issue 0035
 - [x] Lease/cockpit integration
 - [x] Scheduler dedup
 - [x] Worker nudge
