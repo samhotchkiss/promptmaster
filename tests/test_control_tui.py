@@ -71,6 +71,37 @@ def test_cockpit_table_contains_polly_inbox_and_settings(tmp_path: Path) -> None
     asyncio.run(run())
 
 
+def test_control_tui_cockpit_state_ignores_silent_alerts(tmp_path: Path) -> None:
+    app = PollyPMApp(tmp_path / "missing.toml")
+
+    class FakeLaunch:
+        def __init__(self) -> None:
+            self.window_name = "worker-demo"
+            self.session = type(
+                "Session",
+                (),
+                {
+                    "name": "worker_demo",
+                    "role": "worker",
+                    "provider": type("P", (), {"value": "codex"})(),
+                },
+            )()
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            self.name = "worker-demo"
+            self.pane_dead = False
+
+    def make_alert(alert_type: str):
+        return type("Alert", (), {"session_name": "worker_demo", "alert_type": alert_type})()
+
+    launches = [FakeLaunch()]
+    windows = [FakeWindow()]
+
+    assert app._cockpit_state_for_session("worker_demo", launches, windows, [make_alert("needs_followup")]).endswith("live")
+    assert app._cockpit_state_for_session("worker_demo", launches, windows, [make_alert("pane_dead")]) == "! 1"
+
+
 def test_dashboard_settings_selection_jumps_to_accounts(tmp_path: Path) -> None:
     async def run() -> None:
         app = PollyPMApp(tmp_path / "missing.toml")
