@@ -210,6 +210,37 @@ def test_claim_lease_rejects_conflicting_owner(tmp_path: Path) -> None:
         raise AssertionError("expected conflicting lease claim to fail")
 
 
+def test_release_lease_clears_active_lease_and_records_event(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+    supervisor.claim_lease("operator", "human", "manual takeover")
+
+    supervisor.release_lease("operator", expected_owner="human")
+
+    assert supervisor.store.get_lease("operator") is None
+    events = supervisor.store.recent_events(limit=5)
+    assert any(
+        event.session_name == "operator"
+        and event.event_type == "lease"
+        and event.message == "Lease released"
+        for event in events
+    )
+
+
+def test_release_lease_preserves_reclaimed_lease_for_different_owner(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+    supervisor.claim_lease("operator", "human", "manual takeover")
+
+    supervisor.release_lease("operator", expected_owner="polly")
+
+    lease = supervisor.store.get_lease("operator")
+    assert lease is not None
+    assert lease.owner == "human"
+
+
 def test_heartbeat_uses_separate_tmux_session(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     supervisor = Supervisor(config)
@@ -550,6 +581,32 @@ def test_switch_session_account_restarts_in_place(monkeypatch, tmp_path: Path) -
     runtime = supervisor.store.get_session_runtime("operator")
     assert runtime is not None
     assert runtime.effective_account == "codex_backup"
+
+
+def test_account_is_viable_for_claude_when_credentials_file_exists(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    credentials_path = config.accounts["claude_controller"].home / ".claude" / ".credentials.json"
+    credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    credentials_path.write_text("{}")
+
+    assert supervisor._account_is_viable("claude_controller") is True
+
+
+def test_account_is_viable_rejects_runtime_marked_exhausted(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    auth_path = config.accounts["codex_backup"].home / ".codex" / "auth.json"
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_path.write_text("{}")
+    supervisor.store.upsert_account_runtime(
+        account_name="codex_backup",
+        provider="codex",
+        status="exhausted",
+        reason="usage cap reached",
+    )
+
+    assert supervisor._account_is_viable("codex_backup") is False
 
 
 def test_extract_claude_token_metrics() -> None:
