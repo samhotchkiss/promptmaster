@@ -51,12 +51,15 @@ class TmuxClient:
     def _inside_tmux(self) -> bool:
         return bool(os.environ.get("TMUX"))
 
-    def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    _DEFAULT_TIMEOUT = 15  # seconds — prevents indefinite hangs if tmux is unresponsive
+
+    def run(self, *args: str, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["tmux", *args],
             check=check,
             text=True,
             capture_output=True,
+            timeout=timeout or self._DEFAULT_TIMEOUT,
         )
 
     def has_session(self, name: str) -> bool:
