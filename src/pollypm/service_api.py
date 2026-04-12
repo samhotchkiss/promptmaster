@@ -327,6 +327,36 @@ class PollyPMService:
         config = load_config(self.config_path)
         return self._task_backend(config, project_key).append_note(task_name, text)
 
+    def append_task_handoff(
+        self,
+        project_key: str,
+        task_name: str,
+        *,
+        what_done: str,
+        how_to_test: str,
+        deviations: str = "",
+    ) -> Path:
+        sections = [
+            "## Handoff",
+            "",
+            "### What Was Done",
+            what_done.strip(),
+            "",
+            "### How To Test",
+            how_to_test.strip(),
+        ]
+        if deviations.strip():
+            sections.extend(
+                [
+                    "",
+                    "### Deviations",
+                    deviations.strip(),
+                ]
+            )
+        text = "\n".join(sections).rstrip() + "\n"
+        config = load_config(self.config_path)
+        return self._task_backend(config, project_key).append_note(task_name, text)
+
     def task_state_counts(self, project_key: str) -> dict[str, int]:
         config = load_config(self.config_path)
         return self._task_backend(config, project_key).state_counts()
