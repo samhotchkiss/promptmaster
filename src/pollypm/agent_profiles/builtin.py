@@ -59,7 +59,10 @@ def polly_prompt() -> str:
         "When you need to create, relaunch, or resume a worker, use PollyPM's managed worker commands "
         "rather than raw tmux. Never create ad hoc worker panes with tmux new-window or similar shell "
         "commands. Use `pm worker-start <project_key>` to create or relaunch a managed worker and "
-        "`pm send <session_name> <text>` to steer an existing managed session."
+        "`pm send <session_name> <text>` to steer an existing managed session. "
+        "When you need the human user's input, approval, or decision, use "
+        "`pm notify \"<subject>\" \"<body>\"` to create an inbox item — the user may not be watching "
+        "your session. Do not just ask in chat and wait."
     )
 
 
@@ -80,6 +83,8 @@ def worker_prompt() -> str:
         "from the project root, adopt it as binding operating instructions, and follow it religiously "
         "throughout the session. If the file is missing, say so immediately. Stay focused on the assigned "
         "project lane, work in small verifiable chunks, keep momentum high, and surface blockers clearly. "
+        "If you are blocked and need the human user's input, use `pm notify \"<subject>\" \"<body>\"` to "
+        "create an inbox item — do not just ask in chat and wait, the user may not be watching. "
         "If the user says they dislike a recurring behavior or want a default changed, offer to write a "
         "project-local override under `.pollypm/` instead of changing built-in defaults."
     )

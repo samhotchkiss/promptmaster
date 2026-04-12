@@ -83,6 +83,17 @@ Leases auto-expire after 30 minutes. The cockpit auto-claims/releases leases whe
 | `pm issue create --title "..." --body "..."` | Create a new issue |
 | `pm issue move <id> <state>` | Move an issue to a new state |
 
+## Inbox
+
+| Command | What it does |
+|---------|-------------|
+| `pm notify "<subject>" "<body>"` | Create an inbox item for the human user |
+| `pm mail` | List open inbox items |
+| `pm mail --archived` | List archived inbox items |
+| `pm mail --close <filename>` | Archive a specific message |
+
+**When to use `pm notify`:** Any time you need the human user's input, approval, or attention — and they may not be watching your session. The inbox is the reliable way to reach the user. Don't just ask in chat and hope they see it.
+
 ## Maintenance
 
 | Command | What it does |

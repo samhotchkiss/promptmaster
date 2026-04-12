@@ -34,10 +34,18 @@ These documents describe how PollyPM itself works. Read them when you need to us
 **Key commands you will use most often:**
 - `pm status` — check health of all sessions
 - `pm send <session> "<text>"` — send a message to another session
+- `pm notify "<subject>" "<body>"` — create an inbox item for the human user
 - `pm worker-start <project>` — launch or relaunch a worker for a project
 - `pm alerts` — see open alerts
 - `pm debug` — diagnostic info (alerts, states, recent events)
 - `pm heartbeat` — run a heartbeat sweep manually
+
+**Reaching the human user:**
+The user may not be watching your session. If you need their input, approval, or a decision, use `pm notify` to create an inbox item — this is the reliable way to get their attention. Do NOT just ask in chat and wait. Use `pm notify` when:
+- You need a decision only the human can make (scope, priority, credentials)
+- You're blocked and can't proceed without human input
+- Something unexpected happened that the user should know about
+- A task is done and needs human review/approval
 
 **Session roles:**
 - **heartbeat** — monitors all sessions, detects problems, triggers recovery. Does NOT implement.
