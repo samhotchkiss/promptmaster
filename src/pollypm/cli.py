@@ -738,10 +738,14 @@ def up(
         return
 
     if current_tmux:
-        raise typer.Exit(code=supervisor.tmux.switch_client(session_name))
+        # Don't yank the user's tmux client to pollypm — just report success.
+        # The user can switch manually with: tmux switch-client -t pollypm
+        typer.echo(f"PollyPM is running. Attach with: tmux switch-client -t {session_name}")
+        return
 
-    if created:
-        supervisor.focus_console()
+    if not created:
+        typer.echo(f"PollyPM is running. Attach with: tmux attach -t {session_name}")
+        return
 
     raise typer.Exit(code=supervisor.tmux.attach_session(session_name))
 
