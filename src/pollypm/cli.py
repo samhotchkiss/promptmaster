@@ -439,6 +439,26 @@ def issue_comment(
     typer.echo(f"Updated {path}")
 
 
+@issue_app.command("handoff")
+def issue_handoff(
+    task_name: str = typer.Argument(..., help="Issue id or note target."),
+    what_done: str = typer.Option(..., "--done", help="Summary of what was completed."),
+    how_to_test: str = typer.Option(..., "--test", help="How to verify the work."),
+    deviations: str = typer.Option("", "--deviations", help="Any spec deviations and why."),
+    project: str = typer.Option(..., "--project", help="Project key."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
+) -> None:
+    service = PollyPMService(config_path)
+    path = service.append_task_handoff(
+        project,
+        task_name,
+        what_done=what_done,
+        how_to_test=how_to_test,
+        deviations=deviations,
+    )
+    typer.echo(f"Updated {path}")
+
+
 @issue_app.command("counts")
 def issue_counts(
     project: str = typer.Option(..., "--project", help="Project key."),

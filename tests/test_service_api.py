@@ -325,3 +325,49 @@ repo = "acme/widgets"
 
     assert result.passed is True
     assert result.checks == ["repo_accessible"]
+
+
+def test_service_append_task_handoff_writes_structured_note(tmp_path: Path) -> None:
+    project_root = tmp_path / "demo"
+    project_root.mkdir()
+    config = PollyPMConfig(
+        project=ProjectSettings(
+            root_dir=tmp_path,
+            base_dir=tmp_path / ".pollypm-state",
+            logs_dir=tmp_path / ".pollypm-state/logs",
+            snapshots_dir=tmp_path / ".pollypm-state/snapshots",
+            state_db=tmp_path / ".pollypm-state/state.db",
+        ),
+        pollypm=PollyPMSettings(controller_account="claude_main"),
+        accounts={
+            "claude_main": AccountConfig(
+                name="claude_main",
+                provider=ProviderKind.CLAUDE,
+                home=tmp_path / ".pollypm-state" / "homes" / "claude_main",
+            )
+        },
+        sessions={},
+        projects={
+            "demo": KnownProject(key="demo", path=project_root, name="Demo", kind=ProjectKind.GIT, tracked=True),
+        },
+    )
+    config_path = tmp_path / "pollypm.toml"
+    write_config(config, config_path, force=True)
+    service = PollyPMService(config_path)
+
+    note_path = service.append_task_handoff(
+        "demo",
+        "notes.md",
+        what_done="Implemented the GitHub-backed issue flow.",
+        how_to_test="Run the targeted pytest suite.",
+        deviations="Skipped live gh auth in unit tests.",
+    )
+
+    text = note_path.read_text()
+    assert "## Handoff" in text
+    assert "### What Was Done" in text
+    assert "Implemented the GitHub-backed issue flow." in text
+    assert "### How To Test" in text
+    assert "Run the targeted pytest suite." in text
+    assert "### Deviations" in text
+    assert "Skipped live gh auth in unit tests." in text

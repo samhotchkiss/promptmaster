@@ -110,6 +110,37 @@ def test_issue_cli_comment_updates_notes_file(tmp_path: Path) -> None:
     assert "Remember the edge case." in (tmp_path / "demo" / "issues" / "notes.md").read_text()
 
 
+def test_issue_cli_handoff_writes_structured_note(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _config(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "issue",
+            "handoff",
+            "--config",
+            str(config_path),
+            "--project",
+            "demo",
+            "--done",
+            "Implemented the issue commands.",
+            "--test",
+            "Run pytest on CLI and service tests.",
+            "--deviations",
+            "No live gh call in unit coverage.",
+            "notes.md",
+        ],
+    )
+
+    text = (tmp_path / "demo" / "issues" / "notes.md").read_text()
+    assert result.exit_code == 0
+    assert "## Handoff" in text
+    assert "Implemented the issue commands." in text
+    assert "Run pytest on CLI and service tests." in text
+    assert "No live gh call in unit coverage." in text
+
+
 def test_issue_cli_uses_github_backend_when_project_is_configured(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _config(tmp_path)
