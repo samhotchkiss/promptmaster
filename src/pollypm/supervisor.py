@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from pollypm.agent_profiles import get_agent_profile
 from pollypm.agent_profiles.base import AgentProfileContext
@@ -55,11 +58,27 @@ class Supervisor:
     _RECOVERY_WINDOW = timedelta(minutes=30)
     _RECOVERY_LIMIT = 5
     _RECOVERY_HARD_LIMIT = 20  # stop entirely after this many total attempts
+    _STALL_NUDGE_MESSAGE = (
+        "You appear stalled. State the remaining task in one sentence, "
+        "execute the next step now."
+    )
+    _WORKER_BLOCKED_PM_COMMANDS = {
+        "up",
+        "down",
+        "reset",
+        "send",
+        "console",
+        "worker-start",
+        "stop-session",
+        "remove-session",
+        "switch-session-account",
+    }
 
     def __init__(self, config: PollyPMConfig) -> None:
         self.config = config
         self.tmux = TmuxClient()
         self.store = StateStore(config.project.state_db)
+        self._cached_launches: list[SessionLaunchSpec] | None = None
 
     def _effective_session(self, session: SessionConfig, controller_account: str | None = None) -> SessionConfig:
         effective = session
@@ -96,6 +115,7 @@ class Supervisor:
                     args=default_session_args(
                         account.provider,
                         open_permissions=self.config.pollypm.open_permissions_by_default,
+                        role=effective.role,
                     ),
                 )
         return effective
@@ -146,6 +166,10 @@ class Supervisor:
         return names
 
     def plan_launches(self, *, controller_account: str | None = None) -> list[SessionLaunchSpec]:
+        # Cache launches for the default (no controller override) case.
+        # The launch plan only changes when config changes.
+        if controller_account is None and self._cached_launches is not None:
+            return self._cached_launches
         launches: list[SessionLaunchSpec] = []
         worker_projects: dict[str, str] = {}
         for session in self.config.sessions.values():
@@ -168,6 +192,7 @@ class Supervisor:
                 )
             provider = get_provider(effective.provider, root_dir=self.config.project.root_dir)
             launch = provider.build_launch_command(effective, account)
+            launch = self._apply_role_launch_restrictions(effective, launch)
             if effective.provider is ProviderKind.CODEX and effective.role in self._CONTROL_ROLES and launch.initial_input:
                 env = dict(launch.env)
                 env["PM_CODEX_HOME_AGENTS_MD"] = launch.initial_input
@@ -189,6 +214,8 @@ class Supervisor:
                     fresh_launch_marker=launch.fresh_launch_marker,
                 )
             )
+        if controller_account is None:
+            self._cached_launches = launches
         return launches
 
     def bootstrap_tmux(
@@ -284,13 +311,27 @@ class Supervisor:
         self.focus_console()
 
         # Phase 3: Stabilize all sessions in parallel background threads.
-        # These are daemon threads so the CLI can attach to tmux immediately
+        # Daemon threads so the CLI can attach to tmux immediately
         # without waiting for stabilization to complete.
         def _stabilize_one(launch: SessionLaunchSpec, tgt: str) -> None:
             try:
                 self._stabilize_launch(launch, tgt)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # Record the failure so the heartbeat can detect and recover.
+                try:
+                    self.store.record_event(
+                        launch.session.name,
+                        "stabilize_failed",
+                        f"Bootstrap stabilization failed: {exc}",
+                    )
+                    self.store.upsert_alert(
+                        launch.session.name,
+                        "stabilize_failed",
+                        "warn",
+                        f"Session {launch.session.name} failed to stabilize during bootstrap: {exc}",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass  # store itself may be unavailable
 
         for launch, tgt in targets:
             threading.Thread(target=_stabilize_one, args=(launch, tgt), daemon=True).start()
@@ -515,19 +556,31 @@ class Supervisor:
         self.tmux.select_window(f"{tmux_session}:{self._CONSOLE_WINDOW}")
 
     def run_heartbeat(self, snapshot_lines: int = 200) -> list[AlertRecord]:
+        # Phase 1: Fast synchronous pre-work (token sync uses SQLite, must stay on main thread)
         transcript_samples = sync_token_ledger_for_config(self.config)
         if transcript_samples:
             self.store.record_event(
                 "heartbeat",
                 "token_ledger",
-                f"Synced {len(transcript_samples)} transcript token sample(s) before the heartbeat sweep",
+                f"Synced {len(transcript_samples)} transcript token sample(s)",
             )
+        self.release_expired_leases()
+
+        # Phase 2: Fast synchronous sweep — capture + classify + alert
         backend = get_heartbeat_backend(
             self.config.pollypm.heartbeat_backend,
             root_dir=self.config.project.root_dir,
         )
         api = SupervisorHeartbeatAPI(self, snapshot_lines=snapshot_lines)
-        return backend.run(api, snapshot_lines=snapshot_lines)
+        alerts = backend.run(api, snapshot_lines=snapshot_lines)
+
+        # Phase 3: Dispatch slow async jobs in parallel (fire-and-forget)
+        # These must NOT touch self.store (SQLite is single-threaded).
+        from pollypm.job_runner import submit_jobs_parallel
+        submit_jobs_parallel(self, [
+            ("version_check", {}),
+        ])
+        return alerts
 
     def ensure_heartbeat_schedule(self) -> None:
         backend = get_scheduler_backend(
@@ -550,30 +603,49 @@ class Supervisor:
         interval: int,
         payload: dict[str, object] | None = None,
     ) -> None:
-        """Ensure exactly one pending recurring job of the given kind exists.
-
-        Removes duplicates that accumulate from cockpit restarts.
-        """
+        """Ensure exactly one pending recurring job of the given kind exists."""
+        desired_payload = dict(payload or {})
         jobs = backend.list_jobs(self)
-        matching = [j for j in jobs if j.kind == kind and j.interval_seconds == interval]
-        pending = [j for j in matching if j.status == "pending"]
-        if len(pending) == 1:
-            return  # exactly one — nothing to do
-        if len(pending) > 1:
-            # Keep the one with the earliest run_at, mark the rest as done
-            pending.sort(key=lambda j: j.run_at)
-            for dup in pending[1:]:
-                dup.status = "done"
-            backend._save_jobs(self, jobs)
+        matching = [job for job in jobs if job.kind == kind and job.interval_seconds == interval]
+        pending = [job for job in matching if job.status == "pending"]
+        exact_pending = [job for job in pending if job.payload == desired_payload]
+
+        if len(matching) == 1 and len(exact_pending) == 1:
             return
-        # No pending job — schedule a new one
-        backend.schedule(
-            self,
-            kind=kind,
-            run_at=datetime.now(UTC) + timedelta(seconds=interval),
-            payload=payload or {},
-            interval_seconds=interval,
-        )
+
+        kept_job: ScheduledJob | None = None
+        if exact_pending:
+            kept_job = min(exact_pending, key=lambda job: job.run_at)
+        elif pending:
+            kept_job = min(pending, key=lambda job: job.run_at)
+            kept_job.payload = desired_payload
+            kept_job.last_error = None
+        else:
+            kept_job = ScheduledJob(
+                job_id=uuid4().hex,
+                kind=kind,
+                run_at=datetime.now(UTC) + timedelta(seconds=interval),
+                payload=desired_payload,
+                interval_seconds=interval,
+            )
+
+        kept_job.status = "pending"
+        remaining = [job for job in jobs if job not in matching]
+        remaining.append(kept_job)
+
+        save_jobs = getattr(backend, "_save_jobs", None)
+        if callable(save_jobs):
+            save_jobs(self, remaining)
+            return
+
+        if not matching:
+            backend.schedule(
+                self,
+                kind=kind,
+                run_at=kept_job.run_at,
+                payload=kept_job.payload,
+                interval_seconds=interval,
+            )
 
     def _run_heartbeat_local(self, snapshot_lines: int = 200) -> list[AlertRecord]:
         window_map = self._window_map()
@@ -672,6 +744,51 @@ class Supervisor:
             f"Heartbeat sweep completed with {len(self.store.open_alerts())} open alerts",
         )
         return self.store.open_alerts()
+
+    def _apply_role_launch_restrictions(
+        self,
+        session: SessionConfig,
+        launch: LaunchCommand,
+    ) -> LaunchCommand:
+        if session.role != "worker":
+            return launch
+        env = dict(launch.env)
+        shim_dir = self._worker_restriction_shim_dir()
+        current_path = env.get("PATH") or os.environ.get("PATH", "")
+        env["PATH"] = f"{shim_dir}{os.pathsep}{current_path}" if current_path else str(shim_dir)
+        return replace(launch, env=env)
+
+    def _worker_restriction_shim_dir(self) -> Path:
+        shim_dir = self.config.project.base_dir / "role-shims" / "worker"
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        tmux_shim = shim_dir / "tmux"
+        tmux_shim.write_text(
+            "#!/bin/sh\n"
+            "echo 'PollyPM restriction: worker sessions may not manage tmux directly.' >&2\n"
+            "exit 1\n"
+        )
+        tmux_shim.chmod(0o755)
+
+        real_pm = shutil.which("pm")
+        python = shlex.quote(sys.executable)
+        if real_pm:
+            fallback = f"exec {shlex.quote(real_pm)} \"$@\""
+        else:
+            fallback = f"exec {python} -m pollypm.cli \"$@\""
+        pm_shim = shim_dir / "pm"
+        pm_shim.write_text(
+            "#!/bin/sh\n"
+            "case \"$1\" in\n"
+            + "".join(
+                f"  {command}) echo 'PollyPM restriction: worker sessions may not manage sessions with pm {command}.' >&2; exit 1 ;;\n"
+                for command in sorted(self._WORKER_BLOCKED_PM_COMMANDS)
+            )
+            + "esac\n"
+            + fallback
+            + "\n"
+        )
+        pm_shim.chmod(0o755)
+        return shim_dir
 
     def schedule_job(
         self,
@@ -775,6 +892,10 @@ class Supervisor:
                     f"Window {window.name} has produced effectively the same snapshot for 3 heartbeats",
                 )
                 active_alerts.append("suspected_loop")
+                longer_history = self.store.recent_heartbeats(session_name, limit=5)
+                longer_hashes = [item.snapshot_hash for item in longer_history[:5]]
+                if len(longer_hashes) == 5 and len(set(longer_hashes)) == 1:
+                    self._maybe_nudge_stalled_session(launch)
             else:
                 self.store.clear_alert(session_name, "suspected_loop")
         else:
@@ -835,7 +956,51 @@ class Supervisor:
 
         return active_alerts
 
-    _LEASE_TIMEOUT_SECONDS = 1800  # 30 minutes
+    def _maybe_nudge_stalled_session(self, launch: SessionLaunchSpec) -> None:
+        if launch.session.role != "worker":
+            return
+        lease = self.store.get_lease(launch.session.name)
+        if lease is not None and lease.owner == "human":
+            self.store.record_event(
+                launch.session.name,
+                "heartbeat_nudge_skipped",
+                "Skipped stalled-worker nudge because session is leased to human",
+            )
+            return
+        self.send_input(
+            launch.session.name,
+            self._STALL_NUDGE_MESSAGE,
+            owner="heartbeat",
+            force=lease is not None and lease.owner != "human",
+        )
+
+    def _lease_timeout(self) -> timedelta:
+        return timedelta(minutes=self.config.pollypm.lease_timeout_minutes)
+
+    def release_expired_leases(self, *, now: datetime | None = None) -> list[LeaseRecord]:
+        current_time = now or datetime.now(UTC)
+        released: list[LeaseRecord] = []
+        for lease in self.store.list_leases():
+            try:
+                updated_at = datetime.fromisoformat(lease.updated_at)
+            except ValueError:
+                updated_at = current_time - self._lease_timeout() - timedelta(seconds=1)
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=UTC)
+            age = current_time - updated_at.astimezone(UTC)
+            if age < self._lease_timeout():
+                continue
+            self.store.clear_lease(lease.session_name)
+            self.store.record_event(
+                lease.session_name,
+                "lease",
+                (
+                    f"Auto-released expired lease held by {lease.owner} "
+                    f"after {self.config.pollypm.lease_timeout_minutes} minutes"
+                ),
+            )
+            released.append(lease)
+        return released
 
     def claim_lease(self, session_name: str, owner: str, note: str = "") -> None:
         self._require_session(session_name)
@@ -858,7 +1023,7 @@ class Supervisor:
             backend.schedule(
                 self,
                 kind="release_lease",
-                run_at=datetime.now(UTC) + timedelta(seconds=self._LEASE_TIMEOUT_SECONDS),
+                run_at=datetime.now(UTC) + self._lease_timeout(),
                 payload={"session_name": session_name, "owner": owner},
             )
         except Exception:  # noqa: BLE001
@@ -1032,16 +1197,30 @@ class Supervisor:
             return False, attempts
         return attempts <= self._RECOVERY_LIMIT, attempts
 
+    # Failure types where the session is gone — no live interaction to protect.
+    _DEAD_SESSION_FAILURES = frozenset({"missing_window", "pane_dead", "shell_returned"})
+
     def _maybe_recover_session(self, launch: SessionLaunchSpec, *, failure_type: str, failure_message: str) -> None:
         lease = self.store.get_lease(launch.session.name)
         if lease is not None and lease.owner != "pollypm":
-            self.store.upsert_alert(
-                launch.session.name,
-                "recovery_waiting_on_human",
-                "warn",
-                f"Recovery is queued behind lease owner {lease.owner} for {launch.window_name}",
-            )
-            return
+            if failure_type in self._DEAD_SESSION_FAILURES:
+                # Session is dead — the lease is protecting nothing.  Release it
+                # so recovery can proceed immediately.
+                self.store.clear_lease(launch.session.name)
+                self.store.clear_alert(launch.session.name, "recovery_waiting_on_human")
+                self.store.record_event(
+                    launch.session.name,
+                    "lease_override",
+                    f"Auto-released stale lease (owner={lease.owner}) — session is {failure_type}",
+                )
+            else:
+                self.store.upsert_alert(
+                    launch.session.name,
+                    "recovery_waiting_on_human",
+                    "warn",
+                    f"Recovery is queued behind lease owner {lease.owner} for {launch.window_name}",
+                )
+                return
         if failure_type == "provider_outage":
             self.store.upsert_session_runtime(
                 session_name=launch.session.name,
@@ -1355,8 +1534,15 @@ class Supervisor:
         import shutil
         pm_path = shutil.which("pm")
         if pm_path:
-            return f"{shlex.quote(pm_path)} cockpit"
-        return f"sh -lc 'cd {root} && uv run pm cockpit'"
+            cockpit_cmd = f"{shlex.quote(pm_path)} cockpit"
+        else:
+            cockpit_cmd = f"cd {root} && uv run pm cockpit"
+        # Wrap in a restart loop so the rail auto-recovers from crashes.
+        # 2s cooldown prevents tight crash loops; exits cleanly on SIGTERM.
+        return (
+            f"sh -lc 'while true; do {cockpit_cmd}; "
+            f"echo \"[Rail exited — restarting in 2s]\"; sleep 2; done'"
+        )
 
     def _controller_candidates(self) -> list[str]:
         ordered = [self.config.pollypm.controller_account, *self.config.pollypm.failover_accounts]
@@ -1512,6 +1698,17 @@ class Supervisor:
             display_path = prompt_path.relative_to(self.config.project.root_dir)
         except ValueError:
             display_path = prompt_path
+        # Point to both SYSTEM.md (PollyPM reference) and the control prompt (role)
+        instruct_path = self.config.project.root_dir / ".pollypm" / "docs" / "SYSTEM.md"
+        if instruct_path.exists():
+            try:
+                instruct_display = instruct_path.relative_to(self.config.project.root_dir)
+            except ValueError:
+                instruct_display = instruct_path
+            return (
+                f'Read {instruct_display} for system context, then read {display_path} for your role. '
+                f'Adopt both as your operating instructions, reply only "ready", then wait.'
+            )
         return (
             f'Read {display_path}, adopt it as your operating instructions, reply only "ready", then wait.'
         )

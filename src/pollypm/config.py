@@ -169,6 +169,7 @@ def _parse_pollypm_settings(raw: dict[str, object], sessions: dict[str, SessionC
         failover_accounts=failover_accounts,
         heartbeat_backend=str(pollypm_raw.get("heartbeat_backend", "local")),
         scheduler_backend=str(pollypm_raw.get("scheduler_backend", "inline")),
+        lease_timeout_minutes=max(1, int(pollypm_raw.get("lease_timeout_minutes", 30))),
     )
 
 
@@ -217,8 +218,7 @@ def _merge_project_local_config(
                 project.persona_name = persona_name.strip()
         for session_name, session in _parse_sessions(raw, base=project.path, default_project=project_key).items():
             session.project = project_key
-            if session_name in sessions:
-                raise ValueError(f"Duplicate session name '{session_name}' found while loading project '{project_key}'.")
+            # Project-local session config overrides global config for the same name
             sessions[session_name] = session
 
 
@@ -288,6 +288,7 @@ def _render_global_config(config: PollyPMConfig) -> str:
         f"failover_enabled = {'true' if config.pollypm.failover_enabled else 'false'}",
         f'heartbeat_backend = "{config.pollypm.heartbeat_backend}"',
         f'scheduler_backend = "{config.pollypm.scheduler_backend}"',
+        f"lease_timeout_minutes = {config.pollypm.lease_timeout_minutes}",
     ]
     if config.pollypm.failover_accounts:
         items = ", ".join(f'"{name}"' for name in config.pollypm.failover_accounts)
@@ -442,6 +443,7 @@ def _build_example_config(root: Path) -> PollyPMConfig:
             failover_accounts=["claude_primary"],
             heartbeat_backend="local",
             scheduler_backend="inline",
+            lease_timeout_minutes=30,
         ),
         accounts={
             "codex_primary": AccountConfig(
