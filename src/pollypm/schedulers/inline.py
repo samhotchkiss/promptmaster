@@ -6,7 +6,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from pollypm.knowledge_extract import extract_knowledge_once
+from pollypm.atomic_io import atomic_write_json
+from pollypm.job_runner import get_executor, submit_job
 from pollypm.schedulers.base import ScheduledJob, SchedulerBackend
 
 
@@ -85,26 +86,10 @@ class InlineSchedulerBackend(SchedulerBackend):
         return executed
 
     def _execute(self, supervisor, job: ScheduledJob) -> None:
-        if job.kind == "heartbeat":
-            supervisor.run_heartbeat()
-            return
-        if job.kind == "send_input":
-            supervisor.send_input(
-                str(job.payload["session_name"]),
-                str(job.payload["text"]),
-                owner=str(job.payload.get("owner", "pm-bot")),
-            )
-            return
-        if job.kind == "release_lease":
-            supervisor.release_lease(
-                str(job.payload["session_name"]),
-                str(job.payload.get("owner", "human")),
-            )
-            return
-        if job.kind == "knowledge_extract":
-            extract_knowledge_once(supervisor.config)
-            return
-        raise RuntimeError(f"Unsupported scheduled job kind: {job.kind}")
+        executor_fn = get_executor(job.kind)
+        if executor_fn is None:
+            raise RuntimeError(f"Unsupported scheduled job kind: {job.kind}")
+        executor_fn(supervisor, job.payload)
 
     def _jobs_path(self, supervisor) -> Path:
         path = supervisor.config.project.base_dir / "scheduler" / "jobs.json"
@@ -136,4 +121,4 @@ class InlineSchedulerBackend(SchedulerBackend):
             item = asdict(job)
             item["run_at"] = job.run_at.isoformat()
             raw.append(item)
-        path.write_text(json.dumps(raw, indent=2) + "\n")
+        atomic_write_json(path, raw)

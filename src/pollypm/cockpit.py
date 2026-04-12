@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from pollypm.atomic_io import atomic_write_json
 from pollypm.config import load_config
 from pollypm.messaging import list_open_messages
 from pollypm.providers import get_provider
@@ -51,11 +52,13 @@ class CockpitRouter:
         return config.project.base_dir / self._STATE_FILE
 
     def selected_key(self) -> str:
+        self._validate_state()
         data = self._load_state()
         value = data.get("selected")
         return str(value) if isinstance(value, str) and value else "polly"
 
     def set_selected_key(self, key: str) -> None:
+        self._validate_state()
         data = self._load_state()
         data["selected"] = key
         self._write_state(data)
@@ -71,7 +74,7 @@ class CockpitRouter:
         return payload if isinstance(payload, dict) else {}
 
     def _write_state(self, data: dict[str, object]) -> None:
-        self._state_path().write_text(json.dumps(data, indent=2) + "\n")
+        atomic_write_json(self._state_path(), data)
 
     def _validate_state(self) -> None:
         """Clear stale entries from cockpit_state.json.
@@ -84,35 +87,69 @@ class CockpitRouter:
         dirty = False
         config = load_config(self.config_path)
         target = f"{config.project.tmux_session}:{self._COCKPIT_WINDOW}"
+        panes = self._safe_list_panes(target)
 
         right_pane_id = state.get("right_pane_id")
-        if isinstance(right_pane_id, str):
-            try:
-                panes = self.tmux.list_panes(target)
-                if not any(p.pane_id == right_pane_id for p in panes):
-                    state.pop("right_pane_id", None)
-                    state.pop("mounted_session", None)
-                    dirty = True
-            except Exception:  # noqa: BLE001
+        right_pane = None
+        if isinstance(right_pane_id, str) and right_pane_id:
+            right_pane = next((pane for pane in panes if pane.pane_id == right_pane_id), None)
+            if right_pane is None or getattr(right_pane, "pane_dead", False):
                 state.pop("right_pane_id", None)
                 state.pop("mounted_session", None)
                 dirty = True
+                right_pane = None
 
         mounted = state.get("mounted_session")
         if isinstance(mounted, str) and mounted:
+            release_lease = False
             try:
                 supervisor = self._load_supervisor()
                 launches = supervisor.plan_launches()
                 launch = next((l for l in launches if l.session.name == mounted), None)
-                if launch is None:
+                if launch is None or not self._mounted_session_matches_pane(launch, right_pane):
                     state.pop("mounted_session", None)
                     dirty = True
+                    release_lease = True
             except Exception:  # noqa: BLE001
                 state.pop("mounted_session", None)
                 dirty = True
+                release_lease = True
+            if release_lease:
+                self._release_cockpit_lease(supervisor if "supervisor" in locals() else None, mounted)
 
         if dirty:
             self._write_state(state)
+
+    def _safe_list_panes(self, target: str) -> list:
+        try:
+            return self.tmux.list_panes(target)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _mounted_session_matches_pane(self, launch, pane) -> bool:
+        if pane is None or getattr(pane, "pane_dead", False):
+            return False
+        if not self._is_live_provider_pane(pane):
+            return False
+        pane_path = getattr(pane, "pane_current_path", "")
+        session_cwd = getattr(launch.session, "cwd", None)
+        if not pane_path or session_cwd is None:
+            return False
+        try:
+            return Path(pane_path).resolve() == Path(session_cwd).resolve()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _release_cockpit_lease(self, supervisor: Supervisor | None, session_name: str) -> None:
+        if supervisor is None:
+            try:
+                supervisor = self._load_supervisor()
+            except Exception:  # noqa: BLE001
+                return
+        try:
+            supervisor.release_lease(session_name, expected_owner="cockpit")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _ui_initialized_sessions(self) -> set[str]:
         data = self._load_state()
@@ -571,11 +608,15 @@ class CockpitRouter:
             return
         right_pane_id = self._right_pane_id(window_target)
         if right_pane_id is None:
+            state.pop("mounted_session", None)
+            self._write_state(state)
+            self._release_cockpit_lease(supervisor, mounted_session)
             return
         right_pane = max(self.tmux.list_panes(window_target), key=self._pane_left)
         if not self._is_live_provider_pane(right_pane):
             state.pop("mounted_session", None)
             self._write_state(state)
+            self._release_cockpit_lease(supervisor, mounted_session)
             return
         launch = next(item for item in supervisor.plan_launches() if item.session.name == mounted_session)
         storage_session = supervisor.storage_closet_session_name()
@@ -592,11 +633,7 @@ class CockpitRouter:
                     break
         state.pop("mounted_session", None)
         self._write_state(state)
-        # Release the cockpit lease when unmounting
-        try:
-            supervisor.release_lease(mounted_session, expected_owner="cockpit")
-        except Exception:  # noqa: BLE001
-            pass
+        self._release_cockpit_lease(supervisor, mounted_session)
 
     def _mounted_session_name(self, supervisor: Supervisor, window_target: str) -> str | None:
         state = self._load_state()
@@ -790,7 +827,9 @@ def _build_cockpit_detail_inner(config_path: Path, kind: str, target: str | None
         return "\n".join(lines)
 
     if kind == "project" and target:
-        project = config.projects[target]
+        project = config.projects.get(target)
+        if project is None:
+            return f"Project '{target}' not found in config.\n\nIt may not have been saved. Try `pm add-project <path>` or check ~/.pollypm/pollypm.toml."
         ensure_project_scaffold(project.path)
         task_backend = get_task_backend(project.path)
         issues_root = task_backend.issues_root()

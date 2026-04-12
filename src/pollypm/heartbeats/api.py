@@ -6,8 +6,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pollypm.atomic_io import atomic_write_json
 from pollypm.checkpoints import record_checkpoint, snapshot_hash, write_mechanical_checkpoint
 from pollypm.heartbeats.base import HeartbeatCursor, HeartbeatSessionContext, HeartbeatUnmanagedWindow
+from pollypm.knowledge_extract import store_snapshot_learnings
 
 if TYPE_CHECKING:
     from pollypm.supervisor import Supervisor
@@ -101,6 +103,16 @@ class SupervisorHeartbeatAPI:
             artifact=artifact,
             snapshot_path=Path(context.snapshot_path),
             memory_backend_name=self.supervisor.config.memory.backend,
+        )
+        project = self.supervisor.config.projects.get(launch.session.project)
+        project_root = project.path if project is not None else Path(launch.session.cwd)
+        store_snapshot_learnings(
+            self.supervisor.config,
+            project_root=project_root,
+            scope=launch.session.project,
+            snapshot_text=context.pane_text,
+            memory_backend_name=self.supervisor.config.memory.backend,
+            source="heartbeat",
         )
 
     def record_event(self, session_name: str, event_type: str, message: str) -> None:
@@ -233,7 +245,7 @@ class SupervisorHeartbeatAPI:
     def _save_cursors(self, cursors: dict[str, HeartbeatCursor]) -> None:
         path = self._cursor_path()
         raw = {name: asdict(cursor) for name, cursor in cursors.items()}
-        path.write_text(json.dumps(raw, indent=2) + "\n")
+        atomic_write_json(path, raw)
 
     def _read_transcript_delta(self, path: Path, last_offset: int) -> str:
         if not path.exists():
