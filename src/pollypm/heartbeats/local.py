@@ -71,63 +71,12 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                     )
                 except Exception:  # noqa: BLE001
                     pass
-        # Post-sweep: if operator is idle and workers are waiting, send supervision reminder
-        self._check_supervision_needed(api)
-
         api.record_event(
             "heartbeat",
             "heartbeat",
             f"Heartbeat sweep completed with {len(api.open_alerts())} open alerts",
         )
         return api.open_alerts()
-
-    def _check_supervision_needed(self, api) -> None:
-        """If the operator is idle and workers are waiting, remind Polly to supervise."""
-        try:
-            from datetime import UTC, datetime
-            contexts = api.list_sessions()
-            operator = next((c for c in contexts if c.role == "operator-pm"), None)
-            if operator is None or not operator.window_present:
-                return
-            workers = [c for c in contexts if c.role == "worker"]
-            idle_workers = []
-            for w in workers:
-                if not w.window_present:
-                    continue
-                rt = api.supervisor.store.get_session_runtime(w.session_name)
-                if rt and rt.status in ("waiting_on_user", "needs_followup", "healthy"):
-                    hashes = api.recent_snapshot_hashes(w.session_name, limit=3)
-                    if len(hashes) == 3 and len(set(hashes)) == 1:
-                        idle_workers.append(w.session_name)
-            if len(idle_workers) < 2:
-                return  # only remind if multiple workers are waiting
-            # Rate limit: check for recent supervision_reminder events
-            now = datetime.now(UTC)
-            recent = api.supervisor.store.recent_events(limit=50)
-            for event in recent:
-                if (
-                    event.event_type == "supervision_reminder"
-                    and (now - datetime.fromisoformat(event.created_at)).total_seconds() < 300
-                ):
-                    return  # sent one less than 5 min ago
-            # Send supervision reminder — different from nudge, bypasses lease + nudge cooldown
-            names = ", ".join(idle_workers[:4])
-            try:
-                api.supervisor.send_input(
-                    "operator",
-                    f"Supervision check: {len(idle_workers)} workers idle ({names}). "
-                    f"Run `pm status`, review their output, and send next instructions.",
-                    owner="heartbeat",
-                    force=True,  # bypass cockpit lease
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            api.supervisor.store.record_event(
-                "operator", "supervision_reminder",
-                f"Sent supervision reminder: {len(idle_workers)} idle workers",
-            )
-        except Exception:  # noqa: BLE001
-            pass
 
     def _process_unmanaged_windows(self, api) -> None:
         current_alert_types: set[str] = set()
@@ -146,15 +95,6 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             api.raise_alert("heartbeat", alert_type, "warn", message)
             if alert_type not in existing_alert_types:
                 api.record_event("heartbeat", "unmanaged_window", message)
-                api.send_session_message(
-                    "operator",
-                    (
-                        "Heartbeat follow-up: inspect unmanaged tmux window "
-                        f"{window.window_name} in session {window.tmux_session}. "
-                        "It is not part of the managed Polly launch plan."
-                    ),
-                    owner="heartbeat",
-                )
         for alert_type in existing_alert_types - current_alert_types:
             api.clear_alert("heartbeat", alert_type)
 
@@ -220,10 +160,12 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                     f"Window {context.window_name} has produced effectively the same snapshot for 3 heartbeats",
                 )
                 alerts.append("suspected_loop")
-                # After 5 consecutive identical snapshots, nudge the session
+                # After 5 consecutive identical snapshots, queue a Haiku triage
+                # to decide: nudge worker, create inbox item for Polly, or do nothing
                 longer_hashes = api.recent_snapshot_hashes(context.session_name, limit=5)
                 if len(longer_hashes) == 5 and len(set(longer_hashes)) == 1:
-                    self._nudge_stalled_session(api, context)
+                    if context.role == "worker":
+                        self._triage_stalled_worker(api, context)
             else:
                 api.clear_alert(context.session_name, "suspected_loop")
         else:
@@ -296,8 +238,8 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                 prev = runtime.recovery_attempts if runtime else 0
                 intervention = select_intervention(health, signals, previous_interventions=prev)
                 if intervention:
-                    if intervention.action == "nudge":
-                        self._nudge_stalled_session(api, context)
+                    if intervention.action == "nudge" and context.role == "worker":
+                        self._nudge_stalled_worker(api, context)
                     elif intervention.action == "escalate":
                         self._escalate_to_inbox(api, context, intervention.reason)
             except Exception:  # noqa: BLE001
@@ -380,100 +322,108 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         return True
 
     # Rate limit nudges: max once per session per 10 minutes
+    # Rate limits for worker nudges
     _NUDGE_COOLDOWN_SECONDS = 600
-    # Circuit breaker: after this many nudges with no change, stop and recover.
-    # Set high enough that normal supervision cycles don't trigger it.
-    # At 10min cooldown, 6 nudges = 1 hour of continuous unresponsiveness.
     _MAX_NUDGES_BEFORE_RECOVERY = 6
 
-    def _nudge_stalled_session(self, api, context: HeartbeatSessionContext) -> None:
-        """Send a targeted nudge to a stalled session, with rate limiting and circuit breaker."""
-        # Only nudge worker and operator roles
-        if context.role not in ("worker", "operator-pm"):
+    def _nudge_stalled_worker(self, api, context: HeartbeatSessionContext) -> None:
+        """Send a targeted nudge to a stalled WORKER. Never targets the operator."""
+        if context.role != "worker":
             return
-        # Circuit breaker + rate limiter for nudges
         try:
-            from datetime import UTC, datetime, timedelta
+            from datetime import UTC, datetime
             recent = api.supervisor.store.recent_events(limit=200)
             now = datetime.now(UTC)
-            # Debounce: don't nudge if the session received input recently (avoid contaminating user messages)
+            # Debounce: skip if worker received input recently
             for event in recent:
                 if (
                     event.session_name == context.session_name
                     and event.event_type == "send_input"
                     and (now - datetime.fromisoformat(event.created_at)).total_seconds() < 120
                 ):
-                    return  # session just received input, let it process
+                    return
+            # Rate limit + circuit breaker
             nudge_count = 0
-            most_recent_nudge_age = None
+            most_recent_age = None
             for event in recent:
-                if event.session_name != context.session_name:
+                if event.session_name != context.session_name or event.event_type != "nudge":
                     continue
-                if event.event_type == "nudge":
-                    age = (now - datetime.fromisoformat(event.created_at)).total_seconds()
-                    if age < 3600:  # count nudges in last hour
-                        nudge_count += 1
-                    if most_recent_nudge_age is None:
-                        most_recent_nudge_age = age
-
-            # Circuit breaker FIRST: if we've nudged too many times, escalate or recover
+                age = (now - datetime.fromisoformat(event.created_at)).total_seconds()
+                if age < 3600:
+                    nudge_count += 1
+                if most_recent_age is None:
+                    most_recent_age = age
+            # Circuit breaker: too many nudges → recover the worker
             if nudge_count >= self._MAX_NUDGES_BEFORE_RECOVERY:
-                api.raise_alert(
+                api.recover_session(
                     context.session_name,
-                    "nudge_circuit_breaker",
-                    "warn",
-                    f"Session unresponsive after {nudge_count} nudges — escalating",
-                )
-                # NEVER kill the operator — escalate to inbox instead. Killing Polly
-                # loses all her context, task tracking, and supervision state.
-                if context.role == "operator-pm":
-                    self._escalate_to_inbox(api, context, f"Operator idle for {nudge_count} nudge cycles — may need user direction")
-                else:
-                    api.recover_session(
-                        context.session_name,
-                        failure_type="unresponsive",
-                        message=f"Unresponsive after {nudge_count} nudges — force restart",
-                    )
-                api.supervisor.store.record_event(
-                    context.session_name,
-                    "circuit_breaker",
-                    f"Circuit breaker triggered: {nudge_count} nudges with no response, recovering session",
+                    failure_type="unresponsive",
+                    message=f"Worker unresponsive after {nudge_count} nudges — restarting",
                 )
                 return
-
-            # Rate limit: skip if nudged recently (but after circuit breaker check)
-            if most_recent_nudge_age is not None and most_recent_nudge_age < self._NUDGE_COOLDOWN_SECONDS:
+            # Rate limit
+            if most_recent_age is not None and most_recent_age < self._NUDGE_COOLDOWN_SECONDS:
                 return
         except Exception:  # noqa: BLE001
             pass
-        # Build a context-aware nudge based on the pane snapshot
+        # Context-aware nudge for the worker
         snippet = (context.pane_text or "").strip().splitlines()[-1][:80] if context.pane_text else ""
-        if context.role == "operator-pm":
-            message = (
-                "You appear idle. Check pm status for session health, "
-                "pm mail for inbox items, and pm alerts for open issues. "
-                "If there is pending work, delegate it to a worker."
-            )
-        elif "permission" in snippet.lower() or "approve" in snippet.lower():
-            message = (
-                "You appear stuck on a permissions prompt. "
-                "Try accepting the permissions or working around the restriction."
-            )
+        if "permission" in snippet.lower() or "approve" in snippet.lower():
+            message = "You appear stuck on a permissions prompt. Accept or work around it."
         elif "error" in snippet.lower() or "failed" in snippet.lower():
-            message = (
-                f"You appear stuck after an error. Read the error carefully, "
-                f"fix the root cause, and continue. Don't retry the same approach."
-            )
+            message = "You hit an error. Read it carefully, fix the root cause, and continue."
         else:
-            message = (
-                "You appear stalled. State the remaining task in one sentence, "
-                "execute the next concrete step now, and report verification or blocker."
-            )
+            message = "State the remaining task in one sentence, execute the next step, and report."
         api.send_session_message(context.session_name, message, owner="heartbeat")
         try:
             api.supervisor.store.record_event(context.session_name, "nudge", f"Sent nudge: {message[:80]}")
         except Exception:  # noqa: BLE001
             pass
+
+    def _triage_stalled_worker(self, api, context: HeartbeatSessionContext) -> None:
+        """Triage a worker that's been idle for 5+ heartbeats.
+
+        Uses heuristics (with hook for future Haiku LLM call) to decide:
+        - Nudge the worker with a specific instruction
+        - Create an inbox item for Polly (significant work done, needs review)
+        - Do nothing (worker is legitimately idle)
+        """
+        snapshot = (context.pane_text or "").strip()
+        lowered = snapshot.lower()
+
+        # Heuristic: does the snapshot show completed work?
+        done_signals = ["committed", "all tests pass", "pushed", "done", "completed", "ready for review"]
+        if any(sig in lowered for sig in done_signals):
+            # Work looks complete — notify Polly via inbox
+            try:
+                from pollypm.messaging import create_message
+                snippet = snapshot.splitlines()[-1][:100] if snapshot else "check worker output"
+                create_message(
+                    api.supervisor.config.project.root_dir,
+                    sender="heartbeat",
+                    subject=f"Review: {context.session_name} completed work",
+                    body=(
+                        f"Worker '{context.session_name}' appears to have completed a task.\n\n"
+                        f"Last output: {snippet}\n\n"
+                        f"Review with: `pm send {context.session_name} 'report status'`"
+                    ),
+                )
+                api.supervisor.store.record_event(
+                    context.session_name, "triage_review",
+                    f"Created inbox item for Polly: worker completed work",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+        # Heuristic: is there a clear next step the worker should take?
+        next_step_signals = ["next step", "next,", "todo", "remaining", "should", "need to"]
+        if any(sig in lowered for sig in next_step_signals):
+            self._nudge_stalled_worker(api, context)
+            return
+
+        # Nothing actionable — do nothing. Worker is legitimately idle.
+        # Future: replace heuristics with a Haiku LLM call for smarter triage.
 
     def _classify(self, context: HeartbeatSessionContext) -> tuple[str, str]:
         text = (context.transcript_delta or context.pane_text or "").strip()
