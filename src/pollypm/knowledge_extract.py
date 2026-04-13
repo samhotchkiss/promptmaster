@@ -356,12 +356,13 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 def _apply_docs_delta(project_root: Path, delta: KnowledgeDelta) -> int:
-    docs_root = project_root / "docs"
-    docs_root.mkdir(parents=True, exist_ok=True)
+    from pollypm.doc_backends import get_doc_backend
+    backend = get_doc_backend(project_root)
     updated = 0
     updated += int(
         _update_doc(
-            docs_root / "project-overview.md",
+            backend,
+            "project-overview",
             "Project Overview",
             {
                 "## Goals": delta.goals,
@@ -370,14 +371,15 @@ def _apply_docs_delta(project_root: Path, delta: KnowledgeDelta) -> int:
             },
         )
     )
-    updated += int(_update_doc(docs_root / "decisions.md", "Decisions", {"## Decisions": delta.decisions}))
-    updated += int(_update_doc(docs_root / "risks.md", "Risks", {"## Risks": delta.risks}))
-    updated += int(_update_doc(docs_root / "ideas.md", "Ideas", {"## Ideas": delta.ideas}))
+    updated += int(_update_doc(backend, "decisions", "Decisions", {"## Decisions": delta.decisions}))
+    updated += int(_update_doc(backend, "risks", "Risks", {"## Risks": delta.risks}))
+    updated += int(_update_doc(backend, "ideas", "Ideas", {"## Ideas": delta.ideas}))
     return updated
 
 
-def _update_doc(path: Path, title: str, updates: dict[str, list[str]]) -> bool:
-    existing = path.read_text() if path.exists() else f"# {title}\n"
+def _update_doc(backend, name: str, title: str, updates: dict[str, list[str]]) -> bool:
+    existing_entry = backend.read_document(name)
+    existing = existing_entry.content if existing_entry else f"# {title}\n"
     sections = _parse_sections(existing)
     changed = False
     for heading, items in updates.items():
@@ -392,7 +394,7 @@ def _update_doc(path: Path, title: str, updates: dict[str, list[str]]) -> bool:
     if not changed:
         return False
     sections[SUMMARY_HEADER] = _render_summary(sections)
-    path.write_text(_render_doc(title, sections))
+    backend.write_document(name=name, title=title, content=_render_doc(title, sections))
     return True
 
 

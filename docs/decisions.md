@@ -6,16 +6,21 @@ Key decisions made during the project, with rationale and context.
 
 ## Decisions
 
-- Implement memory system integration with heartbeat sweep mechanism (issue 0033) — COMPLETED
-- Use Level 1 checkpoints triggered on issue completion (issue 0032) — COMPLETED
-- Enforce role-based tool restrictions on heartbeat and other workers (0034) — COMPLETED
-- Lease timeout handling for website worker with auto-release (0035) — COMPLETED
-- Enforce full issue state machine: issues must pass through 03-needs-review → 04-in-review before completion (0036) — **IN PROGRESS with 7 failing tests**; uncommitted changes exist
-- Implement reopen and request-change flow for issues (issue 0037) — **IN PROGRESS with 7 failing tests**; uncommitted changes exist
-- Update system state documentation for architecture visibility (issue 0038) — Status uncertain; doc last updated April 11
-- Use Haiku model instead of Opus for extraction/summarization work (cost optimization)
-- Worker idle detection: flag standby workers idle >5 heartbeat cycles for manual intervention — IMPLEMENTED AND OPERATIONAL
-- Shift to multi-project analysis: After PollyPM core completion, initiate analysis of 'news' project — IN PROGRESS (PollyPM chunks 25-28, 'news' chunks 13-14 processed as of 00:56:58 UTC)
-- Enable concurrent multi-project chunk analysis with <60-second inter-chunk latency — CONFIRMED OPERATIONAL: sustained across project boundary transitions
+- Use SQLite for storage backend
+- API key-based authentication as primary auth mechanism
+- tmux as the control plane interface
+- Role-based access control with Heartbeat and Operator roles
+- Heartbeat role: Claude with Bash only (edit/write blocked), read-only analysis only
+- Operator role: Claude with extended permissions for code modification and testing
+- Use Haiku model for extraction work (cost optimization)
+- Reassign idle workers to active work rather than let them sit idle
+- Complete system state roadmap consolidation as priority knowledge extraction task
+- Run full pytest suite as final validation before marking issues complete
+- Set completed worker sessions to `done` status to suppress heartbeat alerts
+- CRITICAL: Direct instructions from users are MANDATORY and must never be ignored
+- Run pollypm repair to regenerate project documentation scaffolding
+- Assign post-repair knowledge extraction tasks to consolidate historical project states
+- Process project histories in chunks to efficiently consolidate state understanding
+- Documentation claims must be verified against actual code state and event timeline—mismatches indicate stale documentation
 
-*Last updated: 2026-04-13T01:22:08.957292Z*
+*Last updated: 2026-04-13T01:29:31.935791Z*

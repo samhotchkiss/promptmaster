@@ -584,62 +584,55 @@ def generate_docs(
     *,
     timestamp: str | None = None,
 ) -> int:
-    """Write extracted understanding into docs/ files. Returns count of docs generated."""
-    docs_dir = project_root / "docs"
-    docs_dir.mkdir(parents=True, exist_ok=True)
+    """Write extracted understanding into docs/ files via the doc backend.
 
+    Uses the pluggable doc backend so docs can be stored in markdown,
+    a wiki, or any other supported format. Only overwrites PollyPM-managed
+    docs (identified by the *Last updated:* marker). User-created docs
+    in docs/ are left untouched.
+    """
+    from pollypm.doc_backends import get_doc_backend
+
+    backend = get_doc_backend(project_root)
     ts = timestamp or datetime.now(UTC).isoformat().replace("+00:00", "Z")
     generated = 0
 
-    # project-overview.md
-    overview_content = _render_overview(understanding, ts)
-    (docs_dir / "project-overview.md").write_text(overview_content)
-    generated += 1
-
-    # decisions.md
-    decisions_content = _render_list_doc(
-        "Decisions",
-        "Key decisions made during the project, with rationale and context.",
-        understanding.decisions,
-        ts,
-    )
-    (docs_dir / "decisions.md").write_text(decisions_content)
-    generated += 1
-
-    # architecture.md
-    arch_content = _render_list_doc(
-        "Architecture",
-        "System design, components, boundaries, data flow, and dependencies.",
-        understanding.architecture,
-        ts,
-    )
-    (docs_dir / "architecture.md").write_text(arch_content)
-    generated += 1
-
-    # history.md
-    history_content = _render_list_doc(
-        "History",
-        "Chronological narrative of how the project evolved.",
-        understanding.history,
-        ts,
-    )
-    (docs_dir / "history.md").write_text(history_content)
-    generated += 1
-
-    # conventions.md
-    conventions_content = _render_list_doc(
-        "Conventions",
-        "Coding patterns, naming conventions, testing approaches, and tooling preferences.",
-        understanding.conventions,
-        ts,
-    )
-    (docs_dir / "conventions.md").write_text(conventions_content)
-    generated += 1
-
-    # deprecated-facts.md (only if there are deprecated facts)
+    docs_to_write = [
+        ("project-overview", "Project Overview", _render_overview(understanding, ts)),
+        ("decisions", "Decisions", _render_list_doc(
+            "Decisions",
+            "Key decisions made during the project, with rationale and context.",
+            understanding.decisions, ts,
+        )),
+        ("architecture", "Architecture", _render_list_doc(
+            "Architecture",
+            "System design, components, boundaries, data flow, and dependencies.",
+            understanding.architecture, ts,
+        )),
+        ("history", "History", _render_list_doc(
+            "History",
+            "Chronological narrative of how the project evolved.",
+            understanding.history, ts,
+        )),
+        ("conventions", "Conventions", _render_list_doc(
+            "Conventions",
+            "Coding patterns, naming conventions, testing approaches, and tooling preferences.",
+            understanding.conventions, ts,
+        )),
+    ]
     if understanding.deprecated_facts:
-        deprecated_content = _render_deprecated_facts(understanding.deprecated_facts, ts)
-        (docs_dir / "deprecated-facts.md").write_text(deprecated_content)
+        docs_to_write.append(
+            ("deprecated-facts", "Deprecated Facts", _render_deprecated_facts(understanding.deprecated_facts, ts))
+        )
+
+    for name, title, content in docs_to_write:
+        # Check if an existing doc is user-created (no PollyPM marker)
+        existing = backend.read_document(name)
+        if existing is not None and "*Last updated:" not in existing.content:
+            # User-created doc — don't overwrite, write to a separate file
+            backend.write_document(name=f"{name}-pollypm", title=title, content=content, last_updated=ts)
+        else:
+            backend.write_document(name=name, title=title, content=content, last_updated=ts)
         generated += 1
 
     return generated
