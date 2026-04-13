@@ -22,13 +22,18 @@ from pollypm.config_patches import apply_preference_patch, detect_preference_pat
 from pollypm.config import load_config
 from pollypm.itsalive import deploy_site, pending_deploys, sweep_pending_deploys
 from pollypm.inbox_v2 import (
-    InboxMessage,
-    create_message,
-    close_message as close_v2_message,
     find_message,
-    list_messages,
     read_message,
-    reply_to_message,
+)
+from pollypm.messaging import (
+    append_thread_message,
+    close_message,
+    create_message,
+    create_thread,
+    get_thread,
+    list_open_messages,
+    set_handoff,
+    transition_thread,
 )
 from pollypm.models import ProviderKind, SessionConfig, SessionLaunchSpec
 from pollypm.projects import (
@@ -575,46 +580,35 @@ class PollyPMService:
     def remove_session(self, session_name: str) -> None:
         remove_worker_session(self.config_path, session_name)
 
-    def create_inbox_item(self, *, sender: str, subject: str, body: str) -> InboxMessage:
-        config = load_config(self.config_path)
-        return create_message(config.project.root_dir, sender=sender, subject=subject, body=body)
+    def create_inbox_item(self, *, sender: str, subject: str, body: str):
+        return create_message(self.config_path.parent, sender=sender, subject=subject, body=body)
 
     def list_inbox_items(self) -> list[object]:
-        config = load_config(self.config_path)
-        return list_messages(config.project.root_dir, status="open")
+        return list_open_messages(self.config_path.parent)
 
     def triage_inbox_item(self, item_name: str, *, actor: str, owner: str = "pm") -> object:
-        config = load_config(self.config_path)
-        msg = find_message(config.project.root_dir, item_name)
-        if msg is None:
-            raise FileNotFoundError(item_name)
-        reply_to_message(config.project.root_dir, msg.id, sender=actor, body=f"Triaged, assigning to {owner}.", new_owner=owner)
-        return find_message(config.project.root_dir, msg.id)
+        return create_thread(self.config_path.parent, item_name, actor=actor, owner=owner)
 
     def route_inbox_thread(self, thread_id: str, *, actor: str = "pm") -> InboxRouteDecision:
-        config = load_config(self.config_path)
-        msg = find_message(config.project.root_dir, thread_id)
-        if msg is None:
-            raise FileNotFoundError(thread_id)
-        body = self._get_message_body(config.project.root_dir, msg.id)
-        if self._message_needs_pm_ownership(msg.subject, body):
+        thread = get_thread(self.config_path.parent, thread_id)
+        body = self._get_thread_body(thread)
+        if self._message_needs_pm_ownership(thread.subject, body):
             note = "PM kept ownership because the thread needs policy, scope, or priority judgment."
-            reply_to_message(config.project.root_dir, msg.id, sender=actor, body=note, new_owner="pm")
             return InboxRouteDecision(
-                thread_id=msg.id,
+                thread_id=thread.thread_id,
                 owner="pm",
-                state=msg.status,
+                state=thread.state,
                 note=note,
                 reason="policy",
             )
 
         note = "PM routed an execution-only task to PA."
-        reply_to_message(config.project.root_dir, msg.id, sender=actor, body=note, new_owner="pa")
-        updated = find_message(config.project.root_dir, msg.id)
+        updated = transition_thread(self.config_path.parent, thread.thread_id, "waiting-on-pa", actor=actor, note=note)
+        set_handoff(self.config_path.parent, thread.thread_id, owner="pa", actor=actor, note=note)
         return InboxRouteDecision(
-            thread_id=msg.id,
+            thread_id=thread.thread_id,
             owner="pa",
-            state=updated.status if updated else msg.status,
+            state=updated.state,
             note=note,
             reason="execution",
         )
@@ -625,37 +619,17 @@ class PollyPMService:
         return list_messages(config.project.root_dir, status=status)
 
     def get_inbox_thread(self, thread_id: str) -> object:
-        config = load_config(self.config_path)
-        msg = find_message(config.project.root_dir, thread_id)
-        if msg is None:
-            raise FileNotFoundError(thread_id)
-        return msg
+        return get_thread(self.config_path.parent, thread_id)
 
     def transition_inbox_thread(self, thread_id: str, state: str, *, actor: str, note: str = "") -> object:
-        config = load_config(self.config_path)
-        msg = find_message(config.project.root_dir, thread_id)
-        if msg is None:
-            raise FileNotFoundError(thread_id)
-        if state == "closed":
-            close_v2_message(config.project.root_dir, msg.id, sender=actor, note=note or "Closed")
-        else:
-            reply_to_message(config.project.root_dir, msg.id, sender=actor, body=f"[{state}] {note}".strip())
-        return find_message(config.project.root_dir, msg.id)
+        return transition_thread(self.config_path.parent, thread_id, state, actor=actor, note=note)
 
     def handoff_inbox_thread(self, thread_id: str, *, owner: str, actor: str, note: str = "") -> dict[str, object]:
-        config = load_config(self.config_path)
-        msg = find_message(config.project.root_dir, thread_id)
-        if msg is None:
-            raise FileNotFoundError(thread_id)
-        reply_to_message(config.project.root_dir, msg.id, sender=actor, body=note or f"Handed off to {owner}", new_owner=owner)
-        return {"owner": owner, "actor": actor, "updated_at": msg.updated_at, "note": note}
+        path = set_handoff(self.config_path.parent, thread_id, owner=owner, actor=actor, note=note)
+        return json.loads(path.read_text())
 
     def append_inbox_thread_message(self, thread_id: str, *, sender: str, subject: str, body: str) -> object:
-        config = load_config(self.config_path)
-        msg = find_message(config.project.root_dir, thread_id)
-        if msg is None:
-            raise FileNotFoundError(thread_id)
-        return reply_to_message(config.project.root_dir, msg.id, sender=sender, body=body)
+        return append_thread_message(self.config_path.parent, thread_id, sender=sender, subject=subject, body=body)
 
     def record_worker_reply_via_pa(
         self,
@@ -666,19 +640,24 @@ class PollyPMService:
         body: str,
         actor: str = "pa",
     ) -> object:
-        config = load_config(self.config_path)
-        msg = find_message(config.project.root_dir, thread_id)
-        if msg is None:
-            raise FileNotFoundError(thread_id)
-        reply_to_message(config.project.root_dir, msg.id, sender=worker_name, body=body)
+        append_thread_message(self.config_path.parent, thread_id, sender=worker_name, subject=subject, body=body)
         note = "PA surfaced a worker reply back to PM."
-        reply_to_message(config.project.root_dir, msg.id, sender=actor, body=note, new_owner="pm")
-        return find_message(config.project.root_dir, msg.id)
+        transition_thread(self.config_path.parent, thread_id, "waiting-on-pm", actor=actor, note=note)
+        set_handoff(self.config_path.parent, thread_id, owner="pm", actor=actor, note=note)
+        return get_thread(self.config_path.parent, thread_id)
 
     def _get_message_body(self, project_root, msg_id: str) -> str:
         try:
             _ctx, _hist, entries = read_message(project_root, msg_id)
             return entries[-1].body if entries else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _get_thread_body(self, thread) -> str:
+        if not thread.message_paths:
+            return ""
+        try:
+            return thread.message_paths[-1].read_text()
         except Exception:  # noqa: BLE001
             return ""
 
