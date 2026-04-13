@@ -9,6 +9,7 @@ from pathlib import Path
 from pollypm.atomic_io import atomic_write_json
 from pollypm.config import load_config
 from pollypm.inbox_v2 import list_messages as list_v2_messages, read_message as read_v2_message
+from pollypm.tz import format_time as _fmt_time
 from pollypm.providers import get_provider
 from pollypm.projects import ensure_project_scaffold
 from pollypm.runtimes import get_runtime
@@ -190,10 +191,10 @@ class CockpitRouter:
         supervisor = self._load_supervisor()
         config = supervisor.config
         launches, windows, alerts, _leases, _errors = supervisor.status()
-        inbox_count = len(list_v2_messages(config.project.root_dir, status="open"))
+        user_inbox = len(list_v2_messages(config.project.root_dir, status="open", owner="user"))
         items = [
             CockpitItem("polly", "Polly", self._session_state("operator", launches, windows, alerts, spinner_index)),
-            CockpitItem("inbox", f"Inbox ({inbox_count})", "mail" if inbox_count else "clear"),
+            CockpitItem("inbox", f"Inbox ({user_inbox})", "mail" if user_inbox else "clear"),
         ]
 
         selected = self.selected_key()
@@ -216,7 +217,7 @@ class CockpitRouter:
     def _project_session_map(self, launches) -> dict[str, str]:
         project_session_map: dict[str, str] = {}
         for launch in launches:
-            if launch.session.role in {"operator-pm", "heartbeat-supervisor"}:
+            if launch.session.role in {"operator-pm", "heartbeat-supervisor", "triage"}:
                 continue
             project_session_map.setdefault(launch.session.project, launch.session.name)
         return project_session_map
@@ -234,7 +235,10 @@ class CockpitRouter:
             if a.session_name == session_name and a.alert_type not in self._SILENT_ALERT_TYPES
         ]
         if actionable:
-            return f"! {len(actionable)}"
+            # Include a short reason so the user knows what's wrong
+            top = actionable[0]
+            short_reason = top.alert_type.replace("_", " ")
+            return f"! {short_reason}"
         launch = next((item for item in launches if item.session.name == session_name), None)
         if launch is None:
             return "idle"
@@ -260,6 +264,8 @@ class CockpitRouter:
             return "ready"
         if launch.session.role == "heartbeat-supervisor":
             return "watch"
+        if launch.session.role == "triage":
+            return "triage"
         return "live"
 
     def _mounted_window_proxy(self, launch, windows):
@@ -354,20 +360,19 @@ class CockpitRouter:
             right_pane_id = None
             right_pane_present = False
         if len(panes) < 2:
+            # Calculate right pane size so the rail starts at exactly _LEFT_PANE_WIDTH
+            # columns — avoids the visible flash of a 50/50 split followed by resize.
+            window_width = panes[0].pane_width if panes else 200
+            right_size = max(window_width - self._LEFT_PANE_WIDTH - 1, 40)
             right_pane_id = self.tmux.split_window(
                 target,
                 self._right_pane_command("polly"),
                 horizontal=True,
                 detached=True,
-                percent=80,
+                size=right_size,
             )
             state["right_pane_id"] = right_pane_id
             self._write_state(state)
-            try:
-                left_pane = min(self.tmux.list_panes(target), key=self._pane_left)
-                self._try_resize_rail(left_pane.pane_id)
-            except Exception:  # noqa: BLE001
-                pass
             panes = self.tmux.list_panes(target)
         elif len(panes) > 2:
             for pane in panes:
@@ -398,6 +403,17 @@ class CockpitRouter:
             self.tmux.resize_pane_width(pane_id, self._LEFT_PANE_WIDTH)
         except Exception:  # noqa: BLE001
             pass
+
+    def _right_pane_size(self, window_target: str) -> int | None:
+        """Calculate the exact right-pane size so the rail starts at _LEFT_PANE_WIDTH columns."""
+        try:
+            panes = self.tmux.list_panes(window_target)
+            if panes:
+                window_width = max(p.pane_width for p in panes)
+                return max(window_width - self._LEFT_PANE_WIDTH - 1, 40)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     def _normalize_layout(self, target: str, panes) -> None:
         if len(panes) != 2:
@@ -555,17 +571,16 @@ class CockpitRouter:
             fallback_kind = "polly" if launch.session.role in {"operator-pm", "heartbeat-supervisor"} else "project"
             fallback_target = launch.session.project if fallback_kind == "project" else None
             if right_pane_id is None:
+                right_size = self._right_pane_size(window_target)
                 right_pane_id = self.tmux.split_window(
                     left_pane_id,
                     self._right_pane_command(fallback_kind, fallback_target),
                     horizontal=True,
                     detached=True,
-                    percent=80,
+                    size=right_size,
                 )
             else:
                 self.tmux.respawn_pane(right_pane_id, self._right_pane_command(fallback_kind, fallback_target))
-            left_pane = min(self.tmux.list_panes(window_target), key=self._pane_left)
-            self._try_resize_rail(left_pane.pane_id)
             state = self._load_state()
             state.pop("mounted_session", None)
             state["right_pane_id"] = self._right_pane_id(window_target)
@@ -615,19 +630,17 @@ class CockpitRouter:
             )
         if right_pane_id is not None:
             self.tmux.kill_pane(right_pane_id)
+        right_size = self._right_pane_size(window_target)
         right_pane_id = self.tmux.split_window(
             left_pane_id,
             visible_launch.command,
             horizontal=True,
             detached=False,
-            percent=80,
+            size=right_size,
         )
         self.tmux.set_pane_history_limit(right_pane_id, 500)
         self.tmux.pipe_pane(right_pane_id, visible_launch.log_path)
         supervisor._stabilize_launch(visible_launch, right_pane_id)
-        panes = self.tmux.list_panes(window_target)
-        left_pane = min(panes, key=self._pane_left)
-        self._try_resize_rail(left_pane.pane_id)
         return max(self.tmux.list_panes(window_target), key=self._pane_left)
 
     def _park_mounted_session(self, supervisor: Supervisor, window_target: str) -> None:
@@ -732,12 +745,10 @@ class CockpitRouter:
                 self._right_pane_command(kind, project_key),
                 horizontal=True,
                 detached=True,
-                percent=80,
+                size=self._right_pane_size(window_target),
             )
         else:
             self.tmux.respawn_pane(right_pane_id, self._right_pane_command(kind, project_key))
-        left_pane = min(self.tmux.list_panes(window_target), key=self._pane_left)
-        self._try_resize_rail(left_pane.pane_id)
         state = self._load_state()
         state.pop("mounted_session", None)
         state["right_pane_id"] = self._right_pane_id(window_target)
@@ -791,7 +802,7 @@ def _build_dashboard(supervisor, config) -> str:
     project_count = len(config.projects)
     session_count = len(config.sessions)
     open_alerts = supervisor.store.open_alerts()
-    inbox_count = len(list_v2_messages(config.project.root_dir, status="open"))
+    user_inbox = len(list_v2_messages(config.project.root_dir, status="open", owner="user"))
     actionable_alerts = [a for a in open_alerts if a.alert_type not in (
         "suspected_loop", "stabilize_failed", "needs_followup",
     )]
@@ -801,8 +812,8 @@ def _build_dashboard(supervisor, config) -> str:
     status_parts = [f"{project_count} projects", f"{session_count} sessions"]
     if actionable_alerts:
         status_parts.append(f"{len(actionable_alerts)} alert(s)")
-    if inbox_count:
-        status_parts.append(f"{inbox_count} inbox")
+    if user_inbox:
+        status_parts.append(f"{user_inbox} inbox")
     lines.append("  " + "  ·  ".join(status_parts))
     lines.append("")
 
@@ -842,6 +853,27 @@ def _build_dashboard(supervisor, config) -> str:
     if not has_active:
         lines.append("  No active sessions.")
     lines.append("")
+
+    # ── Agent Workqueue ──
+    agent_items = list_v2_messages(config.project.root_dir, status="open", owner="polly")
+    if agent_items:
+        lines.append("  ─── Agent Workqueue ───────────────────────────────")
+        lines.append("")
+        import time
+        spinners = ["◜", "◝", "◞", "◟"]
+        spin_idx = int(time.time()) % 4
+        for item in agent_items[:5]:
+            # Show spinner if the operator is actively working (it might be on this item)
+            op_rt = runtime_map.get("operator")
+            if op_rt and op_rt.status in ("healthy", "needs_followup"):
+                spin = spinners[spin_idx]
+                lines.append(f"  {spin} {item.subject[:55]}")
+            else:
+                lines.append(f"  ◆ {item.subject[:55]}")
+            lines.append(f"    from {item.sender} · {_fmt_time(item.created_at)}")
+        if len(agent_items) > 5:
+            lines.append(f"  ... and {len(agent_items) - 5} more")
+        lines.append("")
 
     # ── Recent Activity (last 24h) ──
     lines.append("  ─── Last 24 Hours ─────────────────────────────────")
@@ -1031,8 +1063,26 @@ def _build_cockpit_detail_inner(config_path: Path, kind: str, target: str | None
             "No active live lane is running for this project.",
             "Select the project in the left rail and press N to start a worker lane.",
         ]
+        # Show alerts for this project's sessions
+        project_alerts = [
+            a for a in supervisor.store.open_alerts()
+            if any(
+                l.session.project == target and l.session.name == a.session_name
+                for l in supervisor.plan_launches()
+            ) and a.alert_type not in ("suspected_loop", "stabilize_failed", "needs_followup")
+        ]
+        if project_alerts:
+            lines.extend(["", "⚠ Alerts:"])
+            for a in project_alerts:
+                lines.append(f"  {a.severity} {a.alert_type}: {a.message}")
+                if a.alert_type == "recovery_limit":
+                    lines.append(f"  → Recovery paused. Run `pm reset` to clear, or investigate the session.")
+                elif a.alert_type == "auth_broken":
+                    lines.append(f"  → Run `pm relogin {a.session_name}` to fix authentication.")
+            lines.append("")
+
         if state_counts:
-            lines.extend(["", "Task states:"])
+            lines.extend(["Task states:"])
             for state, count in state_counts.items():
                 if count:
                     lines.append(f"- {state}: {count}")

@@ -229,7 +229,7 @@ def gather(config: PollyPMConfig, store: StateStore) -> DashboardData:
 
     commits = _recent_commits(config, hours=24)
     completed = _completed_issues(config, hours=72)
-    inbox_count = len(list_v2_messages(config.project.root_dir, status="open"))
+    inbox_count = len(list_v2_messages(config.project.root_dir, status="open", owner="user"))
     sweeps = sum(1 for e in day_events if e.event_type == "heartbeat")
     recoveries = sum(1 for e in day_events if "recover" in e.event_type)
 

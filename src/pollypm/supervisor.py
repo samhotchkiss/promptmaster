@@ -23,6 +23,7 @@ from pollypm.heartbeats.api import SupervisorHeartbeatAPI
 from pollypm.itsalive import sweep_pending_deploys
 from pollypm.knowledge_extract import EXTRACTION_INTERVAL_SECONDS
 from pollypm.inbox_v2 import _inbox_root as _ensure_inbox_v2
+from pollypm.messaging import ensure_inbox
 from pollypm.models import AccountConfig, ProviderKind, SessionConfig, SessionLaunchSpec
 from pollypm.onboarding import _prime_claude_home, default_control_args, default_session_args
 from pollypm.providers import get_provider
@@ -39,6 +40,7 @@ from pollypm.tmux.client import TmuxClient, TmuxWindow
 _OWNER_PREFIXES = {
     "heartbeat": "H:",
     "polly": "P:",
+    "pollypm": "[PollyPM]",
     "operator": "P:",
 }
 
@@ -52,7 +54,7 @@ def _prefix_for_owner(owner: str, text: str) -> str:
 
 
 class Supervisor:
-    _CONTROL_ROLES = {"heartbeat-supervisor", "operator-pm"}
+    _CONTROL_ROLES = {"heartbeat-supervisor", "operator-pm", "triage"}
     _CONSOLE_WINDOW = "PollyPM"
     _STORAGE_CLOSET_SESSION_SUFFIX = "-storage-closet"
     _CONTROL_HOMES_DIR = "control-homes"
@@ -498,6 +500,9 @@ class Supervisor:
         project.base_dir.mkdir(parents=True, exist_ok=True)
         project.logs_dir.mkdir(parents=True, exist_ok=True)
         project.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        ensure_inbox(project.root_dir)
+        if project.root_dir.parent != project.root_dir:
+            ensure_inbox(project.root_dir.parent)
         _ensure_inbox_v2(project.root_dir)
         ensure_project_scaffold(project.root_dir)
         for known_project in self.config.projects.values():
@@ -638,6 +643,7 @@ class Supervisor:
             ("version_check", {}),
             ("inbox_escalation", {}),
             ("inbox_processor", {}),
+            ("inbox_delivery", {}),
         ])
         return alerts
 

@@ -125,7 +125,7 @@ def _parse_sessions(
     default_project: str = "pollypm",
     workspace_root: Path | None = None,
 ) -> dict[str, SessionConfig]:
-    _CONTROL_ROLES = {"heartbeat-supervisor", "operator-pm"}
+    _CONTROL_ROLES = {"heartbeat-supervisor", "operator-pm", "triage"}
     sessions: dict[str, SessionConfig] = {}
     sessions_raw = raw.get("sessions", {})
     if not isinstance(sessions_raw, dict):

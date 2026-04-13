@@ -118,12 +118,15 @@ class TmuxClient:
         horizontal: bool = True,
         detached: bool = True,
         percent: int | None = None,
+        size: int | None = None,
     ) -> str:
         args = ["split-window", "-P", "-F", "#{pane_id}", "-t", self._exact_target(target)]
         args.append("-h" if horizontal else "-v")
         if detached:
             args.append("-d")
-        if percent is not None:
+        if size is not None:
+            args.extend(["-l", str(size)])
+        elif percent is not None:
             args.extend(["-p", str(percent)])
         args.append(command)
         result = self.run(*args)
