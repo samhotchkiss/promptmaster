@@ -1233,6 +1233,10 @@ class PollyInboxApp(App[None]):
         background: #238636;
         color: #ffffff;
     }
+    #btn-discuss {
+        background: #6f42c1;
+        color: #ffffff;
+    }
     #reply-input {
         margin: 1 0;
         display: none;
@@ -1275,6 +1279,7 @@ class PollyInboxApp(App[None]):
             with Horizontal(id="detail-actions"):
                 yield Button("Back", id="btn-back")
                 yield Button("Reply", id="btn-reply")
+                yield Button("Discuss", id="btn-discuss")
                 yield Button("Archive", id="btn-archive")
             yield Input(placeholder="Type your reply and press Enter...", id="reply-input")
             yield Static("", id="reply-status", markup=True)
@@ -1399,6 +1404,28 @@ class PollyInboxApp(App[None]):
     @on(Button.Pressed, "#btn-reply")
     def on_reply_pressed(self, event: Button.Pressed) -> None:
         self._do_reply()
+
+    @on(Button.Pressed, "#btn-discuss")
+    def on_discuss_pressed(self, event: Button.Pressed) -> None:
+        """Jump to live discussion about this message."""
+        if self._reading_index < 0 or self._reading_index >= len(self._messages):
+            return
+        item = self._messages[self._reading_index]
+        msg_id = item.id if hasattr(item, "id") else (item.path.stem if hasattr(item, "path") else "")
+        subject = item.subject if hasattr(item, "subject") else ""
+        target = self._resolve_reply_target()
+        try:
+            config = load_config(self.config_path)
+            sup = Supervisor(config)
+            sup.send_input(
+                target,
+                f"I'm here to discuss inbox message '{msg_id}': \"{subject}\". Let's talk about it.",
+                owner="human", force=True,
+            )
+            sup.store.close()
+            self.notify(f"Discussion started with {target}", severity="information")
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Could not reach {target}: {exc}", severity="error")
 
     @on(Button.Pressed, "#btn-archive")
     def on_archive_pressed(self, event: Button.Pressed) -> None:

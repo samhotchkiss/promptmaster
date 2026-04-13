@@ -83,4 +83,4 @@ def test_magic_manifest_lists_merged_magic(monkeypatch, tmp_path: Path) -> None:
 
     assert "## Available Magic" in manifest
     assert "- screenshot-verify: Screenshot verification -> .pollypm/magic/screenshot-verify.md (when checking UI output visually)" in manifest
-    assert "- deploy-site: Put a site online quickly -> pollypm/defaults/magic/deploy-site.md" in manifest
+    assert "- deploy-site: Deploy a site and verify it works -> pollypm/defaults/magic/deploy-site.md" in manifest
