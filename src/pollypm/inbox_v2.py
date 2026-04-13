@@ -207,6 +207,20 @@ def reply_to_message(
     recipient = _default_recipient(sender)
     delivery_state = "not_applicable" if recipient == "user" else "pending"
 
+    # Append review checklist when a worker reports back to polly
+    review_checklist = ""
+    if recipient == "polly" and sender not in ("user", "human", "polly", "heartbeat", "system"):
+        review_checklist = (
+            "\n\n---\n"
+            "**Review checklist (complete before notifying user):**\n"
+            "- [ ] Does this meet the user's stated goal?\n"
+            "- [ ] Is the work committed to git?\n"
+            "- [ ] Is it deployed/live (if applicable)?\n"
+            "- [ ] Are tests passing?\n"
+            "- [ ] Quality bar: would the user say 'holy shit, that's done'?\n"
+            "- [ ] Send notification: `pm notify \"Done: ...\" \"...\" --to user`"
+        )
+
     # Write the reply message
     msg_path = msg_dir / f"{index:04d}-{ts.strftime('%Y%m%dT%H%M%SZ')}.md"
     msg_path.write_text(
@@ -214,7 +228,7 @@ def reply_to_message(
         f"To: {recipient}\n"
         f"Date: {ts.isoformat()}\n"
         f"Subject: Re: {state['subject']}\n\n"
-        f"{body.rstrip()}\n"
+        f"{body.rstrip()}{review_checklist}\n"
     )
 
     # Update history.md
