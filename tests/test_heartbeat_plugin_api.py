@@ -439,23 +439,13 @@ def test_local_heartbeat_backend_alerts_on_unmanaged_window_once() -> None:
     LocalHeartbeatBackend().run(api)
 
     assert ("heartbeat", "unmanaged_window:pollypm:e2e-sandbox") in api.alerts
-    assert api.messages[0] == (
-        "operator",
-        "Heartbeat follow-up: inspect unmanaged tmux window e2e-sandbox in session pollypm. "
-        "It is not part of the managed Polly launch plan.",
-        "heartbeat",
-    )
+    # No chat injection — heartbeat only raises alerts, never messages operator
+    assert api.messages == []
 
     LocalHeartbeatBackend().run(api)
 
-    assert api.messages == [
-        (
-            "operator",
-            "Heartbeat follow-up: inspect unmanaged tmux window e2e-sandbox in session pollypm. "
-            "It is not part of the managed Polly launch plan.",
-            "heartbeat",
-        )
-    ]
+    # Still no messages on second run
+    assert api.messages == []
 
 
 def test_local_heartbeat_backend_clears_stale_unmanaged_window_alerts() -> None:
