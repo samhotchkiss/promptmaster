@@ -648,29 +648,66 @@ def notify(
 
 @app.command("mail")
 def mail(
-    close: str | None = typer.Option(None, "--close", help="Close a specific open message by filename."),
-    archived: bool = typer.Option(False, "--archived", "-a", help="Show archived (closed) messages."),
+    message_id: str | None = typer.Argument(None, help="Message filename to read. Omit to list all."),
+    close: str | None = typer.Option(None, "--close", help="Archive a message by filename."),
+    archived: bool = typer.Option(False, "--archived", "-a", help="Show archived messages."),
     config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
+    """View, read, and manage inbox messages."""
     config = load_config(config_path)
     if close:
         closed = close_message(config.project.root_dir, close)
         typer.echo(f"Archived {closed.name}")
+        return
+    if message_id:
+        # Read a specific message
+        all_messages = list_open_messages(config.project.root_dir) + list_closed_messages(config.project.root_dir)
+        match = next((m for m in all_messages if m.path.name == message_id or m.path.stem == message_id), None)
+        if match is None:
+            # Try partial match
+            match = next((m for m in all_messages if message_id.lower() in m.path.name.lower()), None)
+        if match is None:
+            typer.echo(f"Message not found: {message_id}")
+            raise typer.Exit(code=1)
+        typer.echo(f"Subject: {match.subject}")
+        typer.echo(f"From: {match.sender}")
+        typer.echo(f"Date: {match.created_at}")
+        is_archived = "closed" in str(match.path.parent)
+        typer.echo(f"Status: {'archived' if is_archived else 'open'}")
+        typer.echo(f"{'─' * 60}")
+        typer.echo(match.body)
+        if not is_archived:
+            typer.echo(f"\n{'─' * 60}")
+            typer.echo(f"To archive: pm mail --close {match.path.name}")
         return
     if archived:
         messages = list_closed_messages(config.project.root_dir)
         if not messages:
             typer.echo("No archived mail.")
             return
+        typer.echo(f"Archived ({len(messages)}):\n")
         for item in messages:
-            typer.echo(f"- {item.path.name}: {item.subject} [{item.sender}] {item.created_at}")
+            typer.echo(f"  {item.path.stem}")
+            typer.echo(f"    {item.subject} [{item.sender}] {item.created_at[:16]}")
+        typer.echo(f"\nRead with: pm mail <message-id>")
         return
     messages = list_open_messages(config.project.root_dir)
     if not messages:
         typer.echo("No open mail.")
         return
-    for item in messages:
-        typer.echo(f"- {item.path.name}: {item.subject} [{item.sender}]")
+    typer.echo(f"Inbox ({len(messages)}):\n")
+    for i, item in enumerate(messages, 1):
+        prefix = ""
+        if "[Escalation]" in item.subject:
+            prefix = "▲ "
+        elif "[Decision]" in item.subject:
+            prefix = "◆ "
+        typer.echo(f"  {prefix}{item.subject}")
+        typer.echo(f"    from {item.sender} · {item.created_at[:16]}")
+        typer.echo(f"    {item.path.stem}")
+        typer.echo()
+    typer.echo(f"Read with: pm mail <message-id>")
+    typer.echo(f"Archive with: pm mail --close <filename>")
 
 
 @app.command()

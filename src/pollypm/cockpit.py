@@ -919,19 +919,52 @@ def _build_cockpit_detail_inner(config_path: Path, kind: str, target: str | None
         return _build_dashboard(supervisor, config)
 
     if kind == "inbox":
+        from pollypm.messaging import list_closed_messages
+        from pollypm.inbox_processor import list_decisions
         messages = list_open_messages(config.project.root_dir)
-        if not messages:
-            return "Inbox\n\nNo open messages."
-        lines = ["Inbox", "", "Open messages:"]
-        for message in messages[:12]:
-            lines.append(f"- {message.subject} · from {message.sender}")
-        lines.extend(
-            [
-                "",
-                "Reply flow",
-                "Reply to Polly. Polly keeps the thread, decides whether to resolve it, continue the conversation, or route a distilled action to a worker lane.",
-            ]
-        )
+        archived = list_closed_messages(config.project.root_dir)
+        decisions = list_decisions(config.project.root_dir, limit=5)
+
+        lines = ["Inbox"]
+        if not messages and not decisions:
+            lines.extend(["", "No open messages or recent decisions."])
+        else:
+            if messages:
+                lines.extend(["", f"Open ({len(messages)}):"])
+                for msg in messages[:10]:
+                    prefix = ""
+                    if "[Escalation]" in msg.subject:
+                        prefix = "▲ "
+                    elif "[Decision]" in msg.subject:
+                        prefix = "◆ "
+                    lines.append(f"  {prefix}{msg.subject}")
+                    lines.append(f"    from {msg.sender} · {msg.created_at[:16]}")
+                    # Show first line of body
+                    first_line = msg.body.strip().split("\n")[0][:70] if msg.body else ""
+                    if first_line:
+                        lines.append(f"    {first_line}")
+                    lines.append("")
+
+            if decisions:
+                lines.extend(["", f"Recent Decisions ({len(decisions)}):"])
+                for dec in decisions[:5]:
+                    tier = dec.get("tier", 2)
+                    icon = "◆" if tier <= 2 else "▲"
+                    lines.append(f"  {icon} {dec.get('subject', '?')[:60]}")
+                    if dec.get("decision"):
+                        lines.append(f"    {dec['decision'][:65]}")
+                    lines.append(f"    from {dec.get('original_sender', '?')} · {dec.get('timestamp', '')[:16]}")
+                    lines.append("")
+
+        if archived:
+            lines.extend([f"Archived: {len(archived)} message(s)", "  View with: pm mail --archived"])
+
+        lines.extend([
+            "",
+            "Read: pm mail <message-id>",
+            "Archive: pm mail --close <filename>",
+            "Decisions: pm decisions",
+        ])
         return "\n".join(lines)
 
     if kind == "settings":
