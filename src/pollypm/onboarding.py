@@ -84,7 +84,7 @@ class LoginCancelled(Exception):
 _CLAUDE_OPERATOR_TOOLS = "Read,Glob,Grep,LS,Bash,WebFetch,WebSearch,TodoWrite,Task"
 _CLAUDE_HEARTBEAT_TOOLS = "Read,Glob,Grep,LS,WebFetch,WebSearch,TodoWrite,Task"
 _CLAUDE_NO_WRITE_TOOLS = "Edit,Write,MultiEdit,NotebookEdit"
-_CLAUDE_OPERATOR_DISALLOWED = "Edit,Write,MultiEdit,NotebookEdit,Agent"  # Block writes AND local agents
+_CLAUDE_OPERATOR_DISALLOWED = "Agent"  # Block local agents only — Polly needs Write/Edit for deliverables
 
 
 def default_session_args(

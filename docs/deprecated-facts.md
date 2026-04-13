@@ -6,6 +6,12 @@ Facts that were believed at earlier points in the project timeline
 but were later superseded by newer information. This log exists so
 that future agents and humans can understand what changed and why.
 
+This file is historical archive material, not the source of truth for
+current repository status. When it conflicts with verified implementation
+or the current docs, prefer the verified repository state and the
+authoritative summaries in `docs/project-overview.md`,
+`docs/history.md`, and `docs/system-state-2026-04-11.md`.
+
 ## Deprecated Facts
 
 ### overview (superseded at chunk 2)

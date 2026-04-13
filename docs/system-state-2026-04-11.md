@@ -151,22 +151,21 @@ PollyPM is a tmux-first supervisor for coordinating multiple interactive AI codi
 ### Critical (Blocks Daily Use)
 | Issue | Impact | Root Cause |
 |-------|--------|------------|
-| **Review gate enforcement still in progress** | Issues can still bypass intended review path in edge cases | Issue 0036 is not complete yet. |
-| **Thread reopen still in progress** | Forward-only thread handling remains in some paths | Issue 0037 is still being implemented. |
+| **None currently verified in the file-based issue state machine** | Review gate and reopen/rework flows are implemented in the current repository | Direct verification on 2026-04-13 confirmed 0036/0037 behavior with passing tests. |
 
 ### Annoying (Degrades Experience)
 | Issue | Impact | Root Cause |
 |-------|--------|------------|
 | Cockpit cursor drift | Navigation sometimes lands wrong | Textual ListView + 0.8s refresh tick. Debounce helps but imperfect. |
-| Review gate edge cases | Some flows still need manual scrutiny | Issue 0036 is in progress, not finished. |
-| Thread reopen edge cases | Reopening/resuming threads is not fully reliable yet | Issue 0037 is in progress, not finished. |
+| Review UX clarity | Review state is enforced but could still be surfaced more clearly in the operator workflow | UX polish remains separate from 0036 state-machine enforcement. |
+| Reopen/resume UX clarity | Rework and reopen paths exist but the operator flow can still be made more explicit | UX polish remains separate from 0037 state-machine support. |
 
 ### Gaps (Feature Missing)
 | Feature | Status | Spec Reference |
 |---------|--------|----------------|
 | GitHub issue backend | Not built | T101-T105, issue 0019 |
-| Review gate enforcement | In progress | T041, issue 0036 |
-| Thread reopen | In progress | T058, issue 0037 |
+| Review UX polish | Not prioritized yet | T041 follow-up after issue 0036 |
+| Reopen/resume UX polish | Not prioritized yet | T058 follow-up after issue 0037 |
 
 ## What We Fixed Today (14 Commits)
 
@@ -189,14 +188,14 @@ PollyPM is a tmux-first supervisor for coordinating multiple interactive AI codi
 
 ## Next 10 Things To Make It Better
 
-### 1. Finish Review Gate Enforcement (P0, in progress)
-Issue 0036 is in flight. The remaining work is to make the review gate airtight so issues cannot skip the intended states in edge cases.
-
-### 2. Finish Thread Reopen (P0, in progress)
-Issue 0037 is in flight. Remaining work is to complete reopen/resume behavior so thread state is no longer effectively forward-only in edge cases.
-
-### 3. GitHub Issue Backend (P1, 3 days)
+### 1. Build GitHub Issue Backend (P0, next major gap)
 Issue 0019 specifies the design. Needs: 7 interface methods, `polly:*` label management, gh CLI integration. The file-based tracker contract is already defined.
+
+### 2. Review UX polish (P1)
+Review-gate enforcement is present. The next step is making review state and pending operator actions clearer in the TUI and operator prompts.
+
+### 3. Reopen/resume UX polish (P1)
+Rework and reopen transitions are implemented. The remaining work is improving operator-facing flows for continuing threads and tasks after review feedback.
 
 ### 4. Multi-user / operator-sharing hardening (P2)
 The current system is still effectively single-operator even though the lease model is now stronger. Shared operation paths still need design and implementation.
@@ -204,20 +203,20 @@ The current system is still effectively single-operator even though the lease mo
 ### 5. GitHub-native issue sync polish (P2)
 Once the backend exists, issue mirroring, reconciliation, and operator-facing visibility still need polish.
 
-### 6. Review UX polish in cockpit (P2)
-With review-gate enforcement nearly there, the next improvement is making review state and pending operator actions clearer in the TUI.
+### 6. Historical doc cleanup (P2)
+Regenerated recovery summaries overstated 0036/0037 as incomplete. Remaining cleanup is making non-authoritative recovery docs clearly historical so they do not conflict with verified repo state.
 
-### 7. Reopen/resume UX polish (P2)
-Once thread reopen lands, the operator-facing flow for reopening and continuing threads should be made explicit and low-friction.
-
-### 8. Higher-level checkpoint policy (P2)
+### 7. Higher-level checkpoint policy (P2)
 Level 1 checkpoints are now in place; the next step is deciding when to emit higher-level checkpoints and how operators consume them.
 
-### 9. Broader role policy hardening (P2)
+### 8. Broader role policy hardening (P2)
 Role enforcement landed, but longer-term policy hardening is still useful as session types and tools expand.
 
-### 10. Launch-readiness burn-down (P2)
-After issues 0036 and 0037 land, re-audit the remaining rough edges and convert any true blockers into explicit launch criteria.
+### 9. Launch-readiness burn-down (P2)
+Re-audit the remaining rough edges and convert any true blockers into explicit launch criteria.
+
+### 10. Broader GitHub-native issue sync polish (P2)
+Once the backend exists, issue mirroring, reconciliation, and operator-facing visibility still need polish.
 
 ## Launch Readiness
 
