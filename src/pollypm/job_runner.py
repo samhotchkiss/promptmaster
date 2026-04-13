@@ -120,6 +120,19 @@ def _run_inbox_processor(supervisor: Supervisor, payload: dict[str, Any]) -> Non
     process_inbox(supervisor.config.project.root_dir, supervisor.store)
 
 
+@register_job("inbox_delivery")
+def _run_inbox_delivery(supervisor: Supervisor, payload: dict[str, Any]) -> None:
+    """Deliver agent-targeted inbox messages and verify agents are working on them."""
+    from pollypm.inbox_delivery import check_active_work, deliver_pending_messages
+    result = deliver_pending_messages(supervisor.config)
+    if result["delivered"] or result["failed"]:
+        supervisor.store.record_event(
+            "inbox_delivery", "delivery",
+            f"Delivered {result['delivered']}, failed {result['failed']}, skipped {result['skipped']}",
+        )
+    check_active_work(supervisor.config)
+
+
 @register_job("prune_state")
 def _run_prune_state(supervisor: Supervisor, payload: dict[str, Any]) -> None:
     """Prune old events and heartbeat data to prevent unbounded growth."""

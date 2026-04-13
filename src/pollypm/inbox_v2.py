@@ -36,8 +36,17 @@ class InboxMessage:
     updated_at: str
     message_count: int
     sender: str
+    to: str = ""  # recipient: "user", "polly", "worker_X"
+    delivery_state: str = "pending"  # pending, delivered, failed, not_applicable
+    last_delivered_at: str = ""
+    parent_id: str = ""  # links to parent thread (e.g., user request that spawned this task)
     project: str = ""
     path: Path = field(default_factory=lambda: Path("."))
+
+    @property
+    def name(self) -> str:
+        """Backward-compatible alias for integrations that still expect .name."""
+        return self.id
 
 
 @dataclass(slots=True)
@@ -67,6 +76,21 @@ def _msg_dir(project_root: Path, msg_id: str) -> Path:
 # Create
 # ---------------------------------------------------------------------------
 
+def _default_recipient(sender: str) -> str:
+    """Determine the default recipient based on who's sending."""
+    if sender in ("user", "human"):
+        return "polly"
+    return "user"
+
+
+def _append_audit(state: dict, action: str, by: str, **extra: str) -> None:
+    """Append an entry to the message's audit trail."""
+    audit = state.setdefault("audit", [])
+    entry = {"at": datetime.now(UTC).isoformat(), "action": action, "by": by}
+    entry.update(extra)
+    audit.append(entry)
+
+
 def create_message(
     project_root: Path,
     *,
@@ -75,6 +99,8 @@ def create_message(
     body: str,
     project: str = "",
     owner: str = "polly",
+    to: str = "",
+    parent_id: str = "",
 ) -> InboxMessage:
     """Create a new inbox message with context and history."""
     ts = datetime.now(UTC)
@@ -82,10 +108,15 @@ def create_message(
     msg_dir = _msg_dir(project_root, msg_id)
     msg_dir.mkdir(parents=True, exist_ok=True)
 
+    # Compute recipient and delivery state
+    recipient = to or _default_recipient(sender)
+    delivery_state = "not_applicable" if recipient == "user" else "pending"
+
     # Write the first message
     msg_path = msg_dir / f"0001-{ts.strftime('%Y%m%dT%H%M%SZ')}.md"
     msg_path.write_text(
         f"From: {sender}\n"
+        f"To: {recipient}\n"
         f"Date: {ts.isoformat()}\n"
         f"Subject: {subject}\n\n"
         f"{body.rstrip()}\n"
@@ -102,17 +133,23 @@ def create_message(
     atomic_write_text(msg_dir / "history.md", history)
 
     # Write state
-    state = {
+    state: dict = {
         "id": msg_id,
         "subject": subject,
         "status": "open",
         "owner": owner,
         "sender": sender,
+        "to": recipient,
+        "delivery_state": delivery_state,
+        "last_delivered_at": "",
+        "parent_id": parent_id,
         "project": project,
         "created_at": ts.isoformat(),
         "updated_at": ts.isoformat(),
         "message_count": 1,
+        "audit": [],
     }
+    _append_audit(state, "created", by=sender, to=recipient)
     atomic_write_text(msg_dir / "state.json", json.dumps(state, indent=2) + "\n")
 
     # Sync to DB for efficient querying
@@ -133,7 +170,9 @@ def create_message(
     return InboxMessage(
         id=msg_id, subject=subject, status="open", owner=owner,
         created_at=ts.isoformat(), updated_at=ts.isoformat(),
-        message_count=1, sender=sender, project=project, path=msg_dir,
+        message_count=1, sender=sender, to=recipient,
+        delivery_state=delivery_state, parent_id=parent_id,
+        project=project, path=msg_dir,
     )
 
 
@@ -163,10 +202,15 @@ def reply_to_message(
     ts = datetime.now(UTC)
     index = state["message_count"] + 1
 
+    # Compute recipient — reply flips direction
+    recipient = _default_recipient(sender)
+    delivery_state = "not_applicable" if recipient == "user" else "pending"
+
     # Write the reply message
     msg_path = msg_dir / f"{index:04d}-{ts.strftime('%Y%m%dT%H%M%SZ')}.md"
     msg_path.write_text(
         f"From: {sender}\n"
+        f"To: {recipient}\n"
         f"Date: {ts.isoformat()}\n"
         f"Subject: Re: {state['subject']}\n\n"
         f"{body.rstrip()}\n"
@@ -187,15 +231,19 @@ def reply_to_message(
         updated_context = existing_context.rstrip() + f"\n\n## Update ({ts.strftime('%Y-%m-%d %H:%M')})\n{context_update}\n"
         atomic_write_text(msg_dir / "context.md", updated_context)
 
-    # Update state
+    # Update state — flip owner, set new recipient and delivery state
     state["message_count"] = index
     state["updated_at"] = ts.isoformat()
+    state["to"] = recipient
+    state["delivery_state"] = delivery_state
+    _append_audit(state, "replied", by=sender, to=recipient)
+    state["last_delivered_at"] = ""
     if new_owner:
         state["owner"] = new_owner
     elif sender == "user":
-        state["owner"] = "polly"  # User replied, now Polly owes a response
+        state["owner"] = "polly"
     elif sender in ("polly", "heartbeat", "system"):
-        state["owner"] = "user"  # Agent replied, ball is in user's court
+        state["owner"] = "user"
     atomic_write_text(msg_dir / "state.json", json.dumps(state, indent=2) + "\n")
 
     # Sync to DB
@@ -224,6 +272,51 @@ def reply_to_message(
 # Close
 # ---------------------------------------------------------------------------
 
+_ACK_PATTERNS = {
+    "thank", "thanks", "thx", "ty", "ok", "okay", "k", "got it",
+    "sounds good", "perfect", "great", "awesome", "cool", "nice",
+    "noted", "acknowledged", "ack", "roger", "copy", "understood",
+    "will do", "on it", "done", "yep", "yes", "yup", "sure",
+}
+
+
+def _is_simple_ack(text: str) -> bool:
+    """Check if a message is a simple acknowledgment with no further action."""
+    cleaned = text.strip().lower().rstrip(".!,")
+    return cleaned in _ACK_PATTERNS or len(cleaned.split()) <= 3 and any(
+        p in cleaned for p in _ACK_PATTERNS
+    )
+
+
+def _user_was_notified(project_root: Path, parent_msg_id: str) -> bool:
+    """Check if a user-facing notification exists that references this thread.
+
+    Looks for any message TO the user with this msg_id as parent_id,
+    or whose subject contains the parent's subject.
+    """
+    try:
+        parent_dir = _msg_dir(project_root, parent_msg_id)
+        parent_state = json.loads((parent_dir / "state.json").read_text())
+        parent_subject = parent_state.get("subject", "")
+    except Exception:  # noqa: BLE001
+        return False
+
+    # Check all messages for one that notifies the user about this thread
+    for msg in list_messages(project_root, status="all"):
+        if msg.to == "user" and msg.id != parent_msg_id:
+            # Check parent_id link
+            try:
+                msg_state = json.loads((_msg_dir(project_root, msg.id) / "state.json").read_text())
+                if msg_state.get("parent_id") == parent_msg_id:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            # Check subject overlap (fuzzy match for related notifications)
+            if parent_subject and parent_subject[:30].lower() in msg.subject.lower():
+                return True
+    return False
+
+
 def close_message(
     project_root: Path,
     msg_id: str,
@@ -231,10 +324,55 @@ def close_message(
     sender: str,
     note: str,
 ) -> None:
-    """Close a message with a required closing note."""
+    """Close a message with a required closing note.
+
+    If an agent is closing a message where the user's last reply requested
+    action, the agent MUST have already replied with what they did. The close
+    note alone is not enough — the user needs a response in the thread.
+    """
     msg_dir = _msg_dir(project_root, msg_id)
     if not msg_dir.exists():
         raise FileNotFoundError(f"Message not found: {msg_id}")
+
+    # Enforce close guards for agents
+    if sender not in ("user", "human"):
+        _ctx, _hist, entries = read_message(project_root, msg_id)
+        state = json.loads((msg_dir / "state.json").read_text())
+
+        # Check if the user is involved in this thread
+        user_involved = any(e.sender in ("user", "human") for e in entries)
+        last_user_msg = None
+        for entry in entries:
+            if entry.sender in ("user", "human"):
+                last_user_msg = entry
+
+        if user_involved:
+            # User is in this thread — they must ack before agent can close
+            if last_user_msg and not _is_simple_ack(last_user_msg.body):
+                raise ValueError(
+                    f"Cannot close: only the user can archive this thread. "
+                    f"Reply with `pm reply {msg_id} '<what you did>'` and the user will archive when ready."
+                )
+        else:
+            # Agent-to-agent thread (e.g., Polly → worker)
+            # Can only close if a user notification was sent about the outcome.
+            # Check: is there an open or closed message TO the user that references this thread?
+            user_notified = _user_was_notified(project_root, msg_id)
+            senders_in_thread = {e.sender for e in entries}
+            both_replied = len(senders_in_thread - {"system", "heartbeat"}) >= 2
+
+            if both_replied and user_notified:
+                pass  # Both agents agreed, user was notified — OK to close
+            elif not user_notified:
+                raise ValueError(
+                    f"Cannot close: the user has not been notified of the outcome. "
+                    f"Send `pm notify '<what was done>' '<details>' --to user` first, then close."
+                )
+            else:
+                raise ValueError(
+                    f"Cannot close: both agents involved must have replied before closing. "
+                    f"The thread only has messages from: {', '.join(sorted(senders_in_thread))}"
+                )
 
     # Add closing note as a message
     reply_to_message(project_root, msg_id, sender=sender, body=f"[Closed] {note}")
@@ -244,6 +382,8 @@ def close_message(
     state["status"] = "closed"
     ts = datetime.now(UTC).isoformat()
     state["updated_at"] = ts
+    state["closed_at"] = ts
+    _append_audit(state, "closed", by=sender, note=note[:100])
     atomic_write_text(msg_dir / "state.json", json.dumps(state, indent=2) + "\n")
 
     # Sync to DB
@@ -267,8 +407,13 @@ def close_message(
 # List / Read
 # ---------------------------------------------------------------------------
 
-def list_messages(project_root: Path, *, status: str = "open") -> list[InboxMessage]:
-    """List messages by status."""
+def list_messages(
+    project_root: Path,
+    *,
+    status: str = "open",
+    owner: str | None = None,
+) -> list[InboxMessage]:
+    """List messages by status and optionally filter by owner."""
     root = _inbox_root(project_root)
     messages: list[InboxMessage] = []
     for msg_dir in sorted(root.iterdir(), reverse=True):
@@ -279,19 +424,31 @@ def list_messages(project_root: Path, *, status: str = "open") -> list[InboxMess
             continue
         try:
             state = json.loads(state_path.read_text())
-            if status == "all" or state.get("status") == status:
-                messages.append(InboxMessage(
-                    id=state["id"],
-                    subject=state["subject"],
-                    status=state["status"],
-                    owner=state["owner"],
-                    created_at=state["created_at"],
-                    updated_at=state["updated_at"],
-                    message_count=state["message_count"],
-                    sender=state["sender"],
-                    project=state.get("project", ""),
-                    path=msg_dir,
-                ))
+            if status != "all" and state.get("status") != status:
+                continue
+            if owner is not None and state.get("owner") != owner:
+                continue
+            # Backward compat: derive 'to' from 'owner' if missing
+            msg_to = state.get("to", "")
+            if not msg_to:
+                msg_to = state["owner"] if state["owner"] != "user" else "user"
+            msg_ds = state.get("delivery_state", "pending" if msg_to != "user" else "not_applicable")
+            messages.append(InboxMessage(
+                id=state["id"],
+                subject=state["subject"],
+                status=state["status"],
+                owner=state["owner"],
+                created_at=state["created_at"],
+                updated_at=state["updated_at"],
+                message_count=state["message_count"],
+                sender=state["sender"],
+                to=msg_to,
+                delivery_state=msg_ds,
+                last_delivered_at=state.get("last_delivered_at", ""),
+                parent_id=state.get("parent_id", ""),
+                project=state.get("project", ""),
+                path=msg_dir,
+            ))
         except (json.JSONDecodeError, KeyError):
             continue
     return messages
@@ -433,6 +590,25 @@ def _parse_history_entries(content: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def mark_delivered(
+    project_root: Path,
+    msg_id: str,
+    *,
+    state: str = "delivered",
+) -> None:
+    """Update delivery_state and last_delivered_at in state.json."""
+    msg_dir = _msg_dir(project_root, msg_id)
+    state_path = msg_dir / "state.json"
+    if not state_path.exists():
+        return
+    data = json.loads(state_path.read_text())
+    data["delivery_state"] = state
+    _append_audit(data, state, by="system", to=data.get("to", ""))
+    if state == "delivered":
+        data["last_delivered_at"] = datetime.now(UTC).isoformat()
+    atomic_write_text(state_path, json.dumps(data, indent=2) + "\n")
+
 
 def _slugify(text: str) -> str:
     import re
