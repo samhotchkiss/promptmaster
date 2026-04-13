@@ -93,6 +93,7 @@ def _classify_message(message: InboxMessage, body: str = "") -> str:
         "budget", "cost", "spending", "payment",
         "deploy to production", "ship", "release", "merge to main",
         "delete", "remove permanently",
+        "verification", "verify", "confirm your email", "click the link",
     ]
     if any(kw in subject_lower or kw in body_lower for kw in user_keywords):
         return "user_required"
@@ -130,6 +131,10 @@ def process_inbox(project_root: Path, store) -> dict[str, int]:
     counts = {"polly_handled": 0, "polly_flagged": 0, "user_escalated": 0, "skipped": 0}
 
     for message in messages:
+        # Never touch user-owned items — those are for the human to handle
+        if message.owner == "user":
+            counts["skipped"] += 1
+            continue
         # Skip messages already from Polly (avoid loops)
         if message.sender == "polly":
             counts["skipped"] += 1
@@ -161,25 +166,18 @@ def process_inbox(project_root: Path, store) -> dict[str, int]:
             counts["user_escalated"] += 1
 
         elif tier == "polly_flag":
-            # Tier 2: Polly makes the call, logs the decision, sends response
-            decision_text = (
-                f"Acknowledged: {message.subject}. "
-                f"This has been logged as a decision point for user review."
-            )
+            # Tier 2: Log the decision but leave the message OPEN for review.
+            # The inbox processor should never close messages that might need
+            # human attention — only tier 1 (system/heartbeat) messages get auto-closed.
             _log_decision(
                 project_root,
                 subject=message.subject,
-                decision=decision_text,
+                decision=f"Flagged for review: {message.subject}",
                 reasoning=f"Inbox item from {message.sender} classified as judgment call",
                 original_sender=message.sender,
-                action_taken="acknowledged_and_logged",
+                action_taken="flagged_for_review",
                 tier=2,
             )
-            # Archive the processed message
-            try:
-                close_message(project_root, message.id, sender="polly", note="Processed by inbox processor")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to archive message %s: %s", message.id, exc)
             counts["polly_flagged"] += 1
 
         elif tier == "polly_handle":

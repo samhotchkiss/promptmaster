@@ -87,13 +87,16 @@ def escalate_waiting_sessions(store: StateStore, project_root: Path) -> list[str
             project_root,
             sender="heartbeat",
             subject=subject,
+            to="polly",
+            owner="polly",
             body=(
-                f"The session '{rt.session_name}' has been waiting for your input.\n"
+                f"The session '{rt.session_name}' has been waiting for input.\n"
                 f"\n"
-                f"To respond:\n"
-                f"  pm send {rt.session_name} \"<your message>\"\n"
+                f"Check what it needs and try to unblock it:\n"
+                f"  pm send {rt.session_name} \"<instructions>\"\n"
                 f"\n"
-                f"Or open the cockpit and click on the session."
+                f"If it genuinely needs the human user, escalate with:\n"
+                f"  pm notify \"<subject>\" \"<what the user needs to do>\""
             ),
         )
         store.record_event(rt.session_name, "inbox_escalation", f"Escalated to inbox: {subject}")
