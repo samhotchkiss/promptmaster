@@ -84,6 +84,7 @@ class LoginCancelled(Exception):
 _CLAUDE_OPERATOR_TOOLS = "Read,Glob,Grep,LS,Bash,WebFetch,WebSearch,TodoWrite,Task"
 _CLAUDE_HEARTBEAT_TOOLS = "Read,Glob,Grep,LS,WebFetch,WebSearch,TodoWrite,Task"
 _CLAUDE_NO_WRITE_TOOLS = "Edit,Write,MultiEdit,NotebookEdit"
+_CLAUDE_OPERATOR_DISALLOWED = "Edit,Write,MultiEdit,NotebookEdit,Agent"  # Block writes AND local agents
 
 
 def default_session_args(
@@ -101,7 +102,7 @@ def default_session_args(
             args.extend(["--disallowedTools", _CLAUDE_NO_WRITE_TOOLS])
         elif role == "operator-pm":
             args.extend(["--allowedTools", _CLAUDE_OPERATOR_TOOLS])
-            args.extend(["--disallowedTools", _CLAUDE_NO_WRITE_TOOLS])
+            args.extend(["--disallowedTools", _CLAUDE_OPERATOR_DISALLOWED])
         return args
     if provider is ProviderKind.CODEX:
         if role in {"heartbeat-supervisor", "operator-pm"}:
