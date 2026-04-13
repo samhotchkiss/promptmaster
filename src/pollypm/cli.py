@@ -331,6 +331,10 @@ def cockpit_pane(
         from pollypm.cockpit_ui import PollyDashboardApp
         PollyDashboardApp(config_path).run(mouse=True)
         return
+    if kind == "inbox":
+        from pollypm.cockpit_ui import PollyInboxApp
+        PollyInboxApp(config_path).run(mouse=True)
+        return
     PollyCockpitPaneApp(config_path, kind, target).run(mouse=True)
 
 
