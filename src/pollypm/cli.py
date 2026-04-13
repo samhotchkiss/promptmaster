@@ -673,6 +673,28 @@ def mail(
         typer.echo(f"- {item.path.name}: {item.subject} [{item.sender}]")
 
 
+@app.command()
+def decisions(
+    limit: int = typer.Option(20, "--limit", "-n", help="Number of decisions to show."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
+) -> None:
+    """Show recent decisions Polly made (for user review)."""
+    from pollypm.inbox_processor import list_decisions
+    config = load_config(config_path)
+    items = list_decisions(config.project.root_dir, limit=limit)
+    if not items:
+        typer.echo("No decisions logged yet.")
+        return
+    for item in items:
+        tier_label = {1: "silent", 2: "flagged", 3: "escalated"}.get(item.get("tier", 2), "?")
+        reviewed = "reviewed" if item.get("reviewed") else "pending"
+        ts = item.get("timestamp", "")[:16]
+        typer.echo(f"  [{tier_label}] {item.get('subject', '?')}")
+        typer.echo(f"    Decision: {item.get('decision', '?')}")
+        typer.echo(f"    From: {item.get('original_sender', '?')}  ·  {ts}  ·  {reviewed}")
+        typer.echo()
+
+
 @app.command("worktrees")
 def worktrees(
     project: str | None = typer.Option(None, "--project", help="Optional project key filter."),

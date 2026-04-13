@@ -630,6 +630,7 @@ class Supervisor:
         submit_jobs_parallel(self, [
             ("version_check", {}),
             ("inbox_escalation", {}),
+            ("inbox_processor", {}),
         ])
         return alerts
 

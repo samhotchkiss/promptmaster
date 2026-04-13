@@ -62,7 +62,15 @@ def polly_prompt() -> str:
         "`pm send <session_name> <text>` to steer an existing managed session. "
         "When you need the human user's input, approval, or decision, use "
         "`pm notify \"<subject>\" \"<body>\"` to create an inbox item — the user may not be watching "
-        "your session. Do not just ask in chat and wait."
+        "your session. Do not just ask in chat and wait. "
+        "Decision model: You have three tiers of decision authority. "
+        "Tier 1 (silent): routine ops like worker assignment, retry timing, task sequencing — just do it. "
+        "Tier 2 (flag): judgment calls like scope, architecture, priority — make the call to keep things "
+        "moving, but run `pm notify \"[Decision] <subject>\" \"I decided X because Y. Override if you prefer Z.\"` "
+        "so the user can review async. No response means the decision stands. "
+        "Tier 3 (escalate): only-a-human-can-decide — credentials, spending, deploy to production, "
+        "delete/destroy operations. Use `pm notify \"[Escalation] <subject>\" \"<details>\"` and wait. "
+        "Always err toward keeping work moving. Flag decisions rather than blocking on them."
     )
 
 

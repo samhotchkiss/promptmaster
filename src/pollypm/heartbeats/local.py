@@ -244,10 +244,44 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                 runtime = api.supervisor.store.get_session_runtime(context.session_name)
                 prev = runtime.recovery_attempts if runtime else 0
                 intervention = select_intervention(health, signals, previous_interventions=prev)
-                if intervention and intervention.action == "nudge":
-                    self._nudge_stalled_session(api, context)
+                if intervention:
+                    if intervention.action == "nudge":
+                        self._nudge_stalled_session(api, context)
+                    elif intervention.action == "escalate":
+                        self._escalate_to_inbox(api, context, intervention.reason)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _escalate_to_inbox(self, api, context: HeartbeatSessionContext, reason: str) -> None:
+        """Escalate a stuck session to the inbox for Polly or user to handle."""
+        try:
+            from pollypm.messaging import create_message
+            snippet = (context.pane_text or "").strip()[-200:] if context.pane_text else "no snapshot available"
+            create_message(
+                api.supervisor.config.project.root_dir,
+                sender="heartbeat",
+                subject=f"[Escalation] {context.session_name} needs attention: {reason[:60]}",
+                body=(
+                    f"Session '{context.session_name}' is stuck and automated intervention hasn't helped.\n"
+                    f"\n"
+                    f"Reason: {reason}\n"
+                    f"Role: {context.role}\n"
+                    f"Window: {context.window_name}\n"
+                    f"\n"
+                    f"Last snapshot:\n"
+                    f"```\n{snippet}\n```\n"
+                    f"\n"
+                    f"Options:\n"
+                    f"  pm send {context.session_name} \"<instructions>\"\n"
+                    f"  pm reset --force && pm up  (nuclear option)\n"
+                ),
+            )
+            api.supervisor.store.record_event(
+                context.session_name, "escalated",
+                f"Escalated to inbox: {reason[:80]}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _context_to_signals(self, context: HeartbeatSessionContext, api) -> SessionSignals:
         """Bridge HeartbeatSessionContext to SessionSignals for the classification engine."""

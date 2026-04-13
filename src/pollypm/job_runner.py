@@ -113,6 +113,13 @@ def _run_inbox_escalation(supervisor: Supervisor, payload: dict[str, Any]) -> No
     escalate_waiting_sessions(supervisor.store, supervisor.config.project.root_dir)
 
 
+@register_job("inbox_processor")
+def _run_inbox_processor(supervisor: Supervisor, payload: dict[str, Any]) -> None:
+    """Process inbox items: triage, act, log decisions."""
+    from pollypm.inbox_processor import process_inbox
+    process_inbox(supervisor.config.project.root_dir, supervisor.store)
+
+
 @register_job("prune_state")
 def _run_prune_state(supervisor: Supervisor, payload: dict[str, Any]) -> None:
     """Prune old events and heartbeat data to prevent unbounded growth."""

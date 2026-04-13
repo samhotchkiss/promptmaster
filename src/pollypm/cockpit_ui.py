@@ -1101,11 +1101,31 @@ class PollyDashboardApp(App[None]):
             self.chart_body.update("[dim]No token data yet[/dim]")
 
         # ── Footer ──
-        self.footer_w.update(
-            "[dim]Click Polly to connect  \u00b7  "
-            f"{data.sweep_count_24h} sweeps today  \u00b7  "
-            f"{data.message_count_24h} messages[/dim]"
-        )
+        # ── Decisions ──
+        try:
+            from pollypm.inbox_processor import list_decisions
+            recent_decisions = list_decisions(config.project.root_dir, limit=5)
+            if recent_decisions:
+                decision_lines: list[str] = []
+                for dec in recent_decisions:
+                    tier = dec.get("tier", 2)
+                    icon = "[#3fb950]\u2713[/#3fb950]" if tier <= 2 else "[#f85149]\u25b2[/#f85149]"
+                    decision_lines.append(f"{icon} {dec.get('subject', '?')[:55]}")
+                    if dec.get("decision"):
+                        decision_lines.append(f"  [dim]{dec['decision'][:60]}[/dim]")
+                self.footer_w.update("\n".join(decision_lines))
+            else:
+                self.footer_w.update(
+                    "[dim]Click Polly to connect  \u00b7  "
+                    f"{data.sweep_count_24h} sweeps today  \u00b7  "
+                    f"{data.message_count_24h} messages[/dim]"
+                )
+        except Exception:  # noqa: BLE001
+            self.footer_w.update(
+                "[dim]Click Polly to connect  \u00b7  "
+                f"{data.sweep_count_24h} sweeps today  \u00b7  "
+                f"{data.message_count_24h} messages[/dim]"
+            )
 
 
 class PollyCockpitPaneApp(App[None]):
