@@ -725,10 +725,21 @@ def reply_to_message(
     from pollypm.messaging import (
         create_thread, append_thread_message, list_threads, transition_thread,
     )
+    from pollypm.inbox_v2 import find_message as find_v2, reply_to_message as reply_v2, close_message as close_v2
     config = load_config(config_path)
     root = config.project.root_dir
 
-    # Find as thread first
+    # Try v2 first
+    v2_msg = find_v2(root, message_id)
+    if v2_msg:
+        reply_v2(root, v2_msg.id, sender=sender, body=text)
+        typer.echo(f"Reply added to {v2_msg.id}")
+        if close_after:
+            close_v2(root, v2_msg.id, sender=sender, note=text[:200])
+            typer.echo("Message closed.")
+        return
+
+    # Fall back to v1
     active_threads = list_threads(root, include_closed=True)
     thread = next((t for t in active_threads if message_id.lower() in t.thread_id.lower()), None)
 
