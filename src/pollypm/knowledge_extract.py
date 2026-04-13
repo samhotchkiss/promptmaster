@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from pollypm.llm_runner import HAIKU_MODEL, run_haiku_json
+from pollypm.llm_runner import HAIKU_MODEL, run_haiku, run_haiku_json
 from pollypm.memory_backends import get_memory_backend
 
 EXTRACTION_INTERVAL_SECONDS = 15 * 60
@@ -56,6 +56,7 @@ def extract_knowledge_once(config) -> dict[str, int]:
     updated_docs = 0
     processed_events = 0
     memory_entries = 0
+    log_entries = 0
     for project_root in _all_project_roots(config):
         events, checkpoint = _read_new_events(project_root)
         if not events:
@@ -64,8 +65,14 @@ def extract_knowledge_once(config) -> dict[str, int]:
         delta = _extract_with_haiku_or_fallback(events)
         updated_docs += _apply_docs_delta(project_root, delta)
         memory_entries += _store_memory_entries(config, project_root, delta)
+        log_entries += _append_activity_log(project_root, events)
         _save_checkpoint(project_root, checkpoint)
-    return {"processed_events": processed_events, "updated_docs": updated_docs, "memory_entries": memory_entries}
+    return {
+        "processed_events": processed_events,
+        "updated_docs": updated_docs,
+        "memory_entries": memory_entries,
+        "log_entries": log_entries,
+    }
 
 
 def store_snapshot_learnings(
@@ -464,3 +471,146 @@ def _render_doc(title: str, sections: OrderedDict[str, str]) -> str:
         lines.append(body.strip() if body.strip() else "- None yet.")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Activity log — chronological summary of what happened across sessions
+# ---------------------------------------------------------------------------
+
+ACTIVITY_LOG_FILE = "activity-log.md"
+ACTIVITY_LOG_HEADER = "# Activity Log\n\nChronological summary of work across sessions. Generated automatically by PollyPM.\nFor full transcript details, see `.pollypm/transcripts/<session>/events.jsonl`.\n\n"
+_MAX_LOG_ENTRIES = 200  # keep the log readable — prune oldest beyond this
+_MAX_EVENTS_PER_BATCH = 150  # limit what we send to Haiku per extraction
+
+
+def _activity_log_path(project_root: Path) -> Path:
+    return project_root / "docs" / ACTIVITY_LOG_FILE
+
+
+def _append_activity_log(project_root: Path, events: list[dict[str, Any]]) -> int:
+    """Summarize new events into chronological activity log entries.
+
+    Returns the number of new log entries appended.
+    """
+    # Filter to interesting events (user/assistant turns, commits, tool use)
+    interesting = [
+        e for e in events
+        if e.get("event_type") in ("user_turn", "assistant_turn", "commit", "tool_use")
+    ]
+    if not interesting:
+        return 0
+
+    # Group by session for context
+    by_session: dict[str, list[dict[str, Any]]] = {}
+    for event in interesting:
+        sid = str(event.get("session_id", "unknown"))
+        by_session.setdefault(sid, []).append(event)
+
+    # Build a condensed transcript for Haiku
+    condensed = _condense_events_for_summary(interesting)
+    if not condensed:
+        return 0
+
+    summary = _summarize_with_haiku(condensed)
+    if not summary:
+        summary = _heuristic_activity_summary(by_session)
+    if not summary:
+        return 0
+
+    log_path = _activity_log_path(project_root)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = ""
+    if log_path.exists():
+        existing = log_path.read_text()
+
+    # Strip header if present — we'll re-add it
+    body = existing
+    if body.startswith("# Activity Log"):
+        # Find end of header (first entry starting with ##)
+        idx = body.find("\n## ")
+        if idx >= 0:
+            body = body[idx:]
+        else:
+            body = ""
+
+    # Prepend new entries (newest first)
+    body = summary.strip() + "\n\n" + body.strip() if body.strip() else summary.strip()
+
+    # Prune if too long
+    entries = body.split("\n## ")
+    if len(entries) > _MAX_LOG_ENTRIES:
+        entries = entries[:_MAX_LOG_ENTRIES]
+    body = "\n## ".join(entries)
+
+    log_path.write_text(ACTIVITY_LOG_HEADER + body.strip() + "\n")
+    return 1
+
+
+def _condense_events_for_summary(events: list[dict[str, Any]]) -> str:
+    """Build a condensed view of events for Haiku to summarize."""
+    lines: list[str] = []
+    for event in events[:_MAX_EVENTS_PER_BATCH]:
+        etype = event.get("event_type", "")
+        session = event.get("session_id", "unknown")
+        ts = event.get("timestamp", "")
+        payload = event.get("payload") or {}
+
+        if etype in ("user_turn", "assistant_turn"):
+            text = str(payload.get("text", ""))[:500]
+            if text:
+                role = "USER" if etype == "user_turn" else "ASSISTANT"
+                lines.append(f"[{ts}] {session} {role}: {text}")
+        elif etype == "commit":
+            msg = str(payload.get("message", ""))[:200]
+            lines.append(f"[{ts}] {session} COMMIT: {msg}")
+        elif etype == "tool_use":
+            tool = str(payload.get("tool", ""))
+            lines.append(f"[{ts}] {session} TOOL: {tool}")
+
+    return "\n".join(lines)
+
+
+def _summarize_with_haiku(condensed: str) -> str | None:
+    """Ask Haiku to produce a chronological activity summary."""
+    prompt = (
+        "Summarize the following session transcript into a concise activity log. "
+        "Group by time block and session. For each block, write:\n"
+        "- A markdown ## heading with the date/time range and session name\n"
+        "- 2-5 bullet points of what happened (discussions, decisions, code changes, commits)\n"
+        "- If a decision was made, note what was decided and why\n"
+        "- If relevant, note which files or components were affected\n\n"
+        "Be specific and concrete. Use past tense. Skip token counts and routine tool calls.\n"
+        "Keep each entry under 100 words.\n\n"
+        "Transcript:\n"
+        f"{condensed}"
+    )
+    return run_haiku(prompt, max_tokens=2000)
+
+
+def _heuristic_activity_summary(by_session: dict[str, list[dict[str, Any]]]) -> str:
+    """Fallback: build a basic activity summary without Haiku."""
+    lines: list[str] = []
+    for session_id, events in sorted(by_session.items()):
+        timestamps = [e.get("timestamp", "") for e in events if e.get("timestamp")]
+        if not timestamps:
+            continue
+        first_ts = min(timestamps)[:16].replace("T", " ")
+        last_ts = max(timestamps)[:16].replace("T", " ")
+        time_range = first_ts if first_ts == last_ts else f"{first_ts} — {last_ts}"
+
+        lines.append(f"## {time_range} — {session_id}")
+        # Extract commits
+        commits = [e for e in events if e.get("event_type") == "commit"]
+        for c in commits[:5]:
+            msg = str((c.get("payload") or {}).get("message", ""))[:100]
+            if msg:
+                lines.append(f"- Committed: {msg}")
+        # Count turns
+        user_turns = sum(1 for e in events if e.get("event_type") == "user_turn")
+        assistant_turns = sum(1 for e in events if e.get("event_type") == "assistant_turn")
+        if user_turns or assistant_turns:
+            lines.append(f"- {user_turns} user messages, {assistant_turns} assistant responses")
+        lines.append("")
+
+    return "\n".join(lines)

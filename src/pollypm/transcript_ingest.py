@@ -12,7 +12,7 @@ from typing import Any
 from pollypm.models import AccountConfig, ProviderKind
 from pollypm.providers import get_provider
 from pollypm.provider_sdk import TranscriptSource
-from pollypm.projects import ensure_session_lock, project_transcripts_dir, session_scoped_dir
+from pollypm.projects import project_transcripts_dir, session_scoped_dir
 
 
 POLL_INTERVAL_SECONDS = 1.0
@@ -150,7 +150,9 @@ def _append_event(config, event: dict[str, Any]) -> None:
     session_id = str(event["session_id"])
     project_root = _project_root_for_key(config, str(event["project_key"]))
     output_root = session_scoped_dir(_transcript_root(project_root), session_id)
-    ensure_session_lock(output_root, session_id)
+    # Skip session lock — the ingestor runs in a single dedicated thread so
+    # there is no concurrent-write risk, and locking here crashes when another
+    # live session already holds the lock on this directory.
     output_path = output_root / "events.jsonl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("a", encoding="utf-8") as handle:
