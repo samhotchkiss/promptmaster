@@ -946,8 +946,12 @@ def mail(
     if not messages:
         typer.echo("No open mail.")
         return
-    typer.echo(f"Inbox ({len(messages)}):\n")
-    for item in messages:
+
+    # Split: user-facing vs agent-to-agent
+    user_msgs = [m for m in messages if m.to == "user" or m.sender in ("user", "human")]
+    agent_msgs = [m for m in messages if m not in user_msgs]
+
+    def _render_item(item):
         prefix = ""
         if "[Escalation]" in item.subject:
             prefix = "▲ "
@@ -956,9 +960,24 @@ def mail(
         elif "[Complete]" in item.subject:
             prefix = "✓ "
         typer.echo(f"  {prefix}{item.subject}")
-        typer.echo(f"    from {item.sender} · {_fmt_time(item.created_at)}")
+        typer.echo(f"    {item.sender} → {item.to} · {_fmt_time(item.created_at)}")
         typer.echo(f"    {item.id}")
         typer.echo()
+
+    if user_msgs:
+        typer.echo(f"Inbox ({len(user_msgs)}):\n")
+        for item in user_msgs:
+            _render_item(item)
+
+    if agent_msgs:
+        typer.echo(f"Agent ({len(agent_msgs)}):\n")
+        for item in agent_msgs:
+            _render_item(item)
+
+    if not user_msgs and not agent_msgs:
+        typer.echo("No open mail.")
+        return
+
     typer.echo("Read: pm mail <id>  ·  Reply: pm mail --reply <id> --text 'msg'")
     typer.echo("Close: pm mail --close <id> --note 'what was done'")
 

@@ -1198,8 +1198,9 @@ class PollyInboxApp(App[None]):
         Binding("a", "archive_message", "Archive"),
         Binding("escape", "back", "Back"),
         Binding("1", "show_open", "Open"),
-        Binding("2", "show_archived", "Archived"),
-        Binding("3", "show_decisions", "Decisions"),
+        Binding("2", "show_agent", "Agent"),
+        Binding("3", "show_archived", "Archived"),
+        Binding("4", "show_decisions", "Decisions"),
     ]
     CSS = """
     Screen {
@@ -1314,6 +1315,7 @@ class PollyInboxApp(App[None]):
     def compose(self) -> ComposeResult:
         with Horizontal(id="tab-bar"):
             yield Button("Open", id="tab-open", classes="tab-btn active")
+            yield Button("Agent", id="tab-agent", classes="tab-btn")
             yield Button("Archived", id="tab-archived", classes="tab-btn")
             yield Button("Decisions", id="tab-decisions", classes="tab-btn")
         yield ListView(id="msg-list")
@@ -1370,7 +1372,8 @@ class PollyInboxApp(App[None]):
         idx = next((i for i, m in enumerate(self._messages) if m is item), -1)
         body = self._bodies.get(idx, "")
         preview = body.strip().split("\n")[0][:70] if body else ""
-        return f"{icon}[b]{subject}[/b]\n[dim]  {item.sender} \u00b7 {_fmt_time(item.created_at)}  \u00b7  {preview}[/dim]"
+        to_label = f" → {item.to}" if hasattr(item, "to") and item.to else ""
+        return f"{icon}[b]{subject}[/b]\n[dim]  {item.sender}{to_label} · {_fmt_time(item.created_at)}  ·  {preview}[/dim]"
 
     def _load_messages(self) -> None:
         from pollypm.inbox_v2 import list_messages as list_v2, read_message as read_v2
@@ -1378,7 +1381,19 @@ class PollyInboxApp(App[None]):
         config = load_config(self.config_path)
         self._bodies = {}
         if self._tab == "open":
-            self._messages = list_v2(config.project.root_dir, status="open")
+            # User-facing messages only (to=user or from=user)
+            all_open = list_v2(config.project.root_dir, status="open")
+            self._messages = [
+                m for m in all_open
+                if m.to == "user" or m.sender in ("user", "human")
+            ]
+        elif self._tab == "agent":
+            # Agent-to-agent messages (neither to nor from is user)
+            all_open = list_v2(config.project.root_dir, status="open")
+            self._messages = [
+                m for m in all_open
+                if m.to != "user" and m.sender not in ("user", "human")
+            ]
         elif self._tab == "archived":
             self._messages = list_v2(config.project.root_dir, status="closed")
         elif self._tab == "decisions":
@@ -1487,6 +1502,10 @@ class PollyInboxApp(App[None]):
     def on_tab_open(self, event: Button.Pressed) -> None:
         self.action_show_open()
 
+    @on(Button.Pressed, "#tab-agent")
+    def on_tab_agent(self, event: Button.Pressed) -> None:
+        self.action_show_agent()
+
     @on(Button.Pressed, "#tab-archived")
     def on_tab_archived(self, event: Button.Pressed) -> None:
         self.action_show_archived()
@@ -1497,7 +1516,7 @@ class PollyInboxApp(App[None]):
 
     def _set_active_tab(self, tab: str) -> None:
         self._tab = tab
-        for btn_id, btn_tab in [("#tab-open", "open"), ("#tab-archived", "archived"), ("#tab-decisions", "decisions")]:
+        for btn_id, btn_tab in [("#tab-open", "open"), ("#tab-agent", "agent"), ("#tab-archived", "archived"), ("#tab-decisions", "decisions")]:
             btn = self.query_one(btn_id, Button)
             btn.set_class(btn_tab == tab, "active")
 
@@ -1613,6 +1632,12 @@ class PollyInboxApp(App[None]):
 
     def action_show_open(self) -> None:
         self._set_active_tab("open")
+        self.action_back()
+        self._refresh_list()
+        self.query_one("#msg-list", ListView).focus()
+
+    def action_show_agent(self) -> None:
+        self._set_active_tab("agent")
         self.action_back()
         self._refresh_list()
         self.query_one("#msg-list", ListView).focus()
