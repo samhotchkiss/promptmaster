@@ -330,8 +330,10 @@ class LocalHeartbeatBackend(HeartbeatBackend):
 
     # Rate limit nudges: max once per session per 10 minutes
     _NUDGE_COOLDOWN_SECONDS = 600
-    # Circuit breaker: after this many nudges with no change, stop and recover
-    _MAX_NUDGES_BEFORE_RECOVERY = 3
+    # Circuit breaker: after this many nudges with no change, stop and recover.
+    # Set high enough that normal supervision cycles don't trigger it.
+    # At 10min cooldown, 6 nudges = 1 hour of continuous unresponsiveness.
+    _MAX_NUDGES_BEFORE_RECOVERY = 6
 
     def _nudge_stalled_session(self, api, context: HeartbeatSessionContext) -> None:
         """Send a targeted nudge to a stalled session, with rate limiting and circuit breaker."""
@@ -363,19 +365,24 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                     if most_recent_nudge_age is None:
                         most_recent_nudge_age = age
 
-            # Circuit breaker FIRST: if we've nudged too many times, recover instead
+            # Circuit breaker FIRST: if we've nudged too many times, escalate or recover
             if nudge_count >= self._MAX_NUDGES_BEFORE_RECOVERY:
                 api.raise_alert(
                     context.session_name,
                     "nudge_circuit_breaker",
-                    "error",
-                    f"Session unresponsive after {nudge_count} nudges in the last hour — recovering",
+                    "warn",
+                    f"Session unresponsive after {nudge_count} nudges — escalating",
                 )
-                api.recover_session(
-                    context.session_name,
-                    failure_type="unresponsive",
-                    message=f"Unresponsive after {nudge_count} nudges — force restart",
-                )
+                # NEVER kill the operator — escalate to inbox instead. Killing Polly
+                # loses all her context, task tracking, and supervision state.
+                if context.role == "operator-pm":
+                    self._escalate_to_inbox(api, context, f"Operator idle for {nudge_count} nudge cycles — may need user direction")
+                else:
+                    api.recover_session(
+                        context.session_name,
+                        failure_type="unresponsive",
+                        message=f"Unresponsive after {nudge_count} nudges — force restart",
+                    )
                 api.supervisor.store.record_event(
                     context.session_name,
                     "circuit_breaker",
