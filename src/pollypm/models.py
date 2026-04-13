@@ -84,6 +84,7 @@ class PollyPMSettings:
     heartbeat_backend: str = "local"
     scheduler_backend: str = "inline"
     lease_timeout_minutes: int = 30
+    timezone: str = ""  # IANA timezone (e.g. "America/Denver"). Empty = auto-detect.
 
 
 @dataclass(slots=True)

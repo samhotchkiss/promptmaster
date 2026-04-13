@@ -18,9 +18,10 @@ from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, ListItem, ListView, Static
+from textual.widgets import Button, DataTable, Input, ListItem, ListView, Static
 
 from pollypm.models import ProviderKind
+from pollypm.tz import format_time as _fmt_time
 from pollypm.config import load_config
 from pollypm.service_api import PollyPMService
 from pollypm.cockpit import CockpitItem, CockpitRouter, build_cockpit_detail
@@ -1222,6 +1223,18 @@ class PollyInboxApp(App[None]):
         background: #1f6feb;
         color: #ffffff;
     }
+    #btn-reply {
+        background: #238636;
+        color: #ffffff;
+    }
+    #reply-input {
+        margin: 1 0;
+        display: none;
+    }
+    #reply-status {
+        height: 1;
+        padding: 0 2;
+    }
     #hint {
         height: 1;
         background: #161b22;
@@ -1254,7 +1267,10 @@ class PollyInboxApp(App[None]):
             yield Static("", id="detail-body", markup=True)
             with Horizontal(id="detail-actions"):
                 yield Button("Back", id="btn-back")
+                yield Button("Reply", id="btn-reply")
                 yield Button("Archive", id="btn-archive")
+            yield Input(placeholder="Type your reply and press Enter...", id="reply-input")
+            yield Static("", id="reply-status", markup=True)
         yield Static("", id="hint", markup=True)
 
     def on_mount(self) -> None:
@@ -1295,7 +1311,7 @@ class PollyInboxApp(App[None]):
             icon = "[#d29922]\u25c6 [/#d29922]"
         subject = item.subject[:60]
         preview = item.body.strip().split("\n")[0][:70] if item.body else ""
-        return f"{icon}[b]{subject}[/b]\n[dim]  {item.sender} \u00b7 {item.created_at[:16]}  \u00b7  {preview}[/dim]"
+        return f"{icon}[b]{subject}[/b]\n[dim]  {item.sender} \u00b7 {_fmt_time(item.created_at)}  \u00b7  {preview}[/dim]"
 
     def _load_messages(self) -> None:
         from pollypm.messaging import list_closed_messages as _closed
@@ -1337,7 +1353,7 @@ class PollyInboxApp(App[None]):
             header.update(
                 f"[b]{item.subject}[/b]\n\n"
                 f"[dim]From:[/dim] {item.sender}  \u00b7  "
-                f"[dim]Date:[/dim] {item.created_at[:16]}"
+                f"[dim]Date:[/dim] {_fmt_time(item.created_at)}"
             )
             body.update(item.body)
         archive_btn = self.query_one("#btn-archive", Button)
@@ -1361,6 +1377,10 @@ class PollyInboxApp(App[None]):
     @on(Button.Pressed, "#btn-back")
     def on_back_pressed(self, event: Button.Pressed) -> None:
         self.action_back()
+
+    @on(Button.Pressed, "#btn-reply")
+    def on_reply_pressed(self, event: Button.Pressed) -> None:
+        self._do_reply()
 
     @on(Button.Pressed, "#btn-archive")
     def on_archive_pressed(self, event: Button.Pressed) -> None:
@@ -1415,6 +1435,63 @@ class PollyInboxApp(App[None]):
             return
         self.action_back()
         self._refresh_list()
+
+    def _resolve_reply_target(self) -> str:
+        """Determine which session to reply to."""
+        if self._reading_index < 0 or self._reading_index >= len(self._messages):
+            return "operator"
+        item = self._messages[self._reading_index]
+        if self._tab == "decisions":
+            return "operator"
+        sender = item.sender
+        session_map = {"heartbeat": "operator", "system": "operator", "polly": "operator"}
+        target = session_map.get(sender, "operator")
+        # Check if the message body mentions a specific session
+        body = item.body if hasattr(item, "body") else ""
+        for word in body.split():
+            if word.startswith(("worker_", "operator")):
+                cleaned = word.strip("'\".,;:()")
+                if cleaned:
+                    return cleaned
+        return target
+
+    def _do_reply(self) -> None:
+        """Show the reply input field."""
+        reply_input = self.query_one("#reply-input", Input)
+        reply_input.display = True
+        target = self._resolve_reply_target()
+        reply_input.placeholder = f"Reply to {target}... (Enter to send)"
+        reply_input.focus()
+
+    @on(Input.Submitted, "#reply-input")
+    def on_reply_submitted(self, event: Input.Submitted) -> None:
+        """Send the reply when user presses Enter in the input."""
+        reply_text = event.value.strip()
+        reply_input = self.query_one("#reply-input", Input)
+        status_w = self.query_one("#reply-status", Static)
+        reply_input.display = False
+        reply_input.value = ""
+        if not reply_text:
+            return
+        target = self._resolve_reply_target()
+        try:
+            from pollypm.supervisor import Supervisor
+            config = load_config(self.config_path)
+            sup = Supervisor(config)
+            sup.send_input(target, reply_text, owner="human", force=True)
+            sup.store.close()
+            status_w.update(f"[#3fb950]Sent to {target}[/#3fb950]")
+            # Auto-archive after reply
+            if self._tab == "open" and self._reading_index < len(self._messages):
+                item = self._messages[self._reading_index]
+                if hasattr(item, "path"):
+                    try:
+                        from pollypm.messaging import close_message
+                        close_message(config.project.root_dir, item.path.name)
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as exc:  # noqa: BLE001
+            status_w.update(f"[#f85149]Reply failed: {exc}[/#f85149]")
 
     def action_show_open(self) -> None:
         self._set_active_tab("open")

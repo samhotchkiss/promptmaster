@@ -179,6 +179,7 @@ def _parse_pollypm_settings(raw: dict[str, object], sessions: dict[str, SessionC
         heartbeat_backend=str(pollypm_raw.get("heartbeat_backend", "local")),
         scheduler_backend=str(pollypm_raw.get("scheduler_backend", "inline")),
         lease_timeout_minutes=max(1, int(pollypm_raw.get("lease_timeout_minutes", 30))),
+        timezone=str(pollypm_raw.get("timezone", "")),
     )
 
 
@@ -299,6 +300,8 @@ def _render_global_config(config: PollyPMConfig) -> str:
         f'scheduler_backend = "{config.pollypm.scheduler_backend}"',
         f"lease_timeout_minutes = {config.pollypm.lease_timeout_minutes}",
     ]
+    if config.pollypm.timezone:
+        lines.append(f'timezone = "{config.pollypm.timezone}"')
     if config.pollypm.failover_accounts:
         items = ", ".join(f'"{name}"' for name in config.pollypm.failover_accounts)
         lines.append(f"failover_accounts = [{items}]")

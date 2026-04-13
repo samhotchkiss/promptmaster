@@ -338,13 +338,13 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         # Only nudge worker and operator roles
         if context.role not in ("worker", "operator-pm"):
             return
-        # Circuit breaker: count recent nudges for this session
+        # Circuit breaker + rate limiter for nudges
         try:
             from datetime import UTC, datetime, timedelta
             recent = api.supervisor.store.recent_events(limit=200)
             now = datetime.now(UTC)
             nudge_count = 0
-            last_nudge_at = None
+            most_recent_nudge_age = None
             for event in recent:
                 if event.session_name != context.session_name:
                     continue
@@ -352,13 +352,10 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                     age = (now - datetime.fromisoformat(event.created_at)).total_seconds()
                     if age < 3600:  # count nudges in last hour
                         nudge_count += 1
-                    if last_nudge_at is None:
-                        last_nudge_at = datetime.fromisoformat(event.created_at)
-                    # Rate limit: skip if nudged recently
-                    if age < self._NUDGE_COOLDOWN_SECONDS:
-                        return
+                    if most_recent_nudge_age is None:
+                        most_recent_nudge_age = age
 
-            # Circuit breaker: too many nudges with no effect → recover instead
+            # Circuit breaker FIRST: if we've nudged too many times, recover instead
             if nudge_count >= self._MAX_NUDGES_BEFORE_RECOVERY:
                 api.raise_alert(
                     context.session_name,
@@ -376,6 +373,10 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                     "circuit_breaker",
                     f"Circuit breaker triggered: {nudge_count} nudges with no response, recovering session",
                 )
+                return
+
+            # Rate limit: skip if nudged recently (but after circuit breaker check)
+            if most_recent_nudge_age is not None and most_recent_nudge_age < self._NUDGE_COOLDOWN_SECONDS:
                 return
         except Exception:  # noqa: BLE001
             pass
