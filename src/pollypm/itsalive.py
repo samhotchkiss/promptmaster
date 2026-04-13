@@ -364,6 +364,7 @@ def write_itsalive_docs(project_root: Path, domain: str, *, publish_dir: str) ->
 def api_json(method: str, url: str, *, payload: Any | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
     body: bytes | None = None
     request_headers = dict(headers or {})
+    request_headers.setdefault("User-Agent", "PollyPM/0.1")
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
         request_headers.setdefault("Content-Type", "application/json")
@@ -443,7 +444,10 @@ def _upload_file(path: Path, base_url: str, relative_path: str, deploy_token: st
         url,
         data=path.read_bytes(),
         method="PUT",
-        headers={"Content-Type": content_type},
+        headers={
+            "Content-Type": content_type,
+            "User-Agent": "PollyPM/0.1",
+        },
     )
     try:
         with request.urlopen(req) as response:
