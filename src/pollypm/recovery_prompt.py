@@ -193,6 +193,11 @@ def _build_from_checkpoint(
             priority=SECTION_TRUNCATION_PRIORITY["blockers"],
         ))
 
+    # Section: Pending inbox items
+    inbox_section = _pending_inbox_section(config)
+    if inbox_section:
+        sections.append(inbox_section)
+
     # Truncate to fit max_chars
     sections = _truncate_sections(sections, max_chars)
 
@@ -202,6 +207,34 @@ def _build_from_checkpoint(
         checkpoint_id=checkpoint.checkpoint_id,
         session_name=checkpoint.session_name,
     )
+
+
+def _pending_inbox_section(config: PollyPMConfig) -> RecoveryPromptSection | None:
+    """Build a section listing pending inbox items the agent should address."""
+    try:
+        from pollypm.messaging import list_open_messages, list_threads
+        messages = list_open_messages(config.project.root_dir)
+        threads = list_threads(config.project.root_dir)
+        if not messages and not threads:
+            return None
+        parts: list[str] = []
+        if messages:
+            parts.append(f"You have {len(messages)} pending inbox message(s):")
+            for msg in messages[:5]:
+                parts.append(f"  - {msg.subject} (from {msg.sender})")
+        if threads:
+            parts.append(f"You have {len(threads)} active thread(s):")
+            for t in threads[:5]:
+                parts.append(f"  - {t.subject} ({len(t.message_paths)} messages, owner: {t.owner})")
+        parts.append("Check with: pm mail")
+        return RecoveryPromptSection(
+            key="pending_inbox",
+            heading="Pending Inbox Items",
+            content="\n".join(parts),
+            priority=2,  # Important but not as critical as blockers
+        )
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _build_fallback_prompt(
@@ -240,6 +273,10 @@ def _build_fallback_prompt(
             content=git_state,
             priority=SECTION_TRUNCATION_PRIORITY["git_state"],
         ))
+
+    inbox_section = _pending_inbox_section(config)
+    if inbox_section:
+        sections.append(inbox_section)
 
     sections = _truncate_sections(sections, max_chars)
 

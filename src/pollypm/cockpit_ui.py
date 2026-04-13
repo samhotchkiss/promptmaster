@@ -1471,7 +1471,7 @@ class PollyInboxApp(App[None]):
 
     @on(Input.Submitted, "#reply-input")
     def on_reply_submitted(self, event: Input.Submitted) -> None:
-        """Send the reply when user presses Enter in the input."""
+        """Send the reply: write to thread (persistent) AND deliver to agent (actionable)."""
         reply_text = event.value.strip()
         reply_input = self.query_one("#reply-input", Input)
         status_w = self.query_one("#reply-status", Static)
@@ -1480,23 +1480,39 @@ class PollyInboxApp(App[None]):
         if not reply_text:
             return
         target = self._resolve_reply_target()
+        config = load_config(self.config_path)
+
+        # 1. Record reply in the thread (persistent history)
+        if self._reading_index >= 0 and self._reading_index < len(self._messages):
+            item = self._messages[self._reading_index]
+            if self._tab != "decisions" and hasattr(item, "path"):
+                try:
+                    from pollypm.messaging import create_thread, append_thread_message, list_threads
+                    # Check if already a thread
+                    threads = list_threads(config.project.root_dir, include_closed=True)
+                    thread = next(
+                        (t for t in threads if hasattr(item, "path") and item.path.stem in t.thread_id),
+                        None,
+                    )
+                    if thread is None and "open" in str(item.path.parent):
+                        # Convert to thread
+                        thread = create_thread(config.project.root_dir, item.path.name, actor="user", owner="pm")
+                    if thread:
+                        append_thread_message(
+                            config.project.root_dir, thread.thread_id,
+                            sender="user", subject=f"Re: {item.subject[:50]}", body=reply_text,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass  # Thread recording is best-effort
+
+        # 2. Deliver to the agent (actionable — they see it in their session)
         try:
             from pollypm.supervisor import Supervisor
-            config = load_config(self.config_path)
             sup = Supervisor(config)
             sup.send_input(target, reply_text, owner="human", force=True)
             sup.store.close()
-            status_w.update(f"[#3fb950]Sent to {target}[/#3fb950]")
+            status_w.update(f"[#3fb950]Sent to {target} (saved to thread)[/#3fb950]")
             self.notify(f"Reply sent to {target}", severity="information")
-            # Auto-archive after reply
-            if self._tab == "open" and self._reading_index < len(self._messages):
-                item = self._messages[self._reading_index]
-                if hasattr(item, "path"):
-                    try:
-                        from pollypm.messaging import close_message
-                        close_message(config.project.root_dir, item.path.name)
-                    except Exception:  # noqa: BLE001
-                        pass
         except Exception as exc:  # noqa: BLE001
             status_w.update(f"[#f85149]Reply failed: {exc}[/#f85149]")
 
