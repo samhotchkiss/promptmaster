@@ -365,10 +365,53 @@ def scan_projects(
 def add_project(
     repo_path: Path = typer.Argument(..., help="Path to the project folder."),
     name: str | None = typer.Option(None, "--name", help="Optional display name."),
+    skip_import: bool = typer.Option(False, "--skip-import", help="Skip history import."),
     config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     project = register_project(config_path, repo_path, name=name)
     typer.echo(f"Registered project {project.name or project.key} at {project.path}")
+    if not skip_import:
+        typer.echo("Importing project history (transcripts, git, files)...")
+        from pollypm.history_import import import_project_history
+        try:
+            result = import_project_history(
+                project.path, project.name or project.key, skip_interview=True,
+            )
+            typer.echo(
+                f"Import complete: {result.sources_found} sources, "
+                f"{result.timeline_events} events, {result.docs_generated} docs generated"
+            )
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(f"History import failed (project still registered): {exc}")
+
+
+@app.command("import")
+def import_history(
+    project_key: str = typer.Argument(..., help="Project key to import."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
+) -> None:
+    """Run the history import pipeline for a project (crawl transcripts, git, files)."""
+    config = load_config(config_path)
+    project = config.projects.get(project_key)
+    if project is None:
+        typer.echo(f"Unknown project: {project_key}. Run `pm projects` to list.")
+        raise typer.Exit(code=1)
+    typer.echo(f"Importing history for {project.name or project_key} at {project.path}...")
+    from pollypm.history_import import import_project_history
+    result = import_project_history(
+        project.path, project.name or project_key, skip_interview=True,
+    )
+    typer.echo(
+        f"Import complete:\n"
+        f"  Sources discovered: {result.sources_found}\n"
+        f"  Timeline events: {result.timeline_events}\n"
+        f"  Docs generated: {result.docs_generated}\n"
+        f"  Provider transcripts copied: {result.provider_transcripts_copied}"
+    )
+    if result.interview_questions:
+        typer.echo(f"\nGenerated {len(result.interview_questions)} review question(s).")
+        for q in result.interview_questions[:5]:
+            typer.echo(f"  - {q}")
 
 
 @app.command("init-tracker")

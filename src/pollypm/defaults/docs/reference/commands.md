@@ -75,6 +75,14 @@ Leases auto-expire after 30 minutes. The cockpit auto-claims/releases leases whe
 | `pm scan-projects` | Auto-discover git repos in workspace |
 | `pm init-tracker` | Initialize the issue tracker for a project |
 
+## History Import
+
+| Command | What it does |
+|---------|-------------|
+| `pm import <project_key>` | Run the history import pipeline — crawl transcripts, git, and files to generate project docs |
+
+When you add a project with `pm add-project`, the import runs automatically. Use `pm import` to re-run it (e.g., after significant new work).
+
 ## Issues
 
 | Command | What it does |
