@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import re
 
+from pollypm.heartbeat_loop import (
+    SessionHealth,
+    SessionSignals,
+    classify_session_health,
+    select_intervention,
+)
 from pollypm.heartbeats.base import HeartbeatBackend, HeartbeatSessionContext
 
 
@@ -228,6 +234,44 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             snapshot_hash=context.snapshot_hash,
             verdict=verdict,
             reason=reason,
+        )
+
+        # Use the structured classification engine for intervention decisions
+        if not mechanical_only:
+            try:
+                signals = self._context_to_signals(context, api)
+                health = classify_session_health(signals)
+                runtime = api.supervisor.store.get_session_runtime(context.session_name)
+                prev = runtime.recovery_attempts if runtime else 0
+                intervention = select_intervention(health, signals, previous_interventions=prev)
+                if intervention and intervention.action == "nudge":
+                    self._nudge_stalled_session(api, context)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _context_to_signals(self, context: HeartbeatSessionContext, api) -> SessionSignals:
+        """Bridge HeartbeatSessionContext to SessionSignals for the classification engine."""
+        hashes = api.recent_snapshot_hashes(context.session_name, limit=5)
+        repeated = 0
+        if hashes:
+            for h in hashes:
+                if h == hashes[0]:
+                    repeated += 1
+                else:
+                    break
+        return SessionSignals(
+            session_name=context.session_name,
+            window_present=context.window_present,
+            pane_dead=context.pane_dead,
+            output_stale=not bool(context.transcript_delta),
+            snapshot_repeated=repeated,
+            auth_failure=any(
+                p in (context.transcript_delta or context.pane_text or "").lower()
+                for p in self._AUTH_FAILURE_PATTERNS
+            ),
+            has_transcript_delta=bool(context.transcript_delta),
+            last_verdict=context.cursor.last_verdict if context.cursor else "",
+            idle_cycles=repeated,
         )
 
     def _should_queue_followup(self, context: HeartbeatSessionContext) -> bool:

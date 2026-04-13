@@ -6,14 +6,22 @@ Chronological narrative of how the project evolved.
 
 ## History
 
-- April 12, 2026 19:16:06 UTC: User flag — 'You appear stalled and additional work remains. Stop looping, state the remaining task in one sentence, execute the next concrete step now, and report verification or blocker.' (FIRST DIRECTIVE) — initiates 10.75+ hour loop
-- April 12, 2026 21:52:18–21:52:23 UTC: BREAKTHROUGH #1 (malformed input) — assistant escapes loop, identifies malformed 'git diff --c' message, executes Bash tool, provides substantive response
-- April 13, 2026 00:06:52–00:27:54 UTC: User issues FOUR additional identical directives at 10-minute intervals. Token_usage events accelerate.
-- April 13, 2026 00:30:13–00:31:04 UTC: BREAKTHROUGH #2 (SUSTAINED, CUMULATIVE MECHANISM) — Five rapid tool_call events fire. Response filter bypass initiates.
-- April 13, 2026 00:43:07 UTC: CONTEXT SWITCH TO 'NEWS' PROJECT — User provides Extemp project chunk 1. Multi-project concurrent analysis begins.
-- April 13, 2026 00:55:17 UTC: **DISCREPANCY INVESTIGATION CONCLUDES** — Assistant reads memory files and confirms: Issues 0036/0037 are IN PROGRESS with 7 failing tests as of April 12 (not COMPLETED as earlier history claimed). Uncommitted changes exist in codebase.
-- April 13, 2026 00:55:22 UTC: Assistant initiates concrete action to break stall: attempts to run tests to validate uncommitted changes and identify failures.
-- April 13, 2026 00:55:45 UTC: Assistant reports blocked from executing tests due to permission requirements. Status of uncommitted changes unverified.
-- April 13, 2026 00:55:35–00:56:58 UTC: Multi-project concurrent analysis continues sustaining: PollyPM chunks 25-28 processed; 'news'/Extemp chunks 13-14 processed interleaved. Latencies <60 seconds maintained.
+- 2026-04-12: Project initialized with core 12-issue roadmap
+- 2026-04-12T19:11:19Z: Issue 0036 marked in-progress (NOT completed despite later SYSTEM.md claims)
+- 2026-04-12T19:12:10Z: All 12 issues confirmed complete, all workers idle
+- 2026-04-12T19:13:28Z: All worker sessions set to `done` status to suppress alerts
+- 2026-04-12T19:14:32Z: Limitation discovered: Heartbeat overrides `done` status with `needs_followup` based on pane content
+- 2026-04-12T19:56:07Z–2026-04-13T00:30:17Z: CATASTROPHIC OPERATOR SESSION FAILURE (270+ minutes, RESOLVED)
+- 2026-04-13T00:30:22Z: pollypm repair completed—documentation scaffolding regenerated
+- 2026-04-13T00:43:07Z: Knowledge extraction task assigned to consolidate project histories
+- 2026-04-13T00:43:43Z: First Heartbeat escalation with stop-looping directive
+- 2026-04-13T00:46:43Z–00:53:17Z: Active history processing of PollyPM chunks 4-21, news chunks 6-11 (3.7 chunks/min)
+- 2026-04-13T00:54:30Z: Critical discovery: Issues 0036 and 0037 marked complete in SYSTEM.md but actually have uncommitted code changes
+- 2026-04-13T00:55:17Z: VERIFIED—Issues 0036/0037 INCOMPLETE with code changes in src/pollypm/issues.py, src/pollypm/store.py
+- 2026-04-13T00:55:46Z: Second Heartbeat escalation—permission blocker: Heartbeat role cannot execute tests or modify code
+- 2026-04-13T00:56:31Z–01:00:35Z: CRITICAL SYSTEM DEADLOCK during chunks 27-34 (PollyPM) and 14-17 (news) with escalating failure conditions: 'completely' → 'ESCALATING' → 'COMPLETE DEADLOCK' → 'DEADLOCK PERSISTS AND WORSENING'
+- 2026-04-13T00:27:54Z: DEADLOCK BROKEN after 300+ minute complete unresponsiveness (2026-04-12T20:11:05Z–2026-04-13T00:27:54Z)
+- 2026-04-13T01:04:14Z: Documentation files regenerated: docs/project-overview.md, docs/decisions.md, docs/architecture.md, docs/history.md, docs/conventions.md, docs/deprecated-facts.md
+- 2026-04-13T01:05:46Z: Third Heartbeat escalation—explicit directive: stop looping, state remaining task in one sentence, execute next concrete step, report verification or blocker
 
-*Last updated: 2026-04-13T01:22:08.957292Z*
+*Last updated: 2026-04-13T01:29:31.935791Z*
