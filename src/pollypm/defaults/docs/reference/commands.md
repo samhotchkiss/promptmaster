@@ -102,6 +102,14 @@ When you add a project with `pm add-project`, the import runs automatically. Use
 
 **When to use `pm notify`:** Any time you need the human user's input, approval, or attention — and they may not be watching your session. The inbox is the reliable way to reach the user. Don't just ask in chat and hope they see it.
 
+**Decision prefixes:**
+- `[Decision]` — Polly made a judgment call. User can review and override.
+- `[Escalation]` — Requires human decision. Work pauses until user responds.
+
+| Command | What it does |
+|---------|-------------|
+| `pm decisions` | Show recent decisions Polly made (for user review) |
+
 ## Maintenance
 
 | Command | What it does |
