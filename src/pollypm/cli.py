@@ -26,6 +26,7 @@ from pollypm.config import (
 )
 from pollypm.doc_scaffold import repair_docs, scaffold_docs, verify_docs
 from pollypm.messaging import close_message, create_message, list_closed_messages, list_open_messages
+from pollypm.tz import format_time as _fmt_time
 from pollypm.models import ProviderKind
 from pollypm.onboarding import run_onboarding
 from pollypm.control_tui import PollyPMApp
@@ -692,7 +693,7 @@ def mail(
         typer.echo(f"Archived ({len(messages)}):\n")
         for item in messages:
             typer.echo(f"  {item.path.stem}")
-            typer.echo(f"    {item.subject} [{item.sender}] {item.created_at[:16]}")
+            typer.echo(f"    {item.subject} [{item.sender}] {_fmt_time(item.created_at)}")
         typer.echo(f"\nRead with: pm mail <message-id>")
         return
     messages = list_open_messages(config.project.root_dir)
@@ -707,7 +708,7 @@ def mail(
         elif "[Decision]" in item.subject:
             prefix = "◆ "
         typer.echo(f"  {prefix}{item.subject}")
-        typer.echo(f"    from {item.sender} · {item.created_at[:16]}")
+        typer.echo(f"    from {item.sender} · {_fmt_time(item.created_at)}")
         typer.echo(f"    {item.path.stem}")
         typer.echo()
     typer.echo(f"Read with: pm mail <message-id>")
