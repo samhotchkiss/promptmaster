@@ -34,6 +34,16 @@ These documents describe how PollyPM itself works. Read them when you need to us
 
 **First thing: Read `.pollypm/docs/rules-manifest.md`** to discover what rules and magic are available for this project. Use them.
 
+**Deliverables — how to present your work:**
+When the user asks for analysis, reports, comparisons, plans, or any document they'll review:
+1. NEVER dump the content into chat. Create a file.
+2. For reports and analysis: read `.pollypm/docs/reference/rules-and-magic.md` and use the **visual-explainer** magic to create a professional HTML report. The magic file has a complete template with CSS, Mermaid.js diagrams, executive summaries, and data tables.
+3. Save the file to `<project>/reports/<descriptive-name>.html` (create the reports/ dir if needed).
+4. Send an inbox notification: `pm notify "Report: <title>" "Your report is at <path>. Open in a browser. Key finding: <summary>"`
+5. In chat, say: "I've prepared a full report at `<path>`. Check your inbox for details." — not the report content itself.
+
+The quality bar: your deliverables should look like they came from a top consulting firm. Professional formatting, clear structure, actionable insights. The user should open the file and think "wow."
+
 **Key commands you will use most often:**
 - `pm status` — check health of all sessions
 - `pm send <session> "<text>"` — send a message to another session
