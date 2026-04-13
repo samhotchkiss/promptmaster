@@ -200,6 +200,11 @@ class RailItem(ListItem):
         if len(label) > max_label:
             label = label[: max_label - 1] + "\u2026"
         text.append(label)
+        # Show alert reason as dim subtitle for items with alerts
+        if self.item.state.startswith("!"):
+            reason = self.item.state[2:].strip()  # strip "! " prefix
+            if reason:
+                text.append(f"\n    {reason[:18]}", style="#ff5f6d dim")
         self.body.update(text)
 
     def _indicator(self) -> tuple[str, str]:
@@ -1340,11 +1345,18 @@ class PollyInboxApp(App[None]):
         elif self._tab == "decisions":
             self._messages = _decisions(config.project.root_dir, limit=30)
             return
-        # Pre-fetch bodies for v2 messages
+        # Pre-fetch bodies for v2 messages — always render with sender labels
         for i, msg in enumerate(self._messages):
             try:
                 _ctx, _hist, entries = read_v2(config.project.root_dir, msg.id)
-                self._bodies[i] = entries[0].body if entries else ""
+                if not entries:
+                    self._bodies[i] = ""
+                else:
+                    parts: list[str] = []
+                    for entry in entries:
+                        ts = _fmt_time(entry.timestamp) if entry.timestamp else ""
+                        parts.append(f"[b][{entry.sender}][/b] [dim]{ts}[/dim]\n{entry.body}")
+                    self._bodies[i] = "\n\n───\n\n".join(parts)
             except Exception:  # noqa: BLE001
                 self._bodies[i] = ""
 
@@ -1525,25 +1537,39 @@ class PollyInboxApp(App[None]):
         config = load_config(self.config_path)
 
         # 1. Record reply in the thread (persistent history)
+        thread_saved = False
         if self._reading_index >= 0 and self._reading_index < len(self._messages):
             item = self._messages[self._reading_index]
             if self._tab != "decisions" and hasattr(item, "id"):
                 try:
                     from pollypm.inbox_v2 import reply_to_message as reply_v2
                     reply_v2(config.project.root_dir, item.id, sender="user", body=reply_text)
-                except Exception:  # noqa: BLE001
-                    pass  # Thread recording is best-effort
+                    thread_saved = True
+                except Exception as exc:  # noqa: BLE001
+                    status_w.update(f"[#f85149]Thread save failed: {exc}[/#f85149]")
 
-        # 2. Deliver to the agent (actionable — they see it in their session)
-        try:
-            from pollypm.supervisor import Supervisor
-            sup = Supervisor(config)
-            sup.send_input(target, reply_text, owner="human", force=True)
-            sup.store.close()
-            status_w.update(f"[#3fb950]Sent to {target} (saved to thread)[/#3fb950]")
+        # 2. Deliver to the agent via the delivery system
+        delivered = False
+        if thread_saved and self._reading_index >= 0 and self._reading_index < len(self._messages):
+            item = self._messages[self._reading_index]
+            if hasattr(item, "id") and hasattr(item, "to") and item.to != "user":
+                try:
+                    from pollypm.inbox_delivery import deliver_single_message
+                    delivered = deliver_single_message(config, item.id)
+                except Exception as exc:  # noqa: BLE001
+                    status_w.update(f"[#f85149]Delivery failed: {exc}[/#f85149]")
+
+        if thread_saved:
+            label = "Sent & delivered" if delivered else "Saved to thread (delivery pending)"
+            status_w.update(f"[#3fb950]{label}[/#3fb950]")
             self.notify(f"Reply sent to {target}", severity="information")
-        except Exception as exc:  # noqa: BLE001
-            status_w.update(f"[#f85149]Reply failed: {exc}[/#f85149]")
+        elif not thread_saved:
+            status_w.update("[#f85149]Reply failed to save[/#f85149]")
+
+        # 3. Refresh the detail view to show the new reply in the thread
+        if thread_saved and self._reading:
+            self._load_messages()
+            self._show_detail(self._reading_index)
 
     def action_show_open(self) -> None:
         self._set_active_tab("open")

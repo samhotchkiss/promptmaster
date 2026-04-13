@@ -493,6 +493,14 @@ class StateStore:
         )
         self.commit()
 
+    def last_event_at(self, session_name: str, event_type: str) -> str | None:
+        """Return the ISO timestamp of the most recent event of this type, or None."""
+        row = self.execute(
+            "SELECT created_at FROM events WHERE session_name = ? AND event_type = ? ORDER BY id DESC LIMIT 1",
+            (session_name, event_type),
+        ).fetchone()
+        return row[0] if row else None
+
     def last_heartbeat_at(self) -> str | None:
         """Return the ISO timestamp of the most recent heartbeat sweep, or None."""
         row = self.execute(

@@ -704,16 +704,29 @@ def notify(
     subject: str = typer.Argument(..., help="Short message subject."),
     body: str = typer.Argument(..., help="Message body."),
     sender: str = typer.Option("pa", "--sender", help="Message sender."),
+    to: str = typer.Option("user", "--to", help="Recipient: user, polly, or worker_<name>."),
     project: str = typer.Option("", "--project", help="Related project key."),
     config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
-    """Create an inbox message. Uses v2 threaded format with context + history."""
+    """Create an inbox message. Default recipient is the user; use --to for agents."""
     config = load_config(config_path)
+    owner = to if to != "user" else "user"
     msg = create_v2_message(
         config.project.root_dir, sender=sender, subject=subject, body=body,
-        project=project, owner="polly" if sender != "polly" else "user",
+        project=project, owner=owner, to=to,
     )
     typer.echo(f"Created message {msg.id}")
+
+    # Trigger immediate delivery for agent-targeted messages
+    if to != "user":
+        try:
+            from pollypm.inbox_delivery import deliver_single_message
+            if deliver_single_message(config, msg.id):
+                typer.echo(f"Delivered to {to}")
+            else:
+                typer.echo(f"Delivery to {to} pending — will retry on next heartbeat")
+        except Exception:  # noqa: BLE001
+            typer.echo(f"Delivery to {to} pending — will retry on next heartbeat")
 
 
 @app.command("reply")
@@ -733,8 +746,22 @@ def reply_to_message(
         typer.echo(f"Message not found: {message_id}")
         raise typer.Exit(code=1)
 
-    reply_v2_message(root, v2_msg.id, sender=sender, body=text)
+    entry = reply_v2_message(root, v2_msg.id, sender=sender, body=text)
     typer.echo(f"Reply added to {v2_msg.id}")
+
+    # Trigger immediate delivery if the reply is targeted at an agent
+    try:
+        from pollypm.inbox_v2 import list_messages
+        updated = next((m for m in list_messages(root, status="open") if m.id == v2_msg.id), None)
+        if updated and updated.to and updated.to != "user":
+            from pollypm.inbox_delivery import deliver_single_message
+            if deliver_single_message(config, v2_msg.id):
+                typer.echo(f"Delivered to {updated.to}")
+            else:
+                typer.echo(f"Delivery to {updated.to} failed — will retry on next heartbeat")
+    except Exception:  # noqa: BLE001
+        pass  # Delivery is best-effort here, heartbeat will pick it up
+
     if close_after:
         close_v2_message(root, v2_msg.id, sender=sender, note=text[:200])
         typer.echo("Message closed.")
@@ -852,7 +879,7 @@ def mail(
         typer.echo(f"{'─' * 60}")
         for entry in entries:
             typer.echo(f"\n  [{entry.sender}] {_fmt_time(entry.timestamp)}")
-            typer.echo(f"  {entry.body[:200]}")
+            typer.echo(f"  {entry.body}")
         typer.echo(f"\n{'─' * 60}")
         if match.status != "closed":
             typer.echo(f"Reply: pm mail --reply {match.id} --text 'your reply'")
@@ -1311,6 +1338,18 @@ def send(
     config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
 ) -> None:
     supervisor = _load_supervisor(config_path)
+    # Block pm send to workers at the CLI level. The operator must use inbox
+    # (pm notify --to) so tasks are tracked with audit trail and reply path.
+    # The delivery system bypasses this by calling supervisor.send_input() directly.
+    session_cfg = supervisor.config.sessions.get(session_name)
+    if session_cfg and session_cfg.role == "worker":
+        typer.echo(
+            f"Blocked: use inbox to communicate with workers.\n"
+            f"  pm notify \"Task: ...\" \"<instructions>\" --to {session_name} --sender polly\n"
+            f"\n"
+            f"This creates a tracked thread. The heartbeat delivers it to the worker."
+        )
+        raise typer.Exit(code=1)
     try:
         supervisor.send_input(session_name, text, owner=owner, force=force, press_enter=not no_enter)
     except RuntimeError as exc:
@@ -1501,7 +1540,6 @@ def switch_provider(
 ) -> None:
     """Switch a worker's provider (e.g., from Codex to Claude) with checkpoint preservation."""
     from pollypm.models import ProviderKind
-    from pollypm.config_patches import write_session_override
 
     supervisor = _load_supervisor(config_path)
     config = supervisor.config
