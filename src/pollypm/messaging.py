@@ -302,7 +302,7 @@ def append_thread_message(root_dir: Path, thread_id: str, *, sender: str, subjec
 def list_closed_messages(root_dir: Path) -> list[InboxMessage]:
     root = ensure_inbox(root_dir)
     items: list[InboxMessage] = []
-    for path in sorted((root / CLOSED_DIR).glob("*.md")):
+    for path in sorted((root / CLOSED_DIR).glob("*.md"), reverse=True):
         items.append(_read_message(path))
     return items
 
