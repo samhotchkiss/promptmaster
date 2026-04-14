@@ -447,6 +447,9 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         """Send a targeted nudge to a stalled WORKER. Never targets the operator."""
         if context.role != "worker":
             return
+        # Don't nudge workers with no pending work — they're legitimately idle
+        if not self._has_pending_work(api, context):
+            return
         try:
             from datetime import UTC, datetime
             recent = api.supervisor.store.recent_events(limit=200)
