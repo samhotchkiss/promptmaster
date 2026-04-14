@@ -79,6 +79,10 @@ def run_haiku(
 
     Returns the raw stdout text, or None on failure.
     """
+    _MAX_PROMPT_BYTES = 10 * 1024 * 1024  # 10MB safety limit
+    if len(prompt.encode("utf-8", errors="replace")) > _MAX_PROMPT_BYTES:
+        logger.warning("Prompt exceeds %dMB limit, truncating", _MAX_PROMPT_BYTES // (1024 * 1024))
+        prompt = prompt[:_MAX_PROMPT_BYTES]
     if shutil.which("claude") is None:
         logger.warning("claude CLI not found, cannot run LLM task")
         return None
