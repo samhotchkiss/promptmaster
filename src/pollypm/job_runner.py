@@ -82,6 +82,30 @@ def _run_knowledge_extract(supervisor: Supervisor, payload: dict[str, Any]) -> N
     pass
 
 
+@register_job("session_intelligence_sweep")
+def _run_session_intelligence_sweep(supervisor: Supervisor, payload: dict[str, Any]) -> None:
+    """Tier 1 sweep: process ALL sessions with new transcript activity.
+
+    Runs at most every 5 minutes. One Haiku call per active session.
+    Extracts knowledge entries and activity summaries.
+    """
+    from datetime import UTC, datetime
+    last = supervisor.store.last_event_at("session_intelligence", "sweep_completed")
+    if last:
+        age = (datetime.now(UTC) - datetime.fromisoformat(last)).total_seconds()
+        if age < 300:  # 5 minutes
+            return
+    from pollypm.session_intelligence import sweep_all_sessions
+    result = sweep_all_sessions(supervisor.config)
+    if result["sessions_processed"]:
+        supervisor.store.record_event(
+            "session_intelligence", "sweep_completed",
+            f"Processed {result['sessions_processed']} sessions, "
+            f"{result['knowledge_entries']} knowledge entries, "
+            f"{result['summaries']} summaries",
+        )
+
+
 @register_job("project_intelligence")
 def _run_project_intelligence(supervisor: Supervisor, payload: dict[str, Any]) -> None:
     """Tier 2: Opus rewrites project docs from accumulated Haiku knowledge entries.

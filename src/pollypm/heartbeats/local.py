@@ -695,21 +695,8 @@ class LocalHeartbeatBackend(HeartbeatBackend):
 
     def _append_activity_summary(self, project_root: Path, summary: str) -> None:
         """Append a one-line activity summary to the activity log."""
-        from datetime import UTC, datetime
-        log_path = project_root / "docs" / "activity-log.md"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-        entry = f"- **{ts}** — {summary}\n"
-        if log_path.exists():
-            existing = log_path.read_text()
-        else:
-            existing = "# Activity Log\n\n"
-        # Prepend new entry after header
-        if "\n\n" in existing:
-            header, body = existing.split("\n\n", 1)
-            log_path.write_text(f"{header}\n\n{entry}{body}")
-        else:
-            log_path.write_text(f"{existing}\n{entry}")
+        from pollypm.session_intelligence import _append_activity_summary
+        _append_activity_summary(project_root, summary)
 
     def _classify(self, context: HeartbeatSessionContext) -> tuple[str, str]:
         text = (context.transcript_delta or context.pane_text or "").strip()

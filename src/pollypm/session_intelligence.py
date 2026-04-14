@@ -1,9 +1,13 @@
 """Session Intelligence — unified Haiku call per session.
 
-Consolidates triage, knowledge extraction, and activity summarization
-into a single LLM call. Runs inside the heartbeat sweep for sessions
-that are stalled (identical snapshots). Results are acted on immediately
-(triage) and staged for later processing (knowledge → Opus).
+Two modes of operation:
+
+1. **Triage** (60s, stalled sessions only): Called from heartbeat sweep
+   when a worker is idle. Returns action (proceed/nudge/idle) + knowledge.
+
+2. **Sweep** (5 min, all sessions with activity): Processes every session
+   that has new transcript events since last cursor. Extracts knowledge
+   and activity summaries. Does NOT triage (that's the 60s path).
 """
 from __future__ import annotations
 
@@ -177,3 +181,165 @@ def clear_pending_knowledge(project_root: Path) -> int:
         except OSError:
             pass
     return count
+
+
+# ---------------------------------------------------------------------------
+# 5-minute sweep — processes ALL sessions with new transcript activity
+# ---------------------------------------------------------------------------
+
+_CURSOR_FILE = ".session-intelligence-state.json"
+
+
+def _cursor_path(project_root: Path) -> Path:
+    return project_root / ".pollypm" / "transcripts" / _CURSOR_FILE
+
+
+def _load_cursors(project_root: Path) -> dict[str, int]:
+    path = _cursor_path(project_root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        return {str(k): int(v) for k, v in data.get("files", {}).items()}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_cursors(project_root: Path, cursors: dict[str, int]) -> None:
+    path = _cursor_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps({"files": cursors}, indent=2) + "\n")
+
+
+def _read_new_events(project_root: Path, session_name: str, cursors: dict[str, int]) -> tuple[list[dict], int]:
+    """Read new transcript events for one session since the cursor position."""
+    events_path = project_root / ".pollypm" / "transcripts" / session_name / "events.jsonl"
+    if not events_path.exists():
+        return [], 0
+    key = f"{session_name}/events.jsonl"
+    offset = cursors.get(key, 0)
+    try:
+        size = events_path.stat().st_size
+    except OSError:
+        return [], offset
+    if size <= offset:
+        return [], offset  # No new data
+    if size < offset:
+        offset = 0  # File was truncated
+    events: list[dict] = []
+    with events_path.open("r", encoding="utf-8") as f:
+        f.seek(offset)
+        for line in f:
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+                if isinstance(event, dict):
+                    events.append(event)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        new_offset = f.tell()
+    return events, new_offset
+
+
+def _events_to_transcript_delta(events: list[dict], max_chars: int = 2000) -> str:
+    """Convert events to a readable transcript delta for the Haiku prompt."""
+    lines: list[str] = []
+    total = 0
+    for event in events:
+        etype = event.get("event_type", "")
+        payload = event.get("payload") or {}
+        text = str(payload.get("text", ""))[:300]
+        if etype in ("user_turn", "assistant_turn") and text:
+            role = "USER" if etype == "user_turn" else "ASSISTANT"
+            line = f"{role}: {text}"
+            if total + len(line) > max_chars:
+                break
+            lines.append(line)
+            total += len(line)
+        elif etype == "commit":
+            msg = str(payload.get("message", ""))[:100]
+            lines.append(f"COMMIT: {msg}")
+    return "\n".join(lines)
+
+
+def sweep_all_sessions(config) -> dict[str, int]:
+    """Process ALL sessions with new transcript events since last cursor.
+
+    Makes one Haiku call per session with new data. Extracts knowledge
+    entries and activity summaries. Does NOT triage (that's the 60s path).
+
+    Returns: {sessions_processed, knowledge_entries, summaries}
+    """
+    from pollypm.knowledge_extract import _all_project_roots
+
+    counts = {"sessions_processed": 0, "knowledge_entries": 0, "summaries": 0}
+
+    for project_root in _all_project_roots(config):
+        cursors = _load_cursors(project_root)
+        transcript_root = project_root / ".pollypm" / "transcripts"
+        if not transcript_root.exists():
+            continue
+
+        updated_cursors = dict(cursors)
+
+        for session_dir in sorted(transcript_root.iterdir()):
+            if not session_dir.is_dir() or session_dir.name.startswith("."):
+                continue
+            session_name = session_dir.name
+
+            events, new_offset = _read_new_events(project_root, session_name, cursors)
+            if not events:
+                continue
+
+            # Build a transcript delta from the events
+            transcript_delta = _events_to_transcript_delta(events)
+            if not transcript_delta:
+                updated_cursors[f"{session_name}/events.jsonl"] = new_offset
+                continue
+
+            # Determine role
+            session_cfg = config.sessions.get(session_name)
+            role = session_cfg.role if session_cfg else "worker"
+
+            # Call Haiku — knowledge extraction + activity summary only (no triage)
+            intel = run_session_intelligence(
+                snapshot="",  # No snapshot needed for knowledge-only pass
+                transcript_delta=transcript_delta,
+                session_name=session_name,
+                role=role,
+                has_pending_work=True,  # Assume work if there are events
+            )
+
+            if intel is not None:
+                if intel.knowledge_entries:
+                    stage_pending_knowledge(project_root, session_name, intel.knowledge_entries)
+                    counts["knowledge_entries"] += len(intel.knowledge_entries)
+                if intel.activity_summary:
+                    _append_activity_summary(project_root, intel.activity_summary)
+                    counts["summaries"] += 1
+
+            updated_cursors[f"{session_name}/events.jsonl"] = new_offset
+            counts["sessions_processed"] += 1
+
+        _save_cursors(project_root, updated_cursors)
+
+    return counts
+
+
+def _append_activity_summary(project_root: Path, summary: str) -> None:
+    """Append a one-line activity summary to the activity log."""
+    log_path = project_root / "docs" / "activity-log.md"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+    entry = f"- **{ts}** — {summary}\n"
+    if log_path.exists():
+        existing = log_path.read_text()
+    else:
+        existing = "# Activity Log\n\n"
+    if "\n\n" in existing:
+        header, body = existing.split("\n\n", 1)
+        log_path.write_text(f"{header}\n\n{entry}{body}")
+    else:
+        log_path.write_text(f"{existing}\n{entry}")
