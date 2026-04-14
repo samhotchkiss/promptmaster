@@ -499,26 +499,26 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             pass
 
     def _detect_worker_completion(self, api, context: HeartbeatSessionContext) -> None:
-        """Track worker activity and ensure inbox threads exist for accountability.
+        """Detect completed work and ensure the user knows about it.
 
-        1. If worker has open threads it hasn't replied to, reset delivery for re-poke.
-        2. If worker is active but has NO open inbox threads, create a tracking thread
-           so the work gets reported back through the inbox lifecycle.
+        Checks for:
+        1. Open inbox threads the worker hasn't replied to → re-poke
+        2. Worker idle with recent commits/changes and no user interaction
+           in the last 5 minutes → notify Polly about the completed work
         """
         try:
+            from datetime import UTC, datetime
             from pollypm.inbox_v2 import create_message, list_messages, mark_delivered
 
             config = api.supervisor.config
             root = config.project.root_dir
             store = api.supervisor.store
 
-            # Find open threads addressed to this worker
+            # Re-poke stale delivered threads
             worker_threads = [
                 m for m in list_messages(root, status="open")
                 if m.to == context.session_name
             ]
-
-            # Re-poke stale delivered threads
             stale = [
                 m for m in worker_threads
                 if m.delivery_state == "delivered" and m.message_count <= 1
@@ -526,38 +526,67 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             for m in stale:
                 mark_delivered(root, m.id, state="pending")
 
-            # If worker is active (snapshot changing) but has no inbox threads,
-            # create a tracking thread so the work gets reported back.
-            if not worker_threads:
-                hashes = api.recent_snapshot_hashes(context.session_name, limit=2)
-                is_active = len(hashes) >= 2 and hashes[0] != hashes[1]
-                if is_active:
-                    # Check cooldown — don't create tracking threads too often
-                    last = store.last_event_at(context.session_name, "tracking_thread_created")
-                    if last:
-                        from datetime import UTC, datetime
-                        age = (datetime.now(UTC) - datetime.fromisoformat(last)).total_seconds()
-                        if age < 1800:  # 30 minute cooldown
-                            return
+            # Check for completed work with no user awareness:
+            # Worker is idle (same snapshot 2x) + has recent commits + no recent
+            # user interaction (no send_input from human in last 5 min)
+            hashes = api.recent_snapshot_hashes(context.session_name, limit=2)
+            is_idle = len(hashes) >= 2 and hashes[0] == hashes[1]
+            if not is_idle:
+                return
 
-                    session = config.sessions.get(context.session_name)
-                    project_key = session.project if session else "unknown"
-                    create_message(
-                        root,
-                        sender="heartbeat",
-                        subject=f"Active work: {context.session_name} on {project_key}",
-                        to=context.session_name,
-                        owner=context.session_name,
-                        body=(
-                            f"You are actively working but have no open inbox thread. "
-                            f"When your current task is complete, reply to this thread with "
-                            f"what you did and what changed. Use: pm reply <this_id> 'your report'"
-                        ),
-                    )
-                    store.record_event(
-                        context.session_name, "tracking_thread_created",
-                        f"Created tracking thread for untracked work on {project_key}",
-                    )
+            # Cooldown
+            last = store.last_event_at(context.session_name, "completion_detected")
+            if last:
+                age = (datetime.now(UTC) - datetime.fromisoformat(last)).total_seconds()
+                if age < 600:
+                    return
+
+            # Check for recent commits (actual work product)
+            session = config.sessions.get(context.session_name)
+            if not session:
+                return
+            project = config.projects.get(session.project)
+            if not project:
+                return
+
+            import subprocess
+            try:
+                result = subprocess.run(
+                    ["git", "log", "--oneline", "--since=2 hours ago", "-5"],
+                    cwd=project.path, capture_output=True, text=True, timeout=5,
+                )
+                recent_commits = result.stdout.strip() if result.returncode == 0 else ""
+            except Exception:  # noqa: BLE001
+                recent_commits = ""
+
+            if not recent_commits:
+                return  # No work product — don't notify
+
+            # Check if user interacted recently (within 5 min)
+            last_human = store.last_event_at(context.session_name, "send_input")
+            if last_human:
+                human_age = (datetime.now(UTC) - datetime.fromisoformat(last_human)).total_seconds()
+                if human_age < 300:
+                    return  # User is actively in this session
+
+            # Work was done, worker is idle, user hasn't interacted → tell Polly
+            create_message(
+                root,
+                sender="heartbeat",
+                subject=f"Work completed: {session.project} — review needed",
+                to="polly",
+                owner="polly",
+                body=(
+                    f"Worker `{context.session_name}` on **{session.project}** is idle "
+                    f"with recent commits:\n\n```\n{recent_commits}\n```\n\n"
+                    f"Review the work, verify it meets the user's goal, and notify the user "
+                    f"with `pm notify`."
+                ),
+            )
+            store.record_event(
+                context.session_name, "completion_detected",
+                f"Worker idle with commits — notified Polly",
+            )
         except Exception:  # noqa: BLE001
             pass
 
