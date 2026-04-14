@@ -257,14 +257,13 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                 runtime = api.supervisor.store.get_session_runtime(context.session_name)
                 prev = runtime.recovery_attempts if runtime else 0
                 intervention = select_intervention(health, signals, previous_interventions=prev)
-                if intervention:
-                    # Skip interventions for workers with no pending work — they're legitimately idle
-                    if context.role == "worker" and not self._has_pending_work(api, context):
-                        pass
-                    elif intervention.action == "nudge" and context.role == "worker":
-                        self._nudge_stalled_worker(api, context)
-                    elif intervention.action == "escalate":
-                        self._escalate_to_inbox(api, context, intervention.reason)
+                if intervention and context.role == "worker":
+                    # Use Haiku to decide the right action for idle workers.
+                    # The LLM reads the snapshot and classifies: push forward,
+                    # nudge, do nothing, or escalate.
+                    self._triage_stalled_worker(api, context)
+                elif intervention and intervention.action == "escalate":
+                    self._escalate_to_inbox(api, context, intervention.reason)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -620,41 +619,57 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             return False  # Assume no work on error — don't false-alert
 
     def _triage_stalled_worker(self, api, context: HeartbeatSessionContext) -> None:
-        """Triage a worker idle for 5+ heartbeats using Haiku LLM.
+        """Triage an idle worker using Haiku LLM.
 
-        Asks Haiku: should this worker be nudged, or is it legitimately idle?
-        Falls back to heuristics if Haiku is unavailable.
+        Haiku reads the session snapshot and decides:
+        - proceed: worker asked for permission to continue — tell it yes
+        - nudge: worker is stuck on an error or has an obvious next step
+        - idle: worker finished and has nothing to do
         """
         snapshot = (context.pane_text or "").strip()
         if not snapshot:
             return
 
-        # Try Haiku triage first
         try:
             from pollypm.llm_runner import run_haiku_json
             result = run_haiku_json(
-                f"You are triaging a stalled AI coding worker session. "
-                f"The session has been idle (same output) for 5+ minutes. "
-                f"Here is the last snapshot of what the session shows:\n\n"
-                f"```\n{snapshot[-1000:]}\n```\n\n"
+                f"You are triaging an AI coding worker session that has been idle. "
+                f"Read the snapshot and decide what action to take.\n\n"
+                f"```\n{snapshot[-1500:]}\n```\n\n"
                 f"Respond with JSON: "
-                f'{{"action": "nudge"|"idle", "reason": "one sentence"}}\n'
-                f"- nudge: the worker has an obvious next step or is stuck on an error\n"
-                f"- idle: the worker finished its task or is legitimately waiting\n",
+                f'{{"action": "proceed"|"nudge"|"idle", "reason": "one sentence", "message": "what to tell the worker"}}\n'
+                f"Actions:\n"
+                f"- proceed: the worker proposed a plan or asked 'should I continue?' / 'if you want' / 'shall I proceed?' — tell it to go ahead and do it\n"
+                f"- nudge: the worker is stuck on an error, permission prompt, or has a clear next step it hasn't taken\n"
+                f"- idle: the worker genuinely finished everything and has nothing left to do\n\n"
+                f"The default should be 'proceed' if the worker has outlined next steps. "
+                f"Workers should keep working autonomously, not wait for permission.\n",
             )
             if result and isinstance(result, dict):
                 action = result.get("action", "idle")
-                if action == "nudge":
-                    reason = result.get("reason", "")
-                    self._nudge_stalled_worker(api, context)
-                    try:
-                        api.supervisor.store.record_event(
-                            context.session_name, "haiku_triage",
-                            f"Haiku: nudge — {reason[:80]}",
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                # else: idle — do nothing
+                reason = result.get("reason", "")
+                message = result.get("message", "")
+
+                if action == "proceed":
+                    # Tell the worker to go ahead
+                    msg = message or "Yes, proceed with the plan you outlined. Do not wait for permission — keep working."
+                    api.send_session_message(context.session_name, msg, owner="heartbeat")
+                    api.supervisor.store.record_event(
+                        context.session_name, "haiku_triage",
+                        f"Haiku: proceed — {reason[:80]}",
+                    )
+                elif action == "nudge":
+                    msg = message or "Continue working. Take the next step."
+                    api.send_session_message(context.session_name, msg, owner="heartbeat")
+                    api.supervisor.store.record_event(
+                        context.session_name, "haiku_triage",
+                        f"Haiku: nudge — {reason[:80]}",
+                    )
+                else:
+                    api.supervisor.store.record_event(
+                        context.session_name, "haiku_triage",
+                        f"Haiku: idle — {reason[:80]}",
+                    )
                 return
         except Exception as exc:  # noqa: BLE001
             import logging
@@ -662,7 +677,15 @@ class LocalHeartbeatBackend(HeartbeatBackend):
 
         # Fallback heuristics
         lowered = snapshot.lower()
-        next_step_signals = ["next step", "next,", "todo", "remaining", "should", "need to"]
+        proceed_signals = ["if you want", "shall i", "should i", "want me to", "i can do"]
+        if any(sig in lowered for sig in proceed_signals):
+            api.send_session_message(
+                context.session_name,
+                "Yes, proceed. Do the next step you outlined.",
+                owner="heartbeat",
+            )
+            return
+        next_step_signals = ["next step", "next,", "todo", "remaining", "need to"]
         if any(sig in lowered for sig in next_step_signals):
             self._nudge_stalled_worker(api, context)
             return
