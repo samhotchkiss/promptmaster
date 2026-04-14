@@ -1711,8 +1711,12 @@ def switch_provider(
     typer.echo("  Saving checkpoint...")
     # The heartbeat already recorded the latest checkpoint
 
-    # 2. Stop the old session
+    # 2. Release any leases and stop the old session
     typer.echo("  Stopping old session...")
+    try:
+        supervisor.release_lease(session_name)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         supervisor.stop_session(session_name)
     except Exception:  # noqa: BLE001
