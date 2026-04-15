@@ -21,8 +21,20 @@ Items that need human input or decision before proceeding.
 
 ## Overnight Testing Progress
 
-### Weather-CLI project (Round 1)
-- [x] Sent instruction to register project
-- [x] Polly ran `pm add-project` and `pm worker-start`
-- [x] Project registered, worker created in worktree
-- [ ] First task (core weather module) — waiting for Polly to create
+### Weather-CLI project
+- [x] Round 1: Project registered, worker created
+- [x] Round 2: weather_cli/1 (core fetch module) — full lifecycle completed
+  - Polly created task with pm task create + pm task queue
+  - Per-task worker session created with worktree (task-weather_cli-1)
+  - Worker implemented code, ran CLI to verify (Temperature: 21.1C, Overcast)
+  - Russell reviewed: checked git diff, ran CLI, verified all 6 requirements
+  - Russell merged branch to main, approved
+  - NOTE: Russell had to use --actor polly because task was created with old role binding
+- [ ] Round 3: weather_cli/2 (colored output + --units) — in progress
+  - Will test rejection flow if Russell finds issues
+- [ ] Rounds 4-10: dependency chain, spike, bug, hold/resume, user-review
+
+### Issues to Fix
+- Role binding: tasks created before the Russell update use reviewer=polly, preventing Russell from approving as himself
+- Per-task worker window disappeared from storage closet during testing (may be duplicate cleanup or heartbeat interference)
+- Input bar submission: long messages still sometimes get stuck
