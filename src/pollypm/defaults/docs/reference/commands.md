@@ -13,13 +13,18 @@ All commands use the `pm` CLI. Run `pm --help` for the full list, or `pm <comman
 | `pm status <session>` | Show health of one session |
 | `pm debug` | Diagnostic dump: open alerts, session states, recent events. Works outside tmux. |
 
-## Sending Messages
+## Task Management
 
 | Command | What it does |
 |---------|-------------|
-| `pm send <session> "<text>"` | Send a message to a session. Auto-submits for Codex. |
-| `pm send <session> "<text>" --owner human` | Send as human (claims a lease, blocks automation) |
-| `pm send <session> "<text>" --force` | Send even if someone else holds the lease |
+| `pm task create "Title" -p <project> -d "..." -f <flow> -r worker=worker -r reviewer=polly` | Create a task |
+| `pm task queue <id>` | Move draft → queued (available for worker pickup) |
+| `pm task list -p <project>` | List tasks for a project |
+| `pm task status <id>` | Detailed task summary with flow state |
+| `pm task approve <id> --actor polly` | Approve at review node |
+| `pm task reject <id> --actor polly --reason "..."` | Reject with feedback |
+| `pm task counts -p <project>` | Counts by status |
+| `pm flow list` | Show available flow templates |
 
 ## Workers
 
@@ -85,14 +90,6 @@ Leases auto-expire after 30 minutes. The cockpit auto-claims/releases leases whe
 | `pm import <project_key>` | Run the history import pipeline — crawl transcripts, git, and files to generate project docs |
 
 When you add a project with `pm add-project`, the import runs automatically. Use `pm import` to re-run it (e.g., after significant new work).
-
-## Issues
-
-| Command | What it does |
-|---------|-------------|
-| `pm issue list` | List issues by state |
-| `pm issue create --title "..." --body "..."` | Create a new issue |
-| `pm issue move <id> <state>` | Move an issue to a new state |
 
 ## Inbox
 

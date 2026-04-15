@@ -92,8 +92,10 @@ def escalate_waiting_sessions(store: StateStore, project_root: Path) -> list[str
             body=(
                 f"The session '{rt.session_name}' has been waiting for input.\n"
                 f"\n"
-                f"Check what it needs and try to unblock it:\n"
-                f"  pm send {rt.session_name} \"<instructions>\"\n"
+                f"Check what it needs and create a task to unblock it:\n"
+                f"  pm task create \"Unblock: ...\" -p {rt.session_name.replace('worker_', '')} "
+                f"-d \"...\" -f standard -r worker=worker -r reviewer=polly\n"
+                f"  pm task queue <id>\n"
                 f"\n"
                 f"If it genuinely needs the human user, escalate with:\n"
                 f"  pm notify \"<subject>\" \"<what the user needs to do>\""

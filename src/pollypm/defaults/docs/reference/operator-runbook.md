@@ -1,22 +1,71 @@
 # Operator Runbook
 
-Step-by-step procedures for common operations. Read ONLY the section you need — use the line numbers to jump directly to it.
+Step-by-step procedures for common operations.
 
 ## Table of Contents
 
 | Procedure | Line |
 |-----------|------|
-| Switch a Worker's Provider (Claude ↔ Codex) | 21 |
-| Start a New Worker | 40 |
-| Restart a Stuck Worker | 53 |
-| Add a New Project | 61 |
-| Send a Message to the User | 74 |
-| Respond to an Inbox Item | 92 |
-| Deploy a Site with ItsAlive | 102 |
-| Delegate Work (Do NOT Implement Yourself) | 118 |
-| Review Worker Output | 138 |
-| Handle a Heartbeat Escalation | 150 |
+| Delegate Work to a Worker | 20 |
+| Review Worker Output | 42 |
+| Switch a Worker's Provider (Claude ↔ Codex) | 58 |
+| Start a New Worker | 76 |
+| Restart a Stuck Worker | 85 |
+| Add a New Project | 97 |
+| Send a Message to the User | 108 |
+| Respond to an Inbox Item | 124 |
+| Deploy a Site with ItsAlive | 134 |
+| Handle a Heartbeat Escalation | 152 |
 | Check System Health | 166 |
+
+## Delegate Work to a Worker
+
+You are the operator. Workers implement. Dispatch all work through the task system:
+
+```bash
+# Create a task with clear description and acceptance criteria
+pm task create "Title" -p <project_key> \
+  -d "Description. Acceptance criteria: ..." \
+  -f standard --priority normal \
+  -r worker=worker -r reviewer=polly
+
+# Queue it so the worker can pick it up
+pm task queue <project>/<number>
+```
+
+The heartbeat nudges idle workers to claim queued tasks automatically.
+
+To check on progress:
+
+```bash
+pm task status <project>/<number>    # flow state, current node, owner
+pm task list -p <project>            # all tasks for project
+```
+
+Always use managed workers. Never use Claude's Agent tool or create ad hoc tmux panes.
+
+## Review Worker Output
+
+When a task reaches the review node:
+
+```bash
+pm task status <project>/<number>    # see work output summary
+```
+
+You can also mount the worker in the cockpit (click PM Chat in the rail) to read its full output, or check git: `cd <project_path> && git log --oneline -5`
+
+Then approve or reject:
+
+```bash
+pm task approve <id> --actor polly --reason "Looks good"
+pm task reject <id> --actor polly --reason "Specific, actionable feedback"
+```
+
+When the top-level goal is complete, notify the user:
+
+```bash
+pm notify "Done: <task>" "What was accomplished, key commits, how to verify."
+```
 
 ## Switch a Worker's Provider (Claude ↔ Codex)
 
@@ -33,9 +82,7 @@ This command:
 3. Updates the config to the new provider/account
 4. Relaunches with the new provider and injects a recovery prompt
 
-**Verify it worked:** After switching, run `pm status <session_name>` and check that the provider matches. Also check the tmux pane — it should show the new provider's CLI prompt, not the old one.
-
-**Do NOT** just edit pollypm.toml and expect the session to restart. The old process keeps running.
+**Verify it worked:** After switching, run `pm status <session_name>` and check that the provider matches.
 
 ## Start a New Worker
 
@@ -44,19 +91,20 @@ pm worker-start <project_key>
 # Example: pm worker-start pollypm_website
 ```
 
-This creates a managed worker session (separate tmux window) for the project. Then send it work:
-
-```bash
-pm send <worker_session_name> "Your task: ..."
-```
+This creates a managed worker session (separate tmux window) for the project. Then create and queue a task to give it work.
 
 ## Restart a Stuck Worker
 
 1. Check what's wrong: `pm status <session_name>`
 2. Check alerts: `pm alerts`
-3. Try sending instructions first: `pm send <session_name> "Continue with..." --force`
-4. If that doesn't work, restart: `pm worker-start <project_key>` (this will relaunch)
-5. If recovery limit was hit: `pm reset` clears counters, then `pm worker-start`
+3. Check if the worker has queued tasks: `pm task next -p <project>`
+4. If recovery limit was hit: `pm reset` clears counters
+5. Restart: `pm worker-start <project_key>` (this will relaunch)
+6. Queue a task if the worker needs new work:
+   ```bash
+   pm task create "Continue: <description>" -p <project> -d "..." -f standard -r worker=worker -r reviewer=polly
+   pm task queue <project>/<number>
+   ```
 
 ## Add a New Project
 
@@ -87,7 +135,7 @@ This creates an inbox item owned by the user. They'll see it in the cockpit inbo
 pm reply <message_id> "Here's what I did: ..."
 ```
 
-The user will archive the thread when they're satisfied. You cannot close threads where the user asked for action — only the user can archive those.
+The user will archive the thread when they're satisfied.
 
 ## Respond to an Inbox Item
 
@@ -97,7 +145,7 @@ pm mail <id>              # read a specific message/thread
 pm reply <id> "response"  # reply to a thread
 ```
 
-When you reply, ownership flips to the user and they get notified. Do NOT close — the user archives.
+When you reply, ownership flips to the user and they get notified.
 
 ## Deploy a Site with ItsAlive
 
@@ -110,42 +158,10 @@ pm itsalive deploy --project <key> --subdomain <name> --email <email> --dir <bui
 If this returns `status=pending_verification`, the user needs to click a verification email. Send them an inbox notification:
 
 ```bash
-pm notify "Deploy pending: email verification needed" "A verification email was sent to <email>. Click the link to complete the deploy to <subdomain>.itsalive.co."
+pm notify "Deploy pending: email verification needed" "A verification email was sent to <email>. Click the link to complete the deploy."
 ```
 
 After verification, the deploy resumes automatically on the next heartbeat sweep.
-
-## Delegate Work (Do NOT Implement Yourself)
-
-You are the operator. Workers implement. Always delegate using inbox messages — this creates a thread the worker can reply to, and ensures the user gets notified of the result.
-
-```bash
-# Start or find a worker
-pm worker-start <project_key>
-
-# Assign work via inbox (preferred — creates a trackable thread)
-pm notify "Task: <description>" "<detailed instructions>" --to worker_<project_key> --sender polly
-
-# The delivery system sends it to the worker's session automatically.
-# The worker replies via pm reply when done, which notifies you.
-# You then notify the user with the result.
-```
-
-Do NOT use `pm send` for task assignments — it types raw text into tmux with no history and no reply path. Use `pm notify --to` instead.
-
-Never use Claude's Agent tool or create ad hoc tmux panes. Always use managed workers.
-
-## Review Worker Output
-
-1. `pm status` — find which workers are done/idle
-2. Mount the worker in the cockpit (click it in the rail) to read its output
-3. Or check git: `cd <project_path> && git log --oneline -5`
-4. Send feedback or next task: `pm send <worker> "Good. Now do X."`
-5. When the top-level task is complete, notify the user:
-
-```bash
-pm notify "Done: <task>" "What was accomplished, key commits, how to verify."
-```
 
 ## Handle a Heartbeat Escalation
 
@@ -154,10 +170,9 @@ When you receive an `[Escalation]` inbox item from heartbeat:
 1. Read the escalation: `pm mail <id>`
 2. Check the session: `pm status <session_name>`
 3. Try to fix it:
-   - Send instructions: `pm send <session> "..." --force`
    - Restart the worker: `pm worker-start <project_key>`
    - Switch provider if needed: `pm switch-provider <session> claude`
-4. Reply to the thread with what you did: `pm reply <id> "Restarted the worker and sent new instructions"`
+4. Reply to the thread with what you did: `pm reply <id> "Restarted the worker"`
 5. Only escalate to the user if you genuinely can't fix it:
    ```bash
    pm notify "[Escalation] <subject>" "I tried X and Y but the session is still stuck because Z. Need your help."
@@ -170,4 +185,5 @@ pm status          # all sessions
 pm alerts          # open alerts
 pm debug           # diagnostics
 pm mail            # inbox items
+pm task counts     # task counts across projects
 ```

@@ -304,8 +304,8 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                     f"```\n{snippet}\n```\n"
                     f"\n"
                     f"Try to resolve this yourself first:\n"
-                    f"  pm send {context.session_name} \"<instructions>\"\n"
                     f"  pm worker-start {context.session_name.replace('worker_', '', 1)}  (restart)\n"
+                    f"  Then create a task if the worker needs new work.\n"
                     f"\n"
                     f"Only escalate to the user with `pm notify` if you cannot resolve it.\n"
                 ),
