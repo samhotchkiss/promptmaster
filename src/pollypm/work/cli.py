@@ -67,6 +67,12 @@ def _resolve_db_path(db: str, project: str | None = None) -> Path:
         try:
             from pollypm.config import load_config
             config = load_config()
+            # Normalize hyphens to underscores for flexible matching
+            normalized = project.replace("-", "_")
+            if project in config.projects:
+                pass  # exact match
+            elif normalized in config.projects:
+                project = normalized
             if project in config.projects:
                 candidate = config.projects[project].path / ".pollypm" / "state.db"
                 candidate.parent.mkdir(parents=True, exist_ok=True)
