@@ -16,14 +16,16 @@ pm reset --force                # kill everything, clean state
 pm worker-start <project_key>   # launch/relaunch one worker
 ```
 
-## Sending Messages Between Sessions
+## Assigning Work
+
+Use the task system to assign work to workers:
 
 ```bash
-pm send worker_pollypm "Read issue 0027 and start working on it"
-pm send operator "Worker finished issue 0027, please review"
+pm task create "Title" -p <project> -d "Description" -f standard -r worker=worker -r reviewer=polly
+pm task queue <project>/<number>
 ```
 
-The operator can send to workers. The heartbeat sends nudges to stalled workers automatically.
+The heartbeat nudges idle workers to claim queued tasks automatically.
 
 ## Recovery Pipeline
 

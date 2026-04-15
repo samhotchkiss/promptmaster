@@ -173,9 +173,9 @@ class SupervisorHeartbeatAPI:
                 "operator",
                 (
                     f"H: Heartbeat alert for {session_name}. {reason}. "
-                    f"Options: (1) send a nudge via `pm send {session_name} 'continue'`, "
-                    f"(2) check the pane with `tmux capture-pane -t pollypm-storage-closet:{session_name} -p | tail -20`, "
-                    f"(3) reassign if stuck."
+                    f"Options: (1) check task status with `pm task list -p {session_name.replace('worker_', '', 1)}`, "
+                    f"(2) restart the worker with `pm worker-start {session_name.replace('worker_', '', 1)}`, "
+                    f"(3) create a new task if the worker needs work."
                 ),
                 owner="heartbeat",
             )
