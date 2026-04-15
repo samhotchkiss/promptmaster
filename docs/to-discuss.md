@@ -258,3 +258,28 @@ Fix options:
 1. Use `claude --dangerously-skip-permissions` without `-p`, inject the prompt via send_keys after startup
 2. Use `claude --continue` with a saved conversation that includes the prompt
 3. Pipe Claude's output to a log file and show that in the pane
+
+## Morning Test Run Results (April 15)
+
+### 5 Web Apps Built Through PollyPM
+| Project | Tasks | Verified Working |
+|---------|-------|-----------------|
+| RecipeShare | 8/8 | Homepage, categories, search, detail, submit form |
+| GitHub Dashboard | 8/8 | 29-40 tests per component, Russell verified |
+| Markdown Blog | 6/6 | Blog build: 9 posts, RSS, 29 tag pages |
+| Expense Tracker | 7/7 | Login/auth, CSV import, auto-categorization |
+| Team Standup | 7/7 | Scaffolding, auth, form, analytics, seed, digest |
+
+### System Performance
+- 36 tasks created, implemented, reviewed, approved
+- 14 workers running simultaneously at peak
+- Russell ran tests on every task, caught real issues
+- 885 PollyPM tests passing throughout
+
+### Bug Fixed
+- Cancelled tasks were blocking downstream tasks instead of being treated as resolved. Fixed in `_has_unresolved_blockers`.
+
+### Bugs Still Open
+1. **Per-task workers silently exit** — claude `-p` workers die without committing or signaling done (3 incidents). Need to investigate prompt-mode reliability.
+2. **Worktrees missing dependency code** — session manager creates worktrees from main, but completed task branches aren't merged to main yet. Workers get empty codebases.
+3. **Parallel branch merge conflicts** — workers building in parallel from same base produce divergent versions of shared files (app.py, pyproject.toml). Integration to main requires manual conflict resolution.
