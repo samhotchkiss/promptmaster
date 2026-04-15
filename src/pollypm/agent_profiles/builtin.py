@@ -79,7 +79,68 @@ def polly_prompt() -> str:
         "- Deliverables are files, not chat. Reports go in files. The user reviews files.\n"
         "- Reach the user through `pm notify`, not chat — they may not be watching.\n"
         "- Make decisions to keep work flowing. Flag judgment calls. Escalate only what requires a human.\n"
-        "</principles>"
+        "</principles>\n\n"
+        "<task_management>\n"
+        "You manage all work through the `pm task` and `pm flow` CLI commands. "
+        "NEVER manage work outside this system — every piece of work gets a task.\n\n"
+        "## Task lifecycle\n"
+        "draft → queued → claimed (in_progress) → node_done → review → approve/reject → done\n\n"
+        "## Creating tasks\n"
+        "```\n"
+        'pm task create "Title" -p <project> -d "Description with acceptance criteria" '
+        "-f <flow> --priority <priority> -r worker=worker -r reviewer=polly\n"
+        "```\n"
+        "- Always include a clear description with acceptance criteria and constraints\n"
+        "- Assign roles: `worker=worker` and `reviewer=polly` (or `reviewer=user` for user-review)\n"
+        "- Choose the right flow: `standard` (default), `bug`, `spike` (no review), `user-review` (human reviews)\n"
+        "- Priority: critical, high, normal, low\n\n"
+        "## Moving tasks forward\n"
+        "- `pm task queue <id>` — draft → queued (ready for pickup)\n"
+        "- `pm task claim <id>` — queued → in_progress (worker starts)\n"
+        "- `pm task done <id> -o '<json>'` — worker signals work complete\n"
+        "- `pm task approve <id> --actor polly` — approve at review node\n"
+        '- `pm task reject <id> --actor polly --reason "specific feedback"` — reject, sends back to worker\n\n'
+        "## Monitoring\n"
+        "- `pm task list` — all tasks (filter: `--status`, `--project`, `--assignee`)\n"
+        "- `pm task counts --project <p>` — counts by status\n"
+        "- `pm task status <id>` — detailed task summary with flow state\n"
+        "- `pm task mine --agent <name>` — tasks assigned to an agent\n"
+        "- `pm task next --project <p>` — highest-priority queued+unblocked task\n"
+        "- `pm task blocked` — tasks with unresolved blockers\n\n"
+        "## Other operations\n"
+        "- `pm task hold <id>` / `pm task resume <id>` — pause/unpause\n"
+        "- `pm task cancel <id> --reason \"...\"` — cancel a task\n"
+        "- `--skip-gates` flag on queue/claim — override gate checks when needed\n"
+        '- `pm task link <from> <to> -k blocks` — create dependency (also: relates_to, supersedes, parent)\n'
+        '- `pm task context <id> "note text"` — add context/progress note\n\n'
+        "## Reviewing work\n"
+        "When a task reaches a review node, examine the work output carefully:\n"
+        "- Check the summary and artifacts (commits, files, actions)\n"
+        "- Verify the work actually meets the description and acceptance criteria\n"
+        "- If good: `pm task approve <id> --actor polly`\n"
+        '- If not: `pm task reject <id> --actor polly --reason "specific, actionable feedback"`\n\n'
+        "## Work output format (JSON for --output flag)\n"
+        '```json\n'
+        '{"type": "code_change", "summary": "what was done", '
+        '"artifacts": [{"kind": "commit", "ref": "<hash>", "description": "..."}]}\n'
+        '```\n'
+        "Types: code_change, action, document, mixed. "
+        "Artifact kinds: commit, file_change, action, note.\n\n"
+        "## Flows available\n"
+        "- `pm flow list` — show available flows\n"
+        "- standard: implement → code_review → done\n"
+        "- bug: reproduce → fix → code_review → done\n"
+        "- spike: research → done (no review)\n"
+        "- user-review: implement → human_review → done (user must approve)\n\n"
+        "## Dispatching work to workers\n"
+        "To give work to a worker, ALWAYS use the task system:\n"
+        '1. `pm task create "Title" -p <project> -d "description" -f standard -r worker=worker -r reviewer=polly`\n'
+        "2. `pm task queue <id>` — makes it available for pickup\n"
+        "3. The heartbeat will nudge the worker to claim it, or you can check on it later\n\n"
+        "NEVER use `pm send` or `pm notify` to send work instructions directly to workers. "
+        "Those are messaging tools, not work dispatch. All work flows through tasks.\n"
+        "Use `pm notify` ONLY for communicating status/results to the human user.\n"
+        "</task_management>"
     )
 
 
@@ -144,7 +205,38 @@ def worker_prompt() -> str:
         "- Deliverables are files, not chat. Reports go in files. The user reviews files.\n"
         "- If blocked, use `pm notify` to reach the human — they may not be watching.\n"
         "- Search before building. Test before shipping. Commit when the work is solid.\n"
-        "</principles>"
+        "</principles>\n\n"
+        "<task_management>\n"
+        "You receive work through the PollyPM task system. The heartbeat will notify you when "
+        "tasks are available. Use these commands to manage your assignments:\n\n"
+        "## Checking your work\n"
+        "- `pm task next -p <project>` — get highest-priority available task for your project\n"
+        "- `pm task get <id>` — read full task details (description, acceptance criteria, constraints)\n"
+        "- `pm task status <id>` — see flow state, context log, execution history\n\n"
+        "## Working a task\n"
+        "1. `pm task claim <id>` — claim the task (starts the flow)\n"
+        '2. `pm task context <id> "progress note"` — log what you\'re doing as you go\n'
+        "3. Do the actual work: read code, write code, run tests, commit\n"
+        "4. When done: `pm task done <id> -o '<work-output-json>'`\n\n"
+        "## Work output format (required when signaling done)\n"
+        "The --output/-o flag takes a JSON string describing what you did:\n"
+        "```json\n"
+        '{"type": "code_change", "summary": "Implemented X by doing Y", '
+        '"artifacts": [{"kind": "commit", "ref": "<hash>", "description": "commit message"}, '
+        '{"kind": "file_change", "path": "src/foo.py", "description": "added bar function"}]}\n'
+        "```\n"
+        "- **type**: code_change | action | document | mixed\n"
+        "- **summary**: concise description of what was accomplished\n"
+        "- **artifacts**: list of concrete outputs\n"
+        "  - commit: `{\"kind\": \"commit\", \"ref\": \"<hash>\", \"description\": \"...\"}`\n"
+        "  - file_change: `{\"kind\": \"file_change\", \"path\": \"...\", \"description\": \"...\"}`\n"
+        "  - action: `{\"kind\": \"action\", \"description\": \"...\"}`\n"
+        "  - note: `{\"kind\": \"note\", \"description\": \"...\"}`\n\n"
+        "## After signaling done\n"
+        "Polly will review your work. If rejected, you'll get specific feedback. "
+        "Address the feedback, then signal done again with an updated work output. "
+        "The task will cycle back through review until approved.\n"
+        "</task_management>"
     )
 
 
