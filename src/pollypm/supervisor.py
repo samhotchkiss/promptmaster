@@ -1055,6 +1055,9 @@ class Supervisor:
         return active_alerts
 
     def _maybe_nudge_stalled_session(self, launch: SessionLaunchSpec) -> None:
+        if launch.session.role == "operator-pm":
+            self._maybe_nudge_operator_review(launch)
+            return
         if launch.session.role != "worker":
             return
         lease = self.store.get_lease(launch.session.name)
@@ -1073,6 +1076,53 @@ class Supervisor:
             owner="heartbeat",
             force=lease is not None and lease.owner != "human",
         )
+
+    def _maybe_nudge_operator_review(self, launch: SessionLaunchSpec) -> None:
+        """Nudge the operator if tasks are waiting for review."""
+        lease = self.store.get_lease(launch.session.name)
+        if lease is not None and lease.owner == "human":
+            return
+        nudge = self._build_review_nudge()
+        if nudge is None:
+            return
+        try:
+            self.send_input(
+                launch.session.name,
+                nudge,
+                owner="heartbeat",
+                force=lease is not None and lease.owner != "human",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _build_review_nudge(self) -> str | None:
+        """Check all projects for tasks in review state."""
+        try:
+            from pollypm.work.cli import _resolve_db_path
+            from pollypm.work.sqlite_service import SQLiteWorkService
+
+            review_tasks: list[str] = []
+            for project_key in self.config.projects:
+                db_path = _resolve_db_path(".pollypm/state.db", project=project_key)
+                if not db_path.exists():
+                    continue
+                with SQLiteWorkService(db_path=db_path) as svc:
+                    tasks = svc.list_tasks(work_status="review", project=project_key)
+                    for task in tasks:
+                        review_tasks.append(
+                            f"  - {task.task_id}: {task.title}"
+                        )
+            if not review_tasks:
+                return None
+            lines = [
+                f"You have {len(review_tasks)} task(s) waiting for your review:",
+                *review_tasks,
+                "",
+                "Review with: pm task status <id>, then pm task approve <id> --actor polly or pm task reject <id> --actor polly --reason \"...\"",
+            ]
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _build_task_nudge(self, launch: SessionLaunchSpec) -> str | None:
         """Check for queued tasks assigned to this worker and build a nudge message."""
