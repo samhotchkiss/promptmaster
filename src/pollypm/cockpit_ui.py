@@ -678,6 +678,7 @@ class PollyCockpitApp(App[None]):
         self.selected_key = key
         try:
             self.router.route_selected(key)
+            self.selected_key = self.router.selected_key()
             self._focus_right_if_live()
         except Exception as exc:  # noqa: BLE001
             self.hint.update(f"Error: {exc}"[:60])
@@ -782,6 +783,9 @@ class PollyCockpitApp(App[None]):
         self._unread_keys.discard(row.cockpit_key)
         try:
             self.router.route_selected(row.cockpit_key)
+            # The router may redirect (e.g. project:x → project:x:dashboard),
+            # so re-read the selected key to keep the highlight in sync.
+            self.selected_key = self.router.selected_key()
             self._focus_right_if_live()
         except Exception as exc:  # noqa: BLE001
             self.hint.update(f"Error: {exc}"[:60])
