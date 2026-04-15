@@ -199,3 +199,24 @@ Items that need human input or decision before proceeding.
 - Implemented: when rejection finds dead worker, spawns new Claude
   session with rejection reason prominently in the prompt
 - Tested: camptown/2 completed after 3 rejection cycles with real fixes
+
+## Iteration 10: Final Stats
+
+### 16 Fully Completed Projects
+todo-api, camptown, mini-calc, link-checker, git-stats, shortlink,
+commit-validator, md-render, passgen, pollypm-docs, color-palette,
+file-sorter, puzzle-solver, polly-report, data-viz, tablefmt
+
+### 34 Tasks Completed Tonight
+- All flow types verified
+- 6 rejections, all caught real issues
+- 3 dependency chains completed (shortlink 5-task, todo-api 3-task, commit-validator 3-task)
+- Working software: WeatherCLI, TodoAPI, MD-Render, PuzzleSolver, DataViz, TableFmt, PollyReport
+- 885 PollyPM tests passing throughout
+
+### System Running At Scale
+- 30 projects managed
+- Dashboard renders sub-second
+- Heartbeat auto-nudging Russell
+- Per-task workers with isolated worktrees
+- Rework worker spawning on rejection
