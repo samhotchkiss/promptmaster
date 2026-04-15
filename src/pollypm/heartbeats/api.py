@@ -31,6 +31,10 @@ class SupervisorHeartbeatAPI:
         for window in self.supervisor._window_map().values():
             if window.name in expected_window_names:
                 continue
+            # Per-task worker sessions (task-<project>-<number>) are managed
+            # by the SessionManager, not the supervisor's launch plan.
+            if window.name.startswith("task-"):
+                continue
             unmanaged.append(
                 HeartbeatUnmanagedWindow(
                     tmux_session=window.session,
