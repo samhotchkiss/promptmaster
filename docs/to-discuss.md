@@ -230,3 +230,13 @@ file-sorter, puzzle-solver, polly-report, data-viz, tablefmt
 - 6 rejections caught real issues
 - md2html 4-task chain fully complete
 - System running autonomously through heartbeat
+
+## Bug: Project key hyphen vs underscore mismatch
+
+`pm add-project` registers as `recipe_share` (underscore) but Polly uses
+`-p recipe-share` (hyphen) in task create commands. The CLI doesn't normalize,
+so tasks go to a fallback DB in the CWD instead of the project's DB.
+
+Fix: `_resolve_db_path` should normalize hyphens to underscores when looking
+up project keys, or `pm add-project` should preserve the original directory
+name format.
