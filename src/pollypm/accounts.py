@@ -408,7 +408,9 @@ def add_account_via_login(config_path: Path, provider: ProviderKind) -> tuple[st
 
     existing = [account for account in config.accounts.values() if account.provider is provider]
     next_index = len(existing) + 1
-    home = config.project.base_dir / "homes" / f"ad-hoc-{provider.value}-{next_index}"
+    agent_homes = Path.home() / ".pollypm" / "agent_homes"
+    agent_homes.mkdir(parents=True, exist_ok=True)
+    home = agent_homes / f"{provider.value}_{next_index}"
     pane_text = _run_login_window(
         tmux,
         provider=provider,
