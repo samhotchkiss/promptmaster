@@ -559,7 +559,13 @@ class SessionManager:
             f"- Stay focused on this task only\n"
             f"- Commit your work before signaling done\n"
             f"- The quality bar is high — test before shipping\n"
-            f"- If blocked, add a context note: `pm task context {task_id} \"blocked on X\"`\n"
+            f"- If blocked, add a context note: `pm task context {task_id} \"blocked on X\"`\n\n"
+            f"## Common Review Failures (avoid these)\n\n"
+            f"- pyproject.toml: always use `build-backend = \"setuptools.build_meta\"` "
+            f"(NOT setuptools.backends._legacy:_Backend)\n"
+            f"- Verify your code actually runs before signaling done\n"
+            f"- Check every acceptance criterion individually\n"
+            f"- Include proper error handling for CLI tools\n"
         )
 
     @staticmethod

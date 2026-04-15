@@ -285,7 +285,15 @@ def reviewer_prompt() -> str:
         "## Quality bar\n\n"
         "Approve means 'this is done and correct.' Not 'good enough.' Not "
         "'close enough.' If there are open issues, missing tests, incomplete "
-        "acceptance criteria, or anything the user would notice — reject it.\n"
+        "acceptance criteria, or anything the user would notice — reject it.\n\n"
+        "## Common rejection reasons (check for these)\n\n"
+        "- pyproject.toml: wrong build-backend (should be setuptools.build_meta)\n"
+        "- Code committed to worktree but not merged to main\n"
+        "- Tests missing for new functionality\n"
+        "- Acceptance criteria not fully met (check each criterion individually)\n"
+        "- Hardcoded values that should be configurable\n"
+        "- Missing error handling for user-facing code\n"
+        "- No CLI help text or usage examples\n"
         "</task_review>"
     )
 
