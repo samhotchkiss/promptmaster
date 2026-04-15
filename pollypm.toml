@@ -13,7 +13,7 @@ open_permissions_by_default = true
 failover_enabled = true
 heartbeat_backend = "local"
 scheduler_backend = "inline"
-failover_accounts = ["codex_s_swh_me"]
+failover_accounts = []
 
 [memory]
 backend = "file"
@@ -22,16 +22,6 @@ backend = "file"
 provider = "claude"
 email = "pearl@swh.me"
 home = "/Users/sam/.pollypm/agent_homes/claude_1"
-
-[accounts.codex_s_swh_me]
-provider = "codex"
-email = "s@swh.me"
-home = "/Users/sam/.pollypm/agent_homes/codex_1"
-
-[accounts.codex_gpt_swh_me]
-provider = "codex"
-email = "gpt@swh.me"
-home = "/Users/sam/.pollypm/agent_homes/codex_2"
 
 [sessions.heartbeat]
 role = "heartbeat-supervisor"
@@ -53,8 +43,8 @@ args = ["--dangerously-skip-permissions"]
 
 [sessions.worker_pollypm]
 role = "worker"
-provider = "codex"
-account = "codex_gpt_swh_me"
+provider = "claude"
+account = "claude_pearl_swh_me"
 cwd = ".pollypm-state/worktrees/pollypm-pa-worker_pollypm"
 window_name = "worker-pollypm"
 prompt = "Read the PollyPM issue queue, start with the highest-leverage open issue, and move the project forward in small verified chunks."
