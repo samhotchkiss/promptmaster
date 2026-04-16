@@ -406,8 +406,8 @@ def test_heartbeat_uses_separate_tmux_session(monkeypatch, tmp_path: Path) -> No
     assert created_sessions[0][1] == "pm-heartbeat"
     assert created_sessions[1][0] == config.project.tmux_session
     assert created_sessions[1][1] == supervisor.console_window_name()
-    assert piped_targets == [f"{supervisor.storage_closet_session_name()}:0", f"{supervisor.storage_closet_session_name()}:pm-operator"]
-    assert (f"{supervisor.storage_closet_session_name()}:0", "focus-events", "on") in window_options
+    assert piped_targets == [f"{supervisor.storage_closet_session_name()}:pm-heartbeat", f"{supervisor.storage_closet_session_name()}:pm-operator"]
+    assert (f"{supervisor.storage_closet_session_name()}:pm-heartbeat", "focus-events", "on") in window_options
     assert (f"{supervisor.storage_closet_session_name()}:pm-operator", "focus-events", "on") in window_options
     assert (f"{config.project.tmux_session}:{supervisor.console_window_name()}", "focus-events", "on") in window_options
 

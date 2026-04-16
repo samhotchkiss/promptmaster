@@ -36,17 +36,18 @@ def test_add_account_reuses_orphaned_home_with_same_email(monkeypatch, tmp_path:
     orphan_home.mkdir(parents=True, exist_ok=True)
     (orphan_home / "stale.txt").write_text("keep me")
 
+    # Agent homes now live at ~/.pollypm/agent_homes/<provider>_<n>
+    agent_homes = tmp_path / ".pollypm" / "agent_homes"
+    monkeypatch.setattr("pollypm.accounts.Path.home", lambda: tmp_path)
+
     def fake_login_window(_tmux, provider, home, window_label):  # noqa: ANN001
         home.mkdir(parents=True, exist_ok=True)
         (home / "fresh.txt").write_text("fresh")
         return "done"
 
     def fake_detect(provider, home):  # noqa: ANN001
-        if home.name == "claude_s_example_com":
-            return "s@example.com"
-        if home.name.startswith("ad-hoc-claude"):
-            return "s@example.com"
-        return None
+        # The ad-hoc home is now named claude_1 under agent_homes
+        return "s@example.com"
 
     monkeypatch.setattr("pollypm.accounts._run_login_window", fake_login_window)
     monkeypatch.setattr("pollypm.accounts._detect_account_email", fake_detect)
@@ -57,8 +58,7 @@ def test_add_account_reuses_orphaned_home_with_same_email(monkeypatch, tmp_path:
     assert key == "claude_s_example_com"
     assert email == "s@example.com"
     # Claude keeps the ad-hoc home in place (keychain auth is tied to the path)
-    ad_hoc_home = next(path for path in (tmp_path / ".pollypm-state" / "homes").iterdir() if path.name.startswith("ad-hoc-claude"))
-    assert ad_hoc_home.exists()
+    assert (agent_homes / "claude_1").exists()
 
 
 def test_add_account_replaces_orphaned_home_when_stale(monkeypatch, tmp_path: Path) -> None:
@@ -68,17 +68,17 @@ def test_add_account_replaces_orphaned_home_when_stale(monkeypatch, tmp_path: Pa
     orphan_home.mkdir(parents=True, exist_ok=True)
     (orphan_home / "stale.txt").write_text("stale")
 
+    # Agent homes now live at ~/.pollypm/agent_homes/<provider>_<n>
+    agent_homes = tmp_path / ".pollypm" / "agent_homes"
+    monkeypatch.setattr("pollypm.accounts.Path.home", lambda: tmp_path)
+
     def fake_login_window(_tmux, provider, home, window_label):  # noqa: ANN001
         home.mkdir(parents=True, exist_ok=True)
         (home / "fresh.txt").write_text("fresh")
         return "done"
 
     def fake_detect(provider, home):  # noqa: ANN001
-        if home.name == "claude_s_example_com":
-            return None
-        if home.name.startswith("ad-hoc-claude"):
-            return "s@example.com"
-        return None
+        return "s@example.com"
 
     monkeypatch.setattr("pollypm.accounts._run_login_window", fake_login_window)
     monkeypatch.setattr("pollypm.accounts._detect_account_email", fake_detect)
@@ -88,9 +88,8 @@ def test_add_account_replaces_orphaned_home_when_stale(monkeypatch, tmp_path: Pa
 
     assert key == "claude_s_example_com"
     # Claude keeps the ad-hoc home in place (keychain auth is tied to the path)
-    ad_hoc_home = next(path for path in (tmp_path / ".pollypm-state" / "homes").iterdir() if path.name.startswith("ad-hoc-claude"))
-    assert ad_hoc_home.exists()
-    assert (ad_hoc_home / "fresh.txt").exists()
+    assert (agent_homes / "claude_1").exists()
+    assert (agent_homes / "claude_1" / "fresh.txt").exists()
 
 
 def test_add_account_rejects_duplicate_configured_account(monkeypatch, tmp_path: Path) -> None:

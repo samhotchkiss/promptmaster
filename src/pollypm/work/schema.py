@@ -11,6 +11,16 @@ import sqlite3
 
 WORK_SCHEMA = """
 -- -------------------------------------------------------------------
+-- Schema versioning
+-- -------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS work_schema_version (
+    version INTEGER NOT NULL,
+    description TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+
+-- -------------------------------------------------------------------
 -- Flow templates and nodes
 -- -------------------------------------------------------------------
 
@@ -199,5 +209,41 @@ CREATE TABLE IF NOT EXISTS work_sessions (
 
 
 def create_work_tables(conn: sqlite3.Connection) -> None:
-    """Create all work service tables.  Safe to call multiple times."""
+    """Create all work service tables and run pending migrations.
+
+    Safe to call multiple times — schema uses IF NOT EXISTS and migrations
+    are tracked in work_schema_version.
+    """
     conn.executescript(WORK_SCHEMA)
+    _run_work_migrations(conn)
+
+
+# ------------------------------------------------------------------
+# Work service migrations — append-only list.
+# ------------------------------------------------------------------
+_WORK_MIGRATIONS: list[tuple[int, str, list[str]]] = [
+    (1, "Initial schema — baseline version", []),
+]
+
+
+def _run_work_migrations(conn: sqlite3.Connection) -> None:
+    from datetime import UTC, datetime
+
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM work_schema_version"
+        ).fetchone()
+        current = row[0] if row else 0
+    except Exception:  # noqa: BLE001
+        current = 0
+
+    for version, description, stmts in _WORK_MIGRATIONS:
+        if version <= current:
+            continue
+        for sql in stmts:
+            conn.execute(sql)
+        conn.execute(
+            "INSERT INTO work_schema_version (version, description, applied_at) VALUES (?, ?, ?)",
+            (version, description, datetime.now(UTC).isoformat()),
+        )
+    conn.commit()

@@ -35,7 +35,12 @@ def test_load_example_config(tmp_path: Path) -> None:
     assert config.sessions["heartbeat"].provider.value == "codex"
 
 
-def test_resolve_config_path_prefers_local_project_config(monkeypatch, tmp_path: Path) -> None:
+def test_resolve_config_path_returns_global_config(monkeypatch, tmp_path: Path) -> None:
+    """resolve_config_path always returns the global config path.
+
+    Project-specific overrides are loaded separately via
+    _merge_project_local_config, not by walking up the directory tree.
+    """
     project_root = tmp_path / "repo"
     nested = project_root / "src" / "pkg"
     nested.mkdir(parents=True)
@@ -44,7 +49,8 @@ def test_resolve_config_path_prefers_local_project_config(monkeypatch, tmp_path:
 
     monkeypatch.chdir(nested)
 
-    assert resolve_config_path() == config_path.resolve()
+    from pollypm.config import DEFAULT_CONFIG_PATH
+    assert resolve_config_path() == DEFAULT_CONFIG_PATH.resolve()
 
 
 def test_load_config_normalizes_control_prompts(tmp_path: Path) -> None:
