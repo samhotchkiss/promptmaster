@@ -188,9 +188,28 @@ class PollyPMService:
         """Focus the given session in tmux (select its window and pane)."""
         self.load_supervisor().focus_session(session_name)
 
-    def send_input(self, session_name: str, text: str, *, owner: str = "human") -> None:
-        """Send input text to a session's pane, attributed to ``owner``."""
-        self.load_supervisor().send_input(session_name, text, owner=owner)
+    def send_input(
+        self,
+        session_name: str,
+        text: str,
+        *,
+        owner: str = "human",
+        force: bool = False,
+        press_enter: bool = True,
+    ) -> None:
+        """Send input text to a session's pane, attributed to ``owner``.
+
+        ``force=True`` bypasses outstanding lease checks (used by humans
+        who are interacting directly). ``press_enter=False`` leaves the
+        text on the input bar without submitting.
+        """
+        self.load_supervisor().send_input(
+            session_name,
+            text,
+            owner=owner,
+            force=force,
+            press_enter=press_enter,
+        )
 
     def raise_alert(self, alert_type: str, session_name: str, message: str, *, severity: str = "warn") -> object:
         """Raise a session alert; persists to state store and records an event."""
@@ -770,6 +789,25 @@ class PollyPMService:
 
     def _task_backend(self, config, project_key: str):
         return get_task_backend(self._project_root(config, project_key))
+
+
+def plan_launches_readonly(config, store) -> list:
+    """Return the launches planned for ``config`` without mutating state.
+
+    Thin wrapper used by read-only surfaces (dashboard, cockpit rail) that
+    already hold an open state store and only need ``SessionLaunchSpec``
+    objects. Avoids a second StateStore open by injecting the caller's
+    store into a minimal Supervisor shell.
+    """
+    from pollypm.session_services import create_tmux_client
+
+    supervisor = Supervisor.__new__(Supervisor)
+    supervisor.config = config
+    supervisor.store = store
+    supervisor.readonly_state = True
+    supervisor.tmux = create_tmux_client()
+    supervisor.invalidate_launch_cache()
+    return supervisor.plan_launches()
 
 
 def render_json(data: object) -> str:

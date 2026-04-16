@@ -69,7 +69,15 @@ def test_service_focus_and_send_input_use_supervisor(monkeypatch, tmp_path: Path
         def focus_session(self, session_name: str) -> None:
             calls.append(("focus", session_name, None))
 
-        def send_input(self, session_name: str, text: str, owner: str = "human") -> None:
+        def send_input(
+            self,
+            session_name: str,
+            text: str,
+            *,
+            owner: str = "human",
+            force: bool = False,
+            press_enter: bool = True,
+        ) -> None:
             calls.append(("send", session_name, text))
 
     monkeypatch.setattr(service, "load_supervisor", lambda: FakeSupervisor())

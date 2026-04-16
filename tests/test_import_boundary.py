@@ -25,24 +25,18 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-# Allow-list of files that still import Supervisor directly as of #182.
+# Allow-list of files that still import Supervisor directly as of #183.
 # Each entry is a POSIX-style path relative to the project root.
 #
-# TODO(#183): Step 6 migrates TUI/CLI callers to pollypm.service_api —
-#             remove control_tui.py, cli.py, cockpit.py, cockpit_ui.py,
-#             dashboard_data.py.
+# Step 6 (#183) landed — TUI/CLI/cockpit surfaces now route through
+# pollypm.service_api.v1 instead of importing Supervisor directly.
+#
 # TODO(#185): Step 8 migrates inbox + plugin + scheduler + worker
 #             integration points — remove the remaining entries.
 _SUPERVISOR_IMPORT_ALLOWLIST: frozenset[str] = frozenset(
     {
         # Facade: this IS the sanctioned wrapper; stays until v1.1 if ever.
         "src/pollypm/service_api/v1.py",
-        # Step 6 targets (TUI / CLI / cockpit surfaces):
-        "src/pollypm/cli.py",
-        "src/pollypm/cockpit.py",
-        "src/pollypm/cockpit_ui.py",
-        "src/pollypm/control_tui.py",
-        "src/pollypm/dashboard_data.py",
         # Step 8 targets (internal integrations — migrate to CoreRail /
         # service_api as the rail grows):
         "src/pollypm/heartbeats/api.py",

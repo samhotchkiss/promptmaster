@@ -14,7 +14,6 @@ from pollypm.providers import get_provider
 from pollypm.projects import ensure_project_scaffold
 from pollypm.runtimes import get_runtime
 from pollypm.service_api import PollyPMService
-from pollypm.supervisor import Supervisor
 from pollypm.task_backends import get_task_backend
 from pollypm.session_services import create_tmux_client
 from pollypm.worktrees import list_worktrees
@@ -335,13 +334,13 @@ class CockpitRouter:
         self.config_path = config_path
         self.service = PollyPMService(config_path)
         self.tmux = create_tmux_client()
-        self._supervisor: Supervisor | None = None
+        self._supervisor = None
         # Per-project activity cache keyed by project key.
         # value: (db_mtime, git_mtime, is_active, has_working_task)
         # Skips re-opening SQLite on every 0.8s cockpit tick when nothing changed.
         self._project_activity_cache: dict[str, tuple[float, float, bool, bool]] = {}
 
-    def _load_supervisor(self, *, fresh: bool = False) -> Supervisor:
+    def _load_supervisor(self, *, fresh: bool = False):
         # Reload config if the file changed (picks up new projects, sessions, etc.)
         if not fresh and self._supervisor is not None:
             try:
@@ -477,7 +476,7 @@ class CockpitRouter:
         # session is mounted and the pane is alive, believe it.
         return True
 
-    def _release_cockpit_lease(self, supervisor: Supervisor | None, session_name: str) -> None:
+    def _release_cockpit_lease(self, supervisor, session_name: str) -> None:
         if supervisor is None:
             try:
                 supervisor = self._load_supervisor()
@@ -1072,7 +1071,7 @@ class CockpitRouter:
             launch = next(l for l in supervisor.plan_launches() if l.session.name == session_name)
             supervisor.stabilize_launch(launch, target, on_status=on_status)
 
-    def _show_live_session(self, supervisor: Supervisor, session_name: str, window_target: str) -> None:
+    def _show_live_session(self, supervisor, session_name: str, window_target: str) -> None:
         mounted_session = self._mounted_session_name(supervisor, window_target)
         launch = next(item for item in supervisor.plan_launches() if item.session.name == session_name)
         if isinstance(mounted_session, str) and mounted_session == session_name:
@@ -1168,7 +1167,7 @@ class CockpitRouter:
             return False
         return launch.session.provider.value in {"claude", "codex"}
 
-    def _launch_visible_session(self, supervisor: Supervisor, launch, window_target: str, left_pane_id: str, right_pane_id: str | None):
+    def _launch_visible_session(self, supervisor, launch, window_target: str, left_pane_id: str, right_pane_id: str | None):
         storage_session = supervisor.storage_closet_session_name()
         for window in self.tmux.list_windows(storage_session):
             if window.name == launch.window_name:
@@ -1201,7 +1200,7 @@ class CockpitRouter:
         supervisor.stabilize_launch(visible_launch, right_pane_id)
         return max(self.tmux.list_panes(window_target), key=self._pane_left)
 
-    def _park_mounted_session(self, supervisor: Supervisor, window_target: str) -> None:
+    def _park_mounted_session(self, supervisor, window_target: str) -> None:
         state = self._load_state()
         mounted_session = self._mounted_session_name(supervisor, window_target)
         if not isinstance(mounted_session, str) or not mounted_session:
@@ -1244,7 +1243,7 @@ class CockpitRouter:
     # the session the user is most likely interacting with.
     _MOUNT_PRIORITY = {"operator-pm": 0, "reviewer": 1, "worker": 2}
 
-    def _mounted_session_name(self, supervisor: Supervisor, window_target: str) -> str | None:
+    def _mounted_session_name(self, supervisor, window_target: str) -> str | None:
         state = self._load_state()
         mounted_session = state.get("mounted_session")
         if isinstance(mounted_session, str) and mounted_session:
@@ -1292,7 +1291,7 @@ class CockpitRouter:
             return True
         return False
 
-    def _session_available_for_mount(self, supervisor: Supervisor, session_name: str, window_target: str) -> bool:
+    def _session_available_for_mount(self, supervisor, session_name: str, window_target: str) -> bool:
         """Return True only if the session is already running (mounted or in storage)."""
         mounted = self._mounted_session_name(supervisor, window_target)
         if mounted == session_name:
@@ -1306,7 +1305,7 @@ class CockpitRouter:
 
     def _show_static_view(
         self,
-        supervisor: Supervisor,
+        supervisor,
         window_target: str,
         kind: str,
         project_key: str | None = None,
@@ -1605,7 +1604,7 @@ def build_cockpit_detail(config_path: Path, kind: str, target: str | None = None
 
 
 def _build_cockpit_detail_inner(config_path: Path, kind: str, target: str | None = None) -> str:
-    supervisor = Supervisor(load_config(config_path))
+    supervisor = PollyPMService(config_path).load_supervisor()
     try:
         supervisor.ensure_layout()
         return _build_cockpit_detail_dispatch(supervisor, config_path, kind, target)
