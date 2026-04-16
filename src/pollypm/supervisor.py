@@ -400,28 +400,33 @@ class Supervisor:
 
 
         # Phase 1: Create all tmux windows up front (fast, no blocking).
+        # Use pane IDs as targets for stabilization threads — window name
+        # targeting can cause identity swaps when threads run in parallel.
         targets: list[tuple[SessionLaunchSpec, str]] = []
         if launches:
             first = launches[0]
             if on_status:
                 on_status(f"Creating {first.session.name}...")
             self.tmux.create_session(storage_session, first.window_name, first.command)
-            target = f"{storage_session}:{first.window_name}"
-            self.tmux.set_window_option(target, "allow-passthrough", "on")
-            self.tmux.set_window_option(target, "focus-events", "on")
-            self.tmux.pipe_pane(target, first.log_path)
+            window_target = f"{storage_session}:{first.window_name}"
+            self.tmux.set_window_option(window_target, "allow-passthrough", "on")
+            self.tmux.set_window_option(window_target, "focus-events", "on")
+            self.tmux.pipe_pane(window_target, first.log_path)
             self._record_launch(first)
-            targets.append((first, target))
+            # Resolve pane ID for unambiguous targeting during stabilization
+            pane_target = self._resolve_pane_id(storage_session, first.window_name) or window_target
+            targets.append((first, pane_target))
             for launch in launches[1:]:
                 if on_status:
                     on_status(f"Creating {launch.session.name}...")
                 self.tmux.create_window(storage_session, launch.window_name, launch.command, detached=True)
-                target = f"{storage_session}:{launch.window_name}"
-                self.tmux.set_window_option(target, "allow-passthrough", "on")
-                self.tmux.set_window_option(target, "focus-events", "on")
-                self.tmux.pipe_pane(target, launch.log_path)
+                window_target = f"{storage_session}:{launch.window_name}"
+                self.tmux.set_window_option(window_target, "allow-passthrough", "on")
+                self.tmux.set_window_option(window_target, "focus-events", "on")
+                self.tmux.pipe_pane(window_target, launch.log_path)
                 self._record_launch(launch)
-                targets.append((launch, target))
+                pane_target = self._resolve_pane_id(storage_session, launch.window_name) or window_target
+                targets.append((launch, pane_target))
 
         # Phase 2: Create the cockpit session so the user can attach immediately.
         self.tmux.create_session(session_name, self._CONSOLE_WINDOW, self._console_command(), remain_on_exit=False)
@@ -462,6 +467,17 @@ class Supervisor:
         for session_name in reversed(self._all_tmux_session_names()):
             if self.tmux.has_session(session_name):
                 self.tmux.kill_session(session_name)
+
+    def _resolve_pane_id(self, session_name: str, window_name: str) -> str | None:
+        """Look up the pane ID for a window. Returns '%NNN' or None."""
+        try:
+            windows = self.tmux.list_windows(session_name)
+            for w in windows:
+                if w.name == window_name:
+                    return w.pane_id
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     def _record_launch(self, launch: SessionLaunchSpec) -> None:
         self.store.upsert_session(
