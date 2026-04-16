@@ -168,6 +168,49 @@ class TestProvisionWorker:
         # create_session called only once
         assert mock_tmux.create_session.call_count == 1
 
+    def test_provision_worker_acquires_session_lock(self, manager, mock_tmux, tmp_project):
+        """provision_worker must acquire the per-task session lock so two
+        concurrent claims on the same task can't both race git worktree add."""
+        with patch("pollypm.work.session_manager.subprocess") as mock_sub, \
+             patch("pollypm.projects.ensure_session_lock") as mock_ensure, \
+             patch("pollypm.projects.release_session_lock") as mock_release:
+            mock_sub.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            manager.provision_worker("proj/1", "agent-1")
+
+        assert mock_ensure.call_count == 1
+        # lock is scoped to the task (session_id == "task-proj-1")
+        args, _ = mock_ensure.call_args
+        assert args[1] == "task-proj-1"
+        # and released afterwards
+        mock_release.assert_called_once()
+
+    def test_provision_worker_returns_existing_on_lock_conflict(self, manager, mock_tmux, tmp_project, mock_svc):
+        """When ensure_session_lock raises (another provision is holding
+        the lock) but a session has meanwhile appeared in the DB, we
+        should return the existing session rather than blowing up."""
+        def conflict_then_seed(*args, **kwargs):
+            # Simulate the other provision finishing between our
+            # initial session_for_task() check and the lock acquisition.
+            mock_svc._conn.execute(
+                "INSERT INTO work_sessions (task_project, task_number, "
+                "agent_name, pane_id, worktree_path, branch_name, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("proj", 1, "other-agent", "%99", str(tmp_project / "wt"),
+                 "task/proj-1", "2024-01-01T00:00:00+00:00"),
+            )
+            mock_svc._conn.commit()
+            raise RuntimeError("Session lock conflict")
+
+        with patch(
+            "pollypm.projects.ensure_session_lock",
+            side_effect=conflict_then_seed,
+        ):
+            session = manager.provision_worker("proj/1", "agent-1")
+
+        # Should have fallen back to the session the other provision created
+        assert session.task_id == "proj/1"
+        assert session.agent_name == "other-agent"
+
     def test_create_worktree_add_has_timeout(self, manager, mock_tmux, tmp_project):
         """git worktree add must be called with a timeout so a hung git
         op can't wedge claim()."""
