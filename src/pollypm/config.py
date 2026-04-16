@@ -227,6 +227,34 @@ def _parse_memory_settings(raw: dict[str, object]) -> MemorySettings:
     return MemorySettings(backend=str(memory_raw.get("backend", "file")))
 
 
+def _parse_rail_settings(raw: dict[str, object]) -> "RailSettings":
+    """Parse the ``[rail]`` TOML section.
+
+    See docs/extensible-rail-spec.md §6. Missing / malformed sections
+    fall back to defaults — an invalid entry type never aborts config
+    load.
+    """
+    from pollypm.models import RailSettings
+
+    rail_raw = raw.get("rail", {})
+    if not isinstance(rail_raw, dict):
+        return RailSettings()
+
+    def _as_str_tuple(value: object) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            return ()
+        out: list[str] = []
+        for entry in value:
+            if isinstance(entry, str) and entry.strip():
+                out.append(entry.strip())
+        return tuple(dict.fromkeys(out))  # preserve order, de-dupe
+
+    return RailSettings(
+        hidden_items=_as_str_tuple(rail_raw.get("hidden_items", [])),
+        collapsed_sections=_as_str_tuple(rail_raw.get("collapsed_sections", [])),
+    )
+
+
 def _parse_plugin_settings(raw: dict[str, object]) -> PluginSettings:
     """Parse the ``[plugins]`` TOML section.
 
@@ -349,6 +377,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> PollyPMConfig:
     pollypm = _parse_pollypm_settings(raw, sessions)
     memory = _parse_memory_settings(raw)
     plugins = _parse_plugin_settings(raw)
+    rail = _parse_rail_settings(raw)
     projects = _parse_known_projects(raw, base=base)
     _merge_project_local_config(sessions, projects, plugins)
     _validate_cross_references(accounts=accounts, sessions=sessions, pollypm=pollypm)
@@ -361,6 +390,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> PollyPMConfig:
         projects=projects,
         memory=memory,
         plugins=plugins,
+        rail=rail,
     )
     try:
         _config_cache[config_path] = (config_path.stat().st_mtime, config)
