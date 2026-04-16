@@ -474,3 +474,176 @@ def test_architect_profile_points_at_research_stage() -> None:
     text = root.read_text(encoding="utf-8")
     assert "planning-context.md" in text
     assert "research" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# pp05 — tree-of-plans: 2-3 candidates, critics evaluate all, synthesis picks winner
+# ---------------------------------------------------------------------------
+
+
+def test_decompose_stage_prompt_enforces_multiple_candidates() -> None:
+    from pollypm.plugins_builtin.project_planning.tree_of_plans import (
+        decompose_stage_prompt,
+    )
+    text = decompose_stage_prompt()
+    # Must mandate 2-3 candidates and list the per-candidate sections.
+    assert "2" in text and "3" in text
+    assert "candidate_A" in text or "candidate_<ID>" in text
+    for section in ("Thesis", "Modules", "Tradeoffs", "Sequencing"):
+        assert section in text
+
+
+def test_candidate_artifact_path_limits_to_abc(tmp_path: Path) -> None:
+    import pytest
+
+    from pollypm.plugins_builtin.project_planning.tree_of_plans import (
+        candidate_artifact_path,
+    )
+    for cid in ("A", "B", "C"):
+        path = candidate_artifact_path(tmp_path, cid)
+        assert path.name == f"candidate_{cid}.md"
+    with pytest.raises(ValueError):
+        candidate_artifact_path(tmp_path, "D")
+    with pytest.raises(ValueError):
+        candidate_artifact_path(tmp_path, "a")
+
+
+def test_critic_panel_prompt_requires_per_candidate_scores() -> None:
+    from pollypm.plugins_builtin.project_planning.tree_of_plans import (
+        critic_panel_prompt,
+    )
+    text = critic_panel_prompt()
+    assert "EVERY candidate" in text
+    assert "preferred_candidate" in text
+    assert "objections_for_risk_ledger" in text
+    assert "output_present" in text
+
+
+def test_critic_verdict_from_payload() -> None:
+    from pollypm.plugins_builtin.project_planning.tree_of_plans import (
+        CriticVerdict,
+    )
+    payload = {
+        "candidates": [
+            {"id": "A", "score": 8, "verdict": "approve"},
+            {"id": "B", "score": 6, "verdict": "approve_with_changes"},
+        ],
+        "preferred_candidate": "A",
+        "objections_for_risk_ledger": [
+            "Module FooRegistry is premature plugin boundary",
+        ],
+    }
+    verdict = CriticVerdict.from_payload("critic_simplicity", payload)
+    assert verdict.candidate_scores == {"A": 8.0, "B": 6.0}
+    assert verdict.preferred_candidate == "A"
+    assert len(verdict.objections) == 1
+
+
+def test_critic_verdict_handles_tie_preference() -> None:
+    from pollypm.plugins_builtin.project_planning.tree_of_plans import (
+        CriticVerdict,
+    )
+    verdict = CriticVerdict.from_payload(
+        "critic_user",
+        {
+            "candidates": [
+                {"id": "A", "score": 7},
+                {"id": "B", "score": 7},
+            ],
+            "preferred_candidate": "tie:A,B",
+        },
+    )
+    # Tie preference is preserved as a string so the session log can
+    # narrate it; synthesis ignores ties for the vote count.
+    assert verdict.preferred_candidate == "tie:A,B"
+
+
+def test_synthesize_picks_highest_average_score() -> None:
+    from pollypm.plugins_builtin.project_planning.tree_of_plans import (
+        CriticVerdict, synthesize,
+    )
+    verdicts = [
+        CriticVerdict(
+            critic_name="critic_simplicity",
+            candidate_scores={"A": 9, "B": 5},
+            preferred_candidate="A",
+            objections=["B: over-engineered registry"],
+        ),
+        CriticVerdict(
+            critic_name="critic_maintainability",
+            candidate_scores={"A": 8, "B": 6},
+            preferred_candidate="A",
+            objections=["B: hidden coupling in shared config"],
+        ),
+    ]
+    result = synthesize(verdicts)
+    assert result.winner == "A"
+    assert result.average_scores == {"A": 8.5, "B": 5.5}
+    assert result.preferred_votes["A"] == 2
+    assert len(result.risk_ledger_seeds) == 2
+    assert "critic_simplicity" in result.risk_ledger_seeds[0]
+
+
+def test_synthesize_breaks_score_ties_by_preferred_votes() -> None:
+    from pollypm.plugins_builtin.project_planning.tree_of_plans import (
+        CriticVerdict, synthesize,
+    )
+    verdicts = [
+        CriticVerdict(
+            critic_name="c1",
+            candidate_scores={"A": 7, "B": 7},
+            preferred_candidate="B",
+        ),
+        CriticVerdict(
+            critic_name="c2",
+            candidate_scores={"A": 7, "B": 7},
+            preferred_candidate="B",
+        ),
+        CriticVerdict(
+            critic_name="c3",
+            candidate_scores={"A": 7, "B": 7},
+            preferred_candidate="A",
+        ),
+    ]
+    result = synthesize(verdicts)
+    # Same scores, but B has 2 preferred votes vs A's 1.
+    assert result.winner == "B"
+
+
+def test_synthesize_rejects_single_candidate() -> None:
+    import pytest
+
+    from pollypm.plugins_builtin.project_planning.tree_of_plans import (
+        CriticVerdict, synthesize,
+    )
+    verdicts = [
+        CriticVerdict(
+            critic_name="c1",
+            candidate_scores={"A": 7},
+            preferred_candidate="A",
+        ),
+    ]
+    with pytest.raises(ValueError):
+        synthesize(verdicts)
+
+
+def test_synthesize_rationale_included_in_result() -> None:
+    from pollypm.plugins_builtin.project_planning.tree_of_plans import (
+        CriticVerdict, synthesize,
+    )
+    verdicts = [
+        CriticVerdict(
+            critic_name="c1",
+            candidate_scores={"A": 8, "B": 5},
+            preferred_candidate="A",
+        ),
+        CriticVerdict(
+            critic_name="c2",
+            candidate_scores={"A": 7, "B": 6},
+            preferred_candidate="A",
+        ),
+    ]
+    result = synthesize(verdicts)
+    assert "Selected candidate A" in result.rationale
+    assert "Average scores" in result.rationale
+    assert "A:" in result.rationale and "B:" in result.rationale
