@@ -426,6 +426,7 @@ Flow advancement is **always explicit** — never automatic.
 | `spike` | Research/investigation. No review. | research → done | worker, requester? |
 | `user-review` | Like standard, but human must review. | implement → human_review → done | worker, requester? (human_review node has `actor_type: human`) |
 | `bug` | Like standard, with reproduction gate. | reproduce → fix → code_review → done | worker, reviewer, requester? |
+| `chat` | Lightweight user ↔ agent conversation persisted as a task. | user_message → agent_response → done | operator?, requester? (user_message node has `actor_type: human`; `operator` defaults to Polly and is overridable via `--role operator=<name>`) |
 
 ### Immutability
 
