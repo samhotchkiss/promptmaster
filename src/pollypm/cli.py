@@ -73,6 +73,9 @@ from pollypm.work.cli import task_app, flow_app
 app.add_typer(task_app, name="task")
 app.add_typer(flow_app, name="flow")
 
+from pollypm.work.inbox_cli import inbox_app
+app.add_typer(inbox_app, name="inbox")
+
 from pollypm.jobs.cli import jobs_app
 app.add_typer(jobs_app, name="jobs")
 
