@@ -288,13 +288,18 @@ def _sync_commits_to_task_branch(task_id: str) -> None:
     if result.returncode != 0 or not result.stdout.strip():
         return  # No commits to sync
 
-    # Check if task branch already has commits ahead of main
-    result = subprocess.run(
-        ["git", "log", f"main..{task_branch}", "--oneline"],
+    # Check if the worker's latest commit is already on the task branch
+    worker_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
         capture_output=True, text=True, check=False,
     )
-    if result.returncode == 0 and result.stdout.strip():
-        return  # Task branch already has work — don't overwrite
+    if worker_head.returncode == 0:
+        is_ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", worker_head.stdout.strip(), task_branch],
+            capture_output=True, text=True, check=False,
+        )
+        if is_ancestor.returncode == 0:
+            return  # Worker's commits are already on the task branch
 
     # Get the project root (top of git repo)
     result = subprocess.run(
