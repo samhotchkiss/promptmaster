@@ -1189,11 +1189,11 @@ def up(
         storage_alive = supervisor.tmux.has_session(supervisor.storage_closet_session_name())
         if storage_alive:
             supervisor.tmux.create_session(
-                session_name, supervisor._CONSOLE_WINDOW, supervisor._console_command(), remain_on_exit=False,
+                session_name, supervisor.CONSOLE_WINDOW, supervisor.console_command(), remain_on_exit=False,
             )
-            supervisor.tmux.set_window_option(f"{session_name}:{supervisor._CONSOLE_WINDOW}", "allow-passthrough", "on")
-            supervisor.tmux.set_window_option(f"{session_name}:{supervisor._CONSOLE_WINDOW}", "window-size", "latest")
-            supervisor.tmux.set_window_option(f"{session_name}:{supervisor._CONSOLE_WINDOW}", "aggressive-resize", "on")
+            supervisor.tmux.set_window_option(f"{session_name}:{supervisor.CONSOLE_WINDOW}", "allow-passthrough", "on")
+            supervisor.tmux.set_window_option(f"{session_name}:{supervisor.CONSOLE_WINDOW}", "window-size", "latest")
+            supervisor.tmux.set_window_option(f"{session_name}:{supervisor.CONSOLE_WINDOW}", "aggressive-resize", "on")
             created = True
             typer.echo(f"Restored tmux session {session_name} (storage-closet still alive)")
         else:
@@ -1405,7 +1405,7 @@ def debug_command(
     # Sessions
     typer.echo("")
     launches = supervisor.plan_launches()
-    windows = supervisor._window_map()
+    windows = supervisor.window_map()
     for launch in launches:
         if session is not None and launch.session.name != session:
             continue
@@ -1670,7 +1670,7 @@ def worker_start(
     launch = next(item for item in refreshed.plan_launches() if item.session.name == session.name)
     typer.echo(
         f"Managed worker {session.name} ready for project {project_key} "
-        f"in {refreshed._tmux_session_for_launch(launch)}:{launch.window_name}"
+        f"in {refreshed.tmux_session_for_launch(launch)}:{launch.window_name}"
     )
 
 
@@ -1760,7 +1760,7 @@ def switch_provider(
     # 4. Relaunch with new provider
     typer.echo("  Relaunching...")
     try:
-        supervisor._restart_session(session_name, account, failure_type="provider_switch")
+        supervisor.restart_session(session_name, account, failure_type="provider_switch")
     except Exception as exc:
         typer.echo(f"  Relaunch failed: {exc}")
         raise typer.Exit(code=1)

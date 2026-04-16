@@ -905,8 +905,8 @@ class CockpitRouter:
             session_name = self._project_session_map(launches).get(project_key)
             if session_name is not None:
                 launch = next(l for l in launches if l.session.name == session_name)
-                tmux_session = supervisor._tmux_session_for_launch(launch)
-                window_map = supervisor._window_map()
+                tmux_session = supervisor.tmux_session_for_launch(launch)
+                window_map = supervisor.window_map()
                 if launch.window_name in window_map:
                     target_key = f"{tmux_session}:{launch.window_name}"
                     # Window exists but hasn't been stabilized yet
@@ -918,7 +918,7 @@ class CockpitRouter:
         # Stabilize in the background (dismisses prompts, waits for ready)
         if target is not None and session_name is not None:
             launch = next(l for l in supervisor.plan_launches() if l.session.name == session_name)
-            supervisor._stabilize_launch(launch, target, on_status=on_status)
+            supervisor.stabilize_launch(launch, target, on_status=on_status)
 
     def _show_live_session(self, supervisor: Supervisor, session_name: str, window_target: str) -> None:
         mounted_session = self._mounted_session_name(supervisor, window_target)
@@ -1046,7 +1046,7 @@ class CockpitRouter:
         )
         self.tmux.set_pane_history_limit(right_pane_id, 200)
         self.tmux.pipe_pane(right_pane_id, visible_launch.log_path)
-        supervisor._stabilize_launch(visible_launch, right_pane_id)
+        supervisor.stabilize_launch(visible_launch, right_pane_id)
         return max(self.tmux.list_panes(window_target), key=self._pane_left)
 
     def _park_mounted_session(self, supervisor: Supervisor, window_target: str) -> None:

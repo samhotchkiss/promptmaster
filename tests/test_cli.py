@@ -208,7 +208,7 @@ def test_worker_start_creates_and_launches_managed_worker(monkeypatch, tmp_path:
                 },
             )()
 
-        def _tmux_session_for_launch(self, launch) -> str:
+        def tmux_session_for_launch(self, launch) -> str:
             return "pollypm-storage-closet"
 
         def plan_launches(self):
@@ -257,7 +257,7 @@ def test_worker_start_reuses_existing_managed_worker(monkeypatch, tmp_path: Path
                 },
             )()
 
-        def _tmux_session_for_launch(self, launch) -> str:
+        def tmux_session_for_launch(self, launch) -> str:
             return "pollypm-storage-closet"
 
         def plan_launches(self):
