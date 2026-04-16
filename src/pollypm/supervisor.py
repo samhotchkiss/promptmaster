@@ -406,7 +406,7 @@ class Supervisor:
             if on_status:
                 on_status(f"Creating {first.session.name}...")
             self.tmux.create_session(storage_session, first.window_name, first.command)
-            target = f"{storage_session}:0"
+            target = f"{storage_session}:{first.window_name}"
             self.tmux.set_window_option(target, "allow-passthrough", "on")
             self.tmux.set_window_option(target, "focus-events", "on")
             self.tmux.pipe_pane(target, first.log_path)
