@@ -73,6 +73,9 @@ app.add_typer(jobs_app, name="jobs")
 from pollypm.plugin_cli import plugins_app
 app.add_typer(plugins_app, name="plugins")
 
+from pollypm.rail_cli import rail_app
+app.add_typer(rail_app, name="rail")
+
 
 def _session_name_candidates() -> list[str]:
     return ["pollypm", "pollypm-storage-closet"]

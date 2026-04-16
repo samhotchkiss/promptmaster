@@ -482,7 +482,7 @@ def _rows_for_registration(reg, ctx) -> list:
             if f"({badge})" not in label:
                 label = f"{label} ({badge})"
 
-    key = reg.key or reg.item_key
+    key = reg.selection_key
     return [RailRow(key=key, label=label, state=state, selectable=True)]
 
 

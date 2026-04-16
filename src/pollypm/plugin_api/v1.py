@@ -283,11 +283,25 @@ class RailItemRegistration:
 
     @property
     def item_key(self) -> str:
-        """Stable key for the item — ``section.label`` unless overridden.
+        """Human-facing match key — always ``section.label``.
 
-        Used by the ``pm rail hide/show`` CLI and by config matching.
+        Used by the ``pm rail hide/show`` CLI and by ``[rail].hidden_items``
+        config matching. Unlike :attr:`selection_key`, this is *always*
+        ``section.label`` so the user can type it into the config without
+        having to know a plugin's internal row IDs.
         """
-        return self.key if self.key else f"{self.section}.{self.label}"
+        return f"{self.section}.{self.label}"
+
+    @property
+    def selection_key(self) -> str:
+        """Stable internal id for cockpit row selection.
+
+        Defaults to :attr:`item_key` when the plugin didn't pass an
+        explicit ``key`` to ``register_item``. Plugins that emit
+        existing cockpit keys (e.g. ``"polly"``, ``"settings"``) can
+        override this to keep back-compat with routing logic.
+        """
+        return self.key if self.key else self.item_key
 
 
 class RailAPI:

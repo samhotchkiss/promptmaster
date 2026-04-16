@@ -103,6 +103,24 @@ class PluginSettings:
 
 
 @dataclass(slots=True)
+class RailSettings:
+    """User-level cockpit-rail customisation from the ``[rail]`` TOML
+    section.
+
+    ``hidden_items`` — list of ``"section.label"`` keys that should be
+    skipped by the rail renderer (e.g. ``"tools.activity"``). Matched
+    case-sensitively against each registration's ``item_key``.
+    ``collapsed_sections`` — section names that start collapsed; the
+    user can still expand them live during a cockpit session.
+
+    See docs/extensible-rail-spec.md §6 and issue #224.
+    """
+
+    hidden_items: tuple[str, ...] = ()
+    collapsed_sections: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
 class PollyPMConfig:
     project: ProjectSettings
     pollypm: PollyPMSettings
@@ -111,6 +129,7 @@ class PollyPMConfig:
     projects: dict[str, KnownProject] = field(default_factory=dict)
     memory: MemorySettings = field(default_factory=MemorySettings)
     plugins: PluginSettings = field(default_factory=PluginSettings)
+    rail: RailSettings = field(default_factory=RailSettings)
 
 
 @dataclass(slots=True)
