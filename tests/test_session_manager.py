@@ -314,6 +314,38 @@ class TestTeardownWorker:
         assert r2.jsonl_archived is False
         assert r2.worktree_removed is False
 
+    def test_teardown_continues_on_archive_failure(self, manager, mock_tmux, tmp_project):
+        """If _archive_jsonl blows up, teardown must still kill the
+        window and attempt worktree removal."""
+        self._provision(manager)
+
+        with patch("pollypm.work.session_manager.subprocess") as mock_sub, \
+             patch.object(manager, "_archive_jsonl", side_effect=RuntimeError("disk full")):
+            mock_sub.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            manager.teardown_worker("proj/1")
+
+        mock_tmux.kill_window.assert_called_once()
+
+    def test_teardown_leaves_ended_at_null_when_kill_fails(self, manager, mock_tmux, tmp_project, mock_svc):
+        """If we fail to kill the pane/window, don't stamp ended_at —
+        a future pass needs to be able to retry."""
+        self._provision(manager)
+
+        mock_tmux.kill_window.side_effect = RuntimeError("tmux is dead")
+
+        with patch("pollypm.work.session_manager.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            manager.teardown_worker("proj/1")
+
+        row = mock_svc._conn.execute(
+            "SELECT ended_at FROM work_sessions WHERE task_project = ? AND task_number = ?",
+            ("proj", 1),
+        ).fetchone()
+        assert row is not None
+        assert row["ended_at"] is None, (
+            "ended_at must remain NULL when the kill phase failed"
+        )
+
     def test_teardown_worker_records_tokens(self, manager, mock_tmux, tmp_project, tmp_path, monkeypatch):
         session = self._provision(manager)
 
