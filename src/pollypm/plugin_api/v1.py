@@ -11,6 +11,7 @@ SchedulerBackendFactory = Callable[[], object]
 AgentProfileFactory = Callable[[], object]
 SessionServiceFactory = Callable[..., object]
 TranscriptSourceFactory = Callable[..., object]
+RecoveryPolicyFactory = Callable[..., object]
 ObserverHandler = Callable[["HookContext"], None]
 FilterHandler = Callable[["HookContext"], "HookFilterResult | None"]
 RosterRegistrar = Callable[["RosterAPI"], None]
@@ -50,6 +51,7 @@ KNOWN_CAPABILITY_KINDS: frozenset[str] = frozenset(
         "doc_backend",
         "sync_adapter",
         "transcript_source",
+        "recovery_policy",
         "job_handler",
         "roster_entry",
         # Plugin-level hook capability (observers / filters) — not tied to
@@ -318,6 +320,7 @@ class PollyPMPlugin:
     agent_profiles: dict[str, AgentProfileFactory] = field(default_factory=dict)
     session_services: dict[str, SessionServiceFactory] = field(default_factory=dict)
     transcript_sources: dict[str, TranscriptSourceFactory] = field(default_factory=dict)
+    recovery_policies: dict[str, RecoveryPolicyFactory] = field(default_factory=dict)
     observers: dict[str, list[ObserverHandler]] = field(default_factory=dict)
     filters: dict[str, list[FilterHandler]] = field(default_factory=dict)
     register_roster: RosterRegistrar | None = None

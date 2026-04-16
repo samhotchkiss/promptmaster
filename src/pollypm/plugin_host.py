@@ -78,6 +78,11 @@ class ExtensionHost:
             name, lambda plugin: plugin.session_services, "session service", **kwargs,
         )
 
+    def get_recovery_policy(self, name: str, **kwargs: object) -> object:
+        return self._resolve_factory(
+            name, lambda plugin: plugin.recovery_policies, "recovery policy", **kwargs,
+        )
+
     def get_transcript_source(self, name: str, **kwargs: object) -> object:
         return self._resolve_factory(
             name, lambda plugin: plugin.transcript_sources, "transcript source", **kwargs,
