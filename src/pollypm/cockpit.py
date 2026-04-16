@@ -85,6 +85,158 @@ def _render_work_service_issues(project: object) -> str:
     return "\n".join(lines)
 
 
+def render_inbox_panel(service, projects: list[object] | None = None) -> str:
+    """Render the cockpit inbox panel from a WorkService.
+
+    Groups tasks by project (when multiple project roots are tracked) and
+    lists each one on two lines — subject-like header + status/when subline
+    — matching the visual shape of the legacy inbox panel.
+
+    ``projects`` is an optional list of project objects (each with ``.key``
+    and ``.name``) used solely to resolve display names; when omitted the
+    raw project key is shown.
+    """
+    from pollypm.work.inbox_view import inbox_tasks
+
+    project_names: dict[str, str] = {}
+    for proj in projects or ():
+        key = getattr(proj, "key", None)
+        if key:
+            project_names[key] = getattr(proj, "name", None) or key
+
+    tasks = inbox_tasks(service)
+    assigned = len(tasks)
+
+    lines = ["Inbox"]
+    if not tasks:
+        lines.extend(
+            [
+                "",
+                "No tasks waiting for you.",
+                "",
+                "This panel shows non-terminal tasks whose current node is",
+                "assigned to you (actor_type: human) or whose roles include",
+                "the 'user' role.",
+            ]
+        )
+        lines.extend(
+            [
+                "",
+                f"Assigned: {assigned}",
+                "List: pm inbox",
+                "Show: pm inbox show <task_id>",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.extend(["", f"Assigned ({assigned}):"])
+    for task in tasks[:10]:
+        prio = task.priority.value
+        prefix = ""
+        if prio == "critical":
+            prefix = "▲ "
+        elif prio == "high":
+            prefix = "◆ "
+        subject = task.title[:60]
+        lines.append(f"  {prefix}{subject}")
+
+        updated = task.updated_at
+        if updated is not None and hasattr(updated, "isoformat"):
+            when = updated.isoformat()[:16]
+        else:
+            when = (str(updated) if updated else "")[:16]
+        project_label = project_names.get(task.project, task.project)
+        node_part = f" · @{task.current_node_id}" if task.current_node_id else ""
+        lines.append(
+            f"    {task.task_id} · {project_label} · {task.work_status.value}"
+            f"{node_part} · {when}"
+        )
+
+        preview = (task.description or "").strip().split("\n", 1)[0][:70]
+        if preview:
+            lines.append(f"    {preview}")
+        lines.append("")
+
+    if assigned > 10:
+        lines.append(f"… and {assigned - 10} more")
+        lines.append("")
+
+    lines.extend(
+        [
+            "List: pm inbox",
+            "Show: pm inbox show <task_id>",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_inbox_panel(config) -> str:
+    """Render the inbox panel for the active cockpit config.
+
+    Opens every tracked project's work-service DB, queries the inbox from
+    each, and renders the combined view. Projects with no DB are silently
+    skipped so a fresh install stays usable.
+    """
+    from pollypm.work.sqlite_service import SQLiteWorkService
+
+    # Aggregate inbox tasks across all tracked projects. Each project has its
+    # own SQLite db; we open each, query, then close.
+    class _AggregateService:
+        """Adapter exposing the subset of WorkService used by inbox_view."""
+
+        def __init__(self) -> None:
+            self._tasks: list = []
+            self._flow_cache: dict = {}
+            self._flows_by_svc: list = []
+
+        def list_tasks(self, *, project=None, **_ignored):
+            if project is None:
+                return list(self._tasks)
+            return [t for t in self._tasks if t.project == project]
+
+        def get_flow(self, name: str, project=None):
+            key = (name, project)
+            if key in self._flow_cache:
+                return self._flow_cache[key]
+            for svc in self._flows_by_svc:
+                try:
+                    flow = svc.get_flow(name, project=project)
+                except Exception:  # noqa: BLE001
+                    continue
+                self._flow_cache[key] = flow
+                return flow
+            raise KeyError(f"flow {name!r} not found")
+
+    agg = _AggregateService()
+    opened: list[SQLiteWorkService] = []
+    try:
+        for project_key, project in getattr(config, "projects", {}).items():
+            db_path = project.path / ".pollypm" / "state.db"
+            if not db_path.exists():
+                continue
+            try:
+                svc = SQLiteWorkService(
+                    db_path=db_path, project_path=project.path,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            opened.append(svc)
+            agg._flows_by_svc.append(svc)
+            try:
+                agg._tasks.extend(svc.list_tasks(project=project_key))
+            except Exception:  # noqa: BLE001
+                pass
+
+        projects_iter = list(getattr(config, "projects", {}).values())
+        return render_inbox_panel(agg, projects=projects_iter)
+    finally:
+        for svc in opened:
+            try:
+                svc.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _render_project_dashboard(project: object, project_key: str, config_path, supervisor) -> str | None:
     """Render a project dashboard with task counts, active tasks, alerts, and sessions."""
     from pollypm.work.sqlite_service import SQLiteWorkService
@@ -1470,56 +1622,7 @@ def _build_cockpit_detail_dispatch(supervisor, config_path: Path, kind: str, tar
         return _build_dashboard(supervisor, config)
 
     if kind == "inbox":
-        from pollypm.inbox_processor import list_decisions
-        messages = list_v2_messages(config.project.root_dir, status="open")
-        archived = list_v2_messages(config.project.root_dir, status="closed")
-        decisions = list_decisions(config.project.root_dir, limit=5)
-
-        lines = ["Inbox"]
-        if not messages and not decisions:
-            lines.extend(["", "No open messages or recent decisions."])
-        else:
-            if messages:
-                lines.extend(["", f"Open ({len(messages)}):"])
-                for msg in messages[:10]:
-                    prefix = ""
-                    if "[Escalation]" in msg.subject:
-                        prefix = "▲ "
-                    elif "[Decision]" in msg.subject:
-                        prefix = "◆ "
-                    lines.append(f"  {prefix}{msg.subject}")
-                    lines.append(f"    from {msg.sender} · {msg.created_at[:16]}")
-                    # Show first line of body from entries
-                    try:
-                        _ctx, _hist, entries = read_v2_message(config.project.root_dir, msg.id)
-                        first_line = entries[0].body.strip().split("\n")[0][:70] if entries else ""
-                    except Exception:  # noqa: BLE001
-                        first_line = ""
-                    if first_line:
-                        lines.append(f"    {first_line}")
-                    lines.append("")
-
-            if decisions:
-                lines.extend(["", f"Recent Decisions ({len(decisions)}):"])
-                for dec in decisions[:5]:
-                    tier = dec.get("tier", 2)
-                    icon = "◆" if tier <= 2 else "▲"
-                    lines.append(f"  {icon} {dec.get('subject', '?')[:60]}")
-                    if dec.get("decision"):
-                        lines.append(f"    {dec['decision'][:65]}")
-                    lines.append(f"    from {dec.get('original_sender', '?')} · {dec.get('timestamp', '')[:16]}")
-                    lines.append("")
-
-        if archived:
-            lines.extend([f"Archived: {len(archived)} message(s)", "  View with: pm mail --archived"])
-
-        lines.extend([
-            "",
-            "Read: pm mail <message-id>",
-            "Archive: pm mail --close <filename>",
-            "Decisions: pm decisions",
-        ])
-        return "\n".join(lines)
+        return _render_inbox_panel(config)
 
     if kind == "settings":
         recent_usage = supervisor.store.recent_token_usage(limit=5)
