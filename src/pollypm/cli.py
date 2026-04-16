@@ -49,7 +49,6 @@ from pollypm.session_services import (
     probe_session,
     switch_client_to_session,
 )
-from pollypm.supervisor import Supervisor
 from pollypm.transcript_ingest import start_transcript_ingestion
 from pollypm.workers import create_worker_session, launch_worker_session
 from pollypm.worktrees import list_worktrees as list_project_worktrees
@@ -105,11 +104,12 @@ def _attach_existing_session_without_config() -> bool:
     return False
 
 
-def _load_supervisor(config_path: Path) -> Supervisor:
-    return Supervisor(load_config(config_path))
+def _load_supervisor(config_path: Path):
+    """Return a full Supervisor via the service_api facade."""
+    return PollyPMService(config_path).load_supervisor()
 
 
-def _account_label(supervisor: Supervisor, account_name: str) -> str:
+def _account_label(supervisor, account_name: str) -> str:
     account = supervisor.config.accounts.get(account_name)
     if account is None:
         return account_name
@@ -137,7 +137,7 @@ def _install_global_pollypm(root_dir: Path) -> tuple[bool, str]:
     return (result.returncode == 0, output)
 
 
-def _require_pollypm_session(supervisor: Supervisor) -> None:
+def _require_pollypm_session(supervisor) -> None:
     current_tmux = supervisor.tmux.current_session_name()
     expected = supervisor.config.project.tmux_session
     allowed = {expected, supervisor.storage_closet_session_name()}

@@ -25,7 +25,6 @@ from pollypm.tz import format_time as _fmt_time
 from pollypm.config import load_config
 from pollypm.service_api import PollyPMService
 from pollypm.cockpit import CockpitItem, CockpitRouter, build_cockpit_detail
-from pollypm.supervisor import Supervisor
 
 
 import re as _re
@@ -747,8 +746,7 @@ class PollyCockpitApp(App[None]):
         )
         if result.returncode == 0 and "CONFIRMED" in (result.stdout or ""):
             try:
-                config = load_config(self.config_path)
-                supervisor = Supervisor(config)
+                supervisor = PollyPMService(self.config_path).load_supervisor()
                 supervisor.shutdown_tmux()
             except Exception:  # noqa: BLE001
                 pass
@@ -943,9 +941,7 @@ class PollyProjectSettingsApp(App[None]):
             self._notify("No worker session to reset.")
             return
         try:
-            from pollypm.supervisor import Supervisor
-            supervisor = Supervisor(config)
-            supervisor.stop_session(worker.name, force=True)
+            PollyPMService(self.config_path).stop_session(worker.name)
             self._notify(f"Session {worker.name} stopped. Press N to relaunch.")
         except Exception as exc:  # noqa: BLE001
             self._notify(f"Reset failed: {exc}")
@@ -982,9 +978,7 @@ class PollyProjectSettingsApp(App[None]):
             self._notify(f"Already using {target_provider.value}.")
             return
         try:
-            from pollypm.supervisor import Supervisor
-            supervisor = Supervisor(config)
-            supervisor.switch_session_account(worker.name, target_account)
+            PollyPMService(self.config_path).switch_session_account(worker.name, target_account)
             self._notify(f"Switched to {target_provider.value} ({target_account}). Session restarted.")
         except Exception as exc:  # noqa: BLE001
             self._notify(f"Switch failed: {exc}")
@@ -1525,14 +1519,13 @@ class PollyInboxApp(App[None]):
         subject = item.subject if hasattr(item, "subject") else ""
         target = self._resolve_reply_target()
         try:
-            config = load_config(self.config_path)
-            sup = Supervisor(config)
-            sup.send_input(
+            service = PollyPMService(self.config_path)
+            service.send_input(
                 target,
                 f"I'm here to discuss inbox message '{msg_id}': \"{subject}\". Let's talk about it.",
-                owner="human", force=True,
+                owner="human",
+                force=True,
             )
-            sup.store.close()
             self.notify(f"Discussion started with {target}", severity="information")
         except Exception as exc:  # noqa: BLE001
             self.notify(f"Could not reach {target}: {exc}", severity="error")

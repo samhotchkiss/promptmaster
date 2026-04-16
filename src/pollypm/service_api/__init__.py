@@ -14,6 +14,7 @@ from pollypm.service_api.v1 import (
     InboxRouteDecision,
     PollyPMService,
     StatusSnapshot,
+    plan_launches_readonly,
     render_json,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "InboxRouteDecision",
     "PollyPMService",
     "StatusSnapshot",
+    "plan_launches_readonly",
     "render_json",
 ]

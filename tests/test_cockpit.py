@@ -340,10 +340,22 @@ repo = "acme/widgets"
         def recent_token_usage(self, limit: int = 5):
             return []
 
+        def open_alerts(self):
+            return []
+
+        def close(self) -> None:
+            return None
+
     class FakeSupervisor:
         def __init__(self) -> None:
             self.config = config
             self.store = FakeStore()
+
+        def ensure_layout(self) -> None:
+            return None
+
+        def plan_launches(self):
+            return []
 
     monkeypatch.setattr("pollypm.cockpit.PollyPMService.load_supervisor", lambda self: FakeSupervisor())
     monkeypatch.setattr("pollypm.cockpit.list_worktrees", lambda config_path, project_key: [])
@@ -423,10 +435,16 @@ repo = "acme/widgets"
         def recent_token_usage(self, limit: int = 5):
             return []
 
+        def close(self) -> None:
+            return None
+
     class FakeSupervisor:
         def __init__(self) -> None:
             self.config = config
             self.store = FakeStore()
+
+        def ensure_layout(self) -> None:
+            return None
 
     monkeypatch.setattr("pollypm.cockpit.PollyPMService.load_supervisor", lambda self: FakeSupervisor())
 
@@ -556,6 +574,9 @@ def test_build_cockpit_detail_dashboard_shows_activity_and_tokens(monkeypatch, t
                 (today_utc, 345),
             ]
 
+        def close(self) -> None:
+            return None
+
     class FakeLaunch:
         def __init__(self, name: str, role: str, project: str) -> None:
             self.session = type("Session", (), {"name": name, "role": role, "project": project})()
@@ -575,7 +596,7 @@ def test_build_cockpit_detail_dashboard_shows_activity_and_tokens(monkeypatch, t
             ]
 
     monkeypatch.setattr("pollypm.cockpit.load_config", lambda path: config)
-    monkeypatch.setattr("pollypm.cockpit.Supervisor", lambda cfg: FakeSupervisor())
+    monkeypatch.setattr("pollypm.cockpit.PollyPMService.load_supervisor", lambda self: FakeSupervisor())
     def _fake_v2_messages(root_dir, *, status="open", owner=None):
         items = [
             type("M", (), {"subject": "test1", "id": "t1", "sender": "polly", "owner": "user", "created_at": "2026-04-13T10:00:00+00:00"})(),

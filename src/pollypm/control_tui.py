@@ -38,7 +38,6 @@ from pollypm.projects import (
     set_workspace_root,
 )
 from pollypm.service_api import PollyPMService
-from pollypm.supervisor import Supervisor
 from pollypm.task_backends import get_task_backend
 from pollypm.worktrees import list_worktrees
 
@@ -558,14 +557,14 @@ class PollyPMApp(App[None]):
         self.events_table.zebra_stripes = True
         self.events_table.add_columns("When", "Session", "Type", "Message")
 
-    def _load_context(self) -> tuple[Supervisor | None, object | None]:
+    def _load_context(self) -> tuple[object | None, object | None]:
         if not self.config_path.exists():
             return None, None
         try:
             config = load_config(self.config_path)
         except FileNotFoundError:
             return None, None
-        supervisor = Supervisor(config)
+        supervisor = self.service.load_supervisor()
         supervisor.ensure_layout()
         return supervisor, config
 
@@ -631,7 +630,7 @@ class PollyPMApp(App[None]):
                     continue
             self._spawn_usage_refresh(account.key, notify=False)
 
-    def _refresh_dashboard(self, supervisor: Supervisor, launches, windows, alerts, leases, errors) -> None:
+    def _refresh_dashboard(self, supervisor, launches, windows, alerts, leases, errors) -> None:
         session_name = supervisor.config.project.tmux_session
         tmux_exists = supervisor.tmux.has_session(session_name)
         controller = supervisor.config.pollypm.controller_account
@@ -651,7 +650,7 @@ class PollyPMApp(App[None]):
         )
         self._update_context_bar()
 
-    def _refresh_cockpit(self, supervisor: Supervisor, config, launches, windows, alerts, leases) -> None:
+    def _refresh_cockpit(self, supervisor, config, launches, windows, alerts, leases) -> None:
         rows: list[tuple[tuple[str, ...], str]] = []
         rows.append((("Polly", self._cockpit_state_for_session("operator", launches, windows, alerts)), "polly"))
         inbox_count = len(list_v2_messages(config.project.root_dir, status="open"))
@@ -710,7 +709,7 @@ class PollyPMApp(App[None]):
     def _spinner_frame(self) -> str:
         return ["·", "•", "●", "•"][self.spinner_index % 4]
 
-    def _hero_render(self, supervisor: Supervisor, launches, windows, alerts, leases) -> object:
+    def _hero_render(self, supervisor, launches, windows, alerts, leases) -> object:
         healthy_accounts = sum(1 for account in self.account_statuses if account.logged_in and account.health == "healthy")
         active_windows = sum(1 for window in windows if not window.pane_dead)
         left = Text()
@@ -774,7 +773,7 @@ class PollyPMApp(App[None]):
         self.notice_until = None
         self.message_bar.update("Ready.")
 
-    def _refresh_accounts(self, supervisor: Supervisor) -> None:
+    def _refresh_accounts(self, supervisor) -> None:
         controller = supervisor.config.pollypm.controller_account
         failover = set(supervisor.config.pollypm.failover_accounts)
         rows = [
@@ -810,7 +809,7 @@ class PollyPMApp(App[None]):
         ]
         self._replace_table_rows(self.projects_table, rows)
 
-    def _refresh_sessions(self, supervisor: Supervisor, launches, windows, alerts, leases) -> None:
+    def _refresh_sessions(self, supervisor, launches, windows, alerts, leases) -> None:
         window_map = {window.name: window for window in windows}
         alert_counts: dict[str, int] = {}
         for alert in alerts:
@@ -856,7 +855,7 @@ class PollyPMApp(App[None]):
         ]
         self._replace_table_rows(self.alerts_table, rows)
 
-    def _refresh_events(self, supervisor: Supervisor) -> None:
+    def _refresh_events(self, supervisor) -> None:
         rows = [
             (
                 (
@@ -1069,7 +1068,7 @@ class PollyPMApp(App[None]):
 
     def _account_detail(
         self,
-        supervisor: Supervisor,
+        supervisor,
         key: str | None,
         status_map: dict[str, AccountStatus],
     ) -> str:
@@ -1140,7 +1139,7 @@ class PollyPMApp(App[None]):
             lines.extend(f"- {item.lane_kind}/{item.lane_key}: {item.path}" for item in worktrees[:5])
         return "\n".join(lines)
 
-    def _cockpit_detail(self, supervisor: Supervisor, config, key: str | None) -> str:
+    def _cockpit_detail(self, supervisor, config, key: str | None) -> str:
         if key is None:
             return "Select Polly, Inbox, a project, or Settings."
         if key == "polly":
@@ -1198,7 +1197,7 @@ class PollyPMApp(App[None]):
             )
         return "Select a project to inspect it."
 
-    def _session_detail(self, supervisor: Supervisor, session_name: str | None) -> str:
+    def _session_detail(self, supervisor, session_name: str | None) -> str:
         if session_name is None:
             return "Select a session to preview it."
         now = datetime.now()

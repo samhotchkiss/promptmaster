@@ -177,23 +177,17 @@ def _session_description(status: str, role: str, snapshot_path: str | None) -> s
 def gather(config: PollyPMConfig, store: StateStore) -> DashboardData:
     """Gather all dashboard data."""
     from pollypm.inbox_v2 import list_messages as list_v2_messages
+    from pollypm.service_api import plan_launches_readonly
 
     now = datetime.now(UTC)
 
     # Active sessions
     all_runtimes = store.list_session_runtimes()
     runtime_map = {rt.session_name: rt for rt in all_runtimes}
-    from pollypm.supervisor import Supervisor
-    sup = Supervisor.__new__(Supervisor)
-    sup.config = config
-    sup.store = store
-    sup.readonly_state = True
-    from pollypm.session_services import create_tmux_client
-    sup.tmux = create_tmux_client()
-    sup.invalidate_launch_cache()
+    launches = plan_launches_readonly(config, store)
 
     active: list[SessionActivity] = []
-    for launch in sup.plan_launches():
+    for launch in launches:
         rt = runtime_map.get(launch.session.name)
         status = rt.status if rt else "unknown"
         project = config.projects.get(launch.session.project)
