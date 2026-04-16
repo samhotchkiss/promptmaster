@@ -10,9 +10,11 @@ from pollypm.capacity import (
     FailoverCandidate,
     FailoverDecision,
     FAILOVER_TRIGGERS,
+    PROACTIVE_ROLLOVER_THRESHOLD_PCT,
     RECOVERY_PRIORITY,
     _health_to_state,
     _parse_remaining_pct,
+    account_needs_proactive_rollover,
     probe_capacity,
     probe_all_accounts,
     select_failover_account,
@@ -204,6 +206,80 @@ class TestProbeAllAccounts:
         results = probe_all_accounts(config, store)
         assert len(results) == 3
         assert all(r.account_name in config.accounts for r in results)
+
+
+class TestAccountNeedsProactiveRollover:
+    def test_threshold_constant_is_ten(self) -> None:
+        # Pins the 90%-used trigger from issue #103.
+        assert PROACTIVE_ROLLOVER_THRESHOLD_PCT == 10
+
+    def test_healthy_account_above_threshold(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        store = _store(tmp_path)
+        store.upsert_account_usage(
+            account_name="claude_main", provider="claude", plan="max",
+            health="healthy", usage_summary="25% left this week", raw_text="",
+        )
+        needs_roll, probe = account_needs_proactive_rollover(config, store, "claude_main")
+        assert needs_roll is False
+        assert probe.remaining_pct == 25
+
+    def test_healthy_at_threshold_triggers(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        store = _store(tmp_path)
+        store.upsert_account_usage(
+            account_name="claude_main", provider="claude", plan="max",
+            health="healthy", usage_summary="10% left this week", raw_text="",
+        )
+        needs_roll, probe = account_needs_proactive_rollover(config, store, "claude_main")
+        assert needs_roll is True
+        assert probe.remaining_pct == 10
+
+    def test_healthy_below_threshold_triggers(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        store = _store(tmp_path)
+        store.upsert_account_usage(
+            account_name="claude_main", provider="claude", plan="max",
+            health="healthy", usage_summary="5% left this week", raw_text="",
+        )
+        needs_roll, _ = account_needs_proactive_rollover(config, store, "claude_main")
+        assert needs_roll is True
+
+    def test_unknown_usage_does_not_trigger(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        store = _store(tmp_path)
+        # No usage_summary with a percentage.
+        store.upsert_account_usage(
+            account_name="claude_main", provider="claude", plan="max",
+            health="healthy", usage_summary="max", raw_text="",
+        )
+        needs_roll, _ = account_needs_proactive_rollover(config, store, "claude_main")
+        assert needs_roll is False
+
+    def test_already_exhausted_handled_by_hard_path(self, tmp_path: Path) -> None:
+        # An exhausted account is handled by FAILOVER_TRIGGERS, not proactive.
+        config = _config(tmp_path)
+        store = _store(tmp_path)
+        store.upsert_account_usage(
+            account_name="claude_main", provider="claude", plan="max",
+            health="capacity-exhausted", usage_summary="0% left", raw_text="",
+        )
+        needs_roll, _ = account_needs_proactive_rollover(config, store, "claude_main")
+        assert needs_roll is False
+
+    def test_custom_threshold(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        store = _store(tmp_path)
+        store.upsert_account_usage(
+            account_name="claude_main", provider="claude", plan="max",
+            health="healthy", usage_summary="15% left this week", raw_text="",
+        )
+        # At default 10 threshold, 15% should not roll.
+        assert account_needs_proactive_rollover(config, store, "claude_main")[0] is False
+        # At a custom 20% threshold, 15% should roll.
+        assert account_needs_proactive_rollover(
+            config, store, "claude_main", threshold_pct=20,
+        )[0] is True
 
 
 # ---------------------------------------------------------------------------

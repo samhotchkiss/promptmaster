@@ -966,6 +966,11 @@ class Supervisor:
                 snapshot_path=snapshot_path,
                 memory_backend_name=self.config.memory.backend,
             )
+            # Proactive capacity rollover: if the account is near its limit
+            # (≤ PROACTIVE_ROLLOVER_THRESHOLD_PCT remaining) and no hard
+            # failure is already pending, mark capacity_low so the recovery
+            # path below flips us onto the backup account before we run dry.
+            self._maybe_mark_capacity_low(launch, active_alerts)
             failure = self._primary_failure(active_alerts)
             if failure is not None:
                 self._maybe_recover_session(launch, failure_type=failure, failure_message=", ".join(active_alerts))
@@ -1506,10 +1511,67 @@ class Supervisor:
         return any(pattern in lowered_pane for pattern in patterns)
 
     def _primary_failure(self, alerts: list[str]) -> str | None:
-        for alert_type in ["auth_broken", "capacity_exhausted", "provider_outage", "pane_dead", "shell_returned", "missing_window"]:
+        for alert_type in [
+            "auth_broken",
+            "capacity_exhausted",
+            "provider_outage",
+            "pane_dead",
+            "shell_returned",
+            "missing_window",
+            # Proactive: rolled over before the hard capacity cutoff.
+            "capacity_low",
+        ]:
             if alert_type in alerts:
                 return alert_type
         return None
+
+    def _maybe_mark_capacity_low(
+        self, launch: SessionLaunchSpec, active_alerts: list[str],
+    ) -> None:
+        """Raise a `capacity_low` alert when the account is at or below the
+        proactive-rollover threshold and no hard failure is already open.
+
+        The recovery flow treats ``capacity_low`` like ``capacity_exhausted``
+        (force failover, no retry on the same account) so a graceful rollover
+        happens before the account is fully drained.
+        """
+        if launch.session.role == "heartbeat-supervisor":
+            return  # the heartbeat itself should not roll; it'd create a gap.
+        # If a hard failure is already recorded, defer to that path.
+        for hard in (
+            "auth_broken", "capacity_exhausted", "provider_outage",
+            "pane_dead", "shell_returned", "missing_window",
+        ):
+            if hard in active_alerts:
+                return
+        try:
+            from pollypm.capacity import account_needs_proactive_rollover
+            needs_roll, probe = account_needs_proactive_rollover(
+                self.config, self.store, launch.account.name,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        if not needs_roll:
+            self.store.clear_alert(launch.session.name, "capacity_low")
+            return
+        # Skip if we already rolled this session for low capacity in the
+        # current recovery window — avoids oscillating between accounts.
+        runtime = self.store.get_session_runtime(launch.session.name)
+        if runtime and runtime.last_failure_type == "capacity_low" and runtime.status == "recovering":
+            return
+        pct = probe.remaining_pct if probe.remaining_pct is not None else -1
+        self.store.upsert_alert(
+            launch.session.name,
+            "capacity_low",
+            "warn",
+            f"Account {launch.account.name} at {pct}% left — proactively rolling over",
+        )
+        self.store.record_event(
+            launch.session.name,
+            "proactive_rollover",
+            f"Account {launch.account.name} at {pct}% left; triggering failover",
+        )
+        active_alerts.append("capacity_low")
 
     def _refresh_account_runtime_metadata(self, account_name: str) -> None:
         account = self.config.accounts[account_name]
@@ -1670,8 +1732,10 @@ class Supervisor:
 
         # For auth_broken on Claude accounts, allow retrying the same account —
         # the refresh token is long-lived and Claude Code will refresh on restart.
-        # Only force failover for capacity_exhausted (a genuine account limit).
-        allow_same = failure_type not in {"capacity_exhausted"}
+        # Force failover for capacity_exhausted (genuine account limit) and
+        # capacity_low (proactive rollover near the limit — staying on the
+        # same account defeats the purpose).
+        allow_same = failure_type not in {"capacity_exhausted", "capacity_low"}
         candidates = self._candidate_accounts(launch, allow_same=allow_same)
         if not candidates:
             self.store.upsert_alert(
@@ -1815,6 +1879,7 @@ class Supervisor:
             "shell_returned",
             "auth_broken",
             "capacity_exhausted",
+            "capacity_low",
             "provider_outage",
             "missing_window",
             "recovery_waiting_on_human",
