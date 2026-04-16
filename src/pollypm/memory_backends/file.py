@@ -3,33 +3,113 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-
-from pollypm.plugin_host import extension_host_for_root
-from pollypm.projects import ensure_project_scaffold, project_artifacts_dir, project_dossier_dir
-from pollypm.storage.state import StateStore
+from typing import TYPE_CHECKING, Protocol
 
 from pollypm.memory_backends.base import MemoryBackend, MemoryEntry, MemorySummary
 
+if TYPE_CHECKING:
+    from pollypm.storage.state import StateStore
+
+
+class _PluginHook(Protocol):
+    """Narrow subset of ExtensionHost the file backend consumes.
+
+    Keeping this as a structural protocol (not an import of ExtensionHost)
+    is what keeps memory_backends from depending on plugin_host. The caller
+    may pass an ExtensionHost, a test stub, or ``None`` (no plugin hooks).
+    """
+
+    def run_filters(self, hook_name: str, payload: object, *, metadata: dict | None = ...) -> object: ...
+
+    def run_observers(self, hook_name: str, payload: object, *, metadata: dict | None = ...) -> object: ...
+
+
+class _NullHook:
+    def run_filters(self, hook_name, payload, *, metadata=None):
+        # Mirror HookFilterResult shape minimally: allow-through.
+        class _AllowResult:
+            action = "allow"
+            payload = None
+            reason = None
+
+        result = _AllowResult()
+        result.payload = payload
+        return result
+
+    def run_observers(self, hook_name, payload, *, metadata=None):
+        return []
+
 
 class FileMemoryBackend(MemoryBackend):
-    def __init__(self, project_path: Path, *, state_db: Path | None = None) -> None:
-        self.project_path = project_path.expanduser().resolve()
-        self.state_db = state_db or (self.project_path / ".pollypm-state" / "state.db")
-        self.store = StateStore(self.state_db)
-        self.plugins = extension_host_for_root(str(self.project_path))
+    """File-backed memory store.
+
+    Dependencies are injected via the constructor:
+
+    * ``project_path`` — resolved project root used for file placement.
+    * ``state_store`` — already-constructed StateStore handle.
+    * ``plugins`` — filter/observer dispatcher (ExtensionHost-shaped);
+      defaults to a no-op if omitted, so tests don't need a plugin host.
+    * ``memory_root`` / ``artifacts_root`` — optional pre-resolved output
+      directories. When omitted, the backend uses ``<project_path>/.pollypm``
+      conventions so the happy path stays the same.
+
+    The backend no longer imports ``plugin_host``, ``projects``, or
+    constructs its own ``StateStore`` — those are the caller's concern (see
+    :func:`pollypm.memory_backends.get_memory_backend`).
+    """
+
+    def __init__(
+        self,
+        project_path: Path,
+        *,
+        state_store: "StateStore | None" = None,
+        plugins: _PluginHook | None = None,
+        memory_root: Path | None = None,
+        artifacts_root: Path | None = None,
+        state_db: Path | None = None,
+    ) -> None:
+        self._project_path = project_path.expanduser().resolve()
+        # Back-compat: if callers pass state_db/no state_store, construct one.
+        # This keeps FileMemoryBackend(tmp_path) working for direct users,
+        # but new code is expected to inject via get_memory_backend().
+        if state_store is None:
+            from pollypm.storage.state import StateStore
+
+            self._state_db = state_db or (self._project_path / ".pollypm-state" / "state.db")
+            self._state_store = StateStore(self._state_db)
+        else:
+            self._state_db = state_db
+            self._state_store = state_store
+        self._plugins: _PluginHook = plugins if plugins is not None else _NullHook()
+        # Conventional layout under .pollypm/ — callers may override.
+        dossier_root = self._project_path / ".pollypm"
+        self._memory_root = memory_root or (dossier_root / "memory")
+        self._artifacts_root = artifacts_root or (dossier_root / "artifacts")
+
+    # Exposed read-only accessors for callers that need the same handles.
+    # Tests and a few callers need the store and project path; exposing
+    # them as properties keeps the ivars private while preserving the
+    # existing read surface (no direct writes from outside).
+    @property
+    def project_path(self) -> Path:
+        return self._project_path
+
+    @property
+    def store(self) -> "StateStore":
+        return self._state_store
 
     def root(self) -> Path:
-        return self.project_path
+        return self._project_path
 
     def exists(self) -> bool:
-        return project_dossier_dir(self.project_path).exists()
+        # Historically tied to the dossier dir; the backend can only answer
+        # whether its own memory root exists without reaching into projects.
+        return self._memory_root.parent.exists()
 
     def ensure_memory(self) -> Path:
-        ensure_project_scaffold(self.project_path)
-        memory_root = project_dossier_dir(self.project_path) / "memory"
-        memory_root.mkdir(parents=True, exist_ok=True)
-        (project_artifacts_dir(self.project_path) / "memory").mkdir(parents=True, exist_ok=True)
-        return memory_root
+        self._memory_root.mkdir(parents=True, exist_ok=True)
+        (self._artifacts_root / "memory").mkdir(parents=True, exist_ok=True)
+        return self._memory_root
 
     def write_entry(
         self,
@@ -49,10 +129,12 @@ class FileMemoryBackend(MemoryBackend):
             "tags": list(tags or []),
             "source": source,
         }
-        result = self.plugins.run_filters("memory.before_write", payload, metadata={"scope": scope, "kind": kind})
-        if result.action == "deny":
-            raise PermissionError(result.reason or "Memory write denied by plugin")
-        payload = result.payload if isinstance(result.payload, dict) else payload
+        result = self._plugins.run_filters("memory.before_write", payload, metadata={"scope": scope, "kind": kind})
+        action = getattr(result, "action", "allow")
+        if action == "deny":
+            raise PermissionError(getattr(result, "reason", None) or "Memory write denied by plugin")
+        mutated = getattr(result, "payload", None)
+        payload = mutated if isinstance(mutated, dict) else payload
 
         scope = str(payload.get("scope", scope))
         title = str(payload.get("title", title))
@@ -64,14 +146,14 @@ class FileMemoryBackend(MemoryBackend):
         self.ensure_memory()
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         slug = _slugify(title)[:80]  # Truncate to avoid "File name too long" errors
-        scope_dir = project_dossier_dir(self.project_path) / "memory" / scope
+        scope_dir = self._memory_root / scope
         scope_dir.mkdir(parents=True, exist_ok=True)
         file_path = scope_dir / f"{stamp}-{slug}.md"
         summary_path = file_path
         content = _render_entry(scope=scope, title=title, body=body, kind=kind, tags=tags, source=source)
         file_path.write_text(content)
 
-        record = self.store.record_memory_entry(
+        record = self._state_store.record_memory_entry(
             scope=scope,
             kind=kind,
             title=title,
@@ -94,7 +176,7 @@ class FileMemoryBackend(MemoryBackend):
             created_at=record.created_at,
             updated_at=record.updated_at,
         )
-        self.plugins.run_observers("memory.after_write", entry, metadata={"scope": scope, "kind": kind})
+        self._plugins.run_observers("memory.after_write", entry, metadata={"scope": scope, "kind": kind})
         return entry
 
     def list_entries(
@@ -104,7 +186,7 @@ class FileMemoryBackend(MemoryBackend):
         kind: str | None = None,
         limit: int = 50,
     ) -> list[MemoryEntry]:
-        entries = self.store.list_memory_entries(scope=scope, kind=kind, limit=limit)
+        entries = self._state_store.list_memory_entries(scope=scope, kind=kind, limit=limit)
         return [
             MemoryEntry(
                 entry_id=item.entry_id,
@@ -123,7 +205,7 @@ class FileMemoryBackend(MemoryBackend):
         ]
 
     def read_entry(self, entry_id: int) -> MemoryEntry | None:
-        entry = self.store.get_memory_entry(entry_id)
+        entry = self._state_store.get_memory_entry(entry_id)
         if entry is None:
             return None
         memory_entry = MemoryEntry(
@@ -139,24 +221,24 @@ class FileMemoryBackend(MemoryBackend):
             created_at=entry.created_at,
             updated_at=entry.updated_at,
         )
-        self.plugins.run_observers("memory.after_read", memory_entry, metadata={"scope": entry.scope, "kind": entry.kind})
+        self._plugins.run_observers("memory.after_read", memory_entry, metadata={"scope": entry.scope, "kind": entry.kind})
         return memory_entry
 
     def summarize(self, scope: str, *, limit: int = 20) -> str:
         entries = self.list_entries(scope=scope, limit=limit)
         summary = _summarize_entries(scope, entries)
-        self.plugins.run_observers("memory.after_summarize", summary, metadata={"scope": scope, "entry_count": len(entries)})
+        self._plugins.run_observers("memory.after_summarize", summary, metadata={"scope": scope, "entry_count": len(entries)})
         return summary
 
     def compact(self, scope: str, *, limit: int = 50) -> MemorySummary:
         entries = self.list_entries(scope=scope, limit=limit)
         summary_text = _summarize_entries(scope, entries)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        summary_dir = project_artifacts_dir(self.project_path) / "memory" / scope
+        summary_dir = self._artifacts_root / "memory" / scope
         summary_dir.mkdir(parents=True, exist_ok=True)
         summary_path = summary_dir / f"{stamp}.md"
         summary_path.write_text(summary_text)
-        record = self.store.record_memory_summary(
+        record = self._state_store.record_memory_summary(
             scope=scope,
             summary_text=summary_text,
             summary_path=str(summary_path),
@@ -170,7 +252,7 @@ class FileMemoryBackend(MemoryBackend):
             entry_count=record.entry_count,
             created_at=record.created_at,
         )
-        self.plugins.run_observers("memory.after_compact", summary, metadata={"scope": scope, "entry_count": len(entries)})
+        self._plugins.run_observers("memory.after_compact", summary, metadata={"scope": scope, "entry_count": len(entries)})
         return summary
 
 
