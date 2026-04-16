@@ -1,0 +1,11 @@
+api_version = "1"
+name = "default_recovery_policy"
+kind = "recovery_policy"
+version = "0.1.0"
+entrypoint = "plugin.py:plugin"
+description = "Built-in default recovery policy (health classification + escalation ladder)."
+
+[[capabilities]]
+kind = "recovery_policy"
+name = "default"
+requires_api = ">=1,<2"

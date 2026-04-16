@@ -3,6 +3,11 @@
 Wires together signal collection, health classification, intervention
 escalation, checkpoint recording, and capacity management into a
 single supervision cycle.
+
+The classification + escalation decision-making lives in
+:mod:`pollypm.recovery` — this module re-exports the canonical types for
+back-compat and owns the per-cycle plumbing (``run_heartbeat_cycle``,
+``assess_project_state``).
 """
 
 from __future__ import annotations
@@ -10,78 +15,39 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import Any
 
 from pollypm.capacity import (
-    CapacityState,
-    FAILOVER_TRIGGERS,
     can_failover_session,
     probe_capacity,
 )
 from pollypm.models import PollyPMConfig
+from pollypm.recovery.base import (
+    INTERVENTION_LADDER,
+    InterventionAction,
+    InterventionHistoryEntry,
+    SessionHealth,
+    SessionSignals,
+)
+from pollypm.recovery.default import DefaultRecoveryPolicy
 from pollypm.storage.state import StateStore
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Health classifications
-# ---------------------------------------------------------------------------
-
-
-class SessionHealth(StrEnum):
-    ACTIVE = "active"
-    IDLE = "idle"
-    STUCK = "stuck"
-    LOOPING = "looping"
-    EXITED = "exited"
-    ERROR = "error"
-    BLOCKED_NO_CAPACITY = "blocked_no_capacity"
-    AUTH_BROKEN = "auth_broken"
-    WAITING_ON_USER = "waiting_on_user"
-    HEALTHY = "healthy"
-
-
-# Intervention escalation ladder
-INTERVENTION_LADDER = (
-    "nudge",       # Send a reminder message to idle sessions
-    "reset",       # Reset the session state
-    "relaunch",    # Kill and relaunch the session
-    "failover",    # Switch to a different account
-    "escalate",    # Alert the operator for manual intervention
-)
-
-
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
-
-@dataclass(slots=True)
-class SessionSignals:
-    """Collected signals for a single session."""
-
-    session_name: str
-    window_present: bool = True
-    pane_dead: bool = False
-    output_stale: bool = False
-    snapshot_repeated: int = 0  # Consecutive identical snapshots
-    auth_failure: bool = False
-    has_transcript_delta: bool = False
-    capacity_state: CapacityState = CapacityState.UNKNOWN
-    last_verdict: str = ""
-    idle_cycles: int = 0
-
-
-@dataclass(slots=True)
-class InterventionAction:
-    """An intervention to take for a session."""
-
-    session_name: str
-    action: str  # One of INTERVENTION_LADDER
-    reason: str
-    details: dict[str, Any] = field(default_factory=dict)
+# Re-exports kept for back-compat. New code should import from
+# ``pollypm.recovery``.
+__all__ = [
+    "HeartbeatCycleResult",
+    "INTERVENTION_LADDER",
+    "InterventionAction",
+    "SessionHealth",
+    "SessionSignals",
+    "assess_project_state",
+    "classify_session_health",
+    "run_heartbeat_cycle",
+    "select_intervention",
+]
 
 
 @dataclass(slots=True)
@@ -98,47 +64,21 @@ class HeartbeatCycleResult:
 
 
 # ---------------------------------------------------------------------------
-# Health classification
+# Back-compat function facade over the default policy
 # ---------------------------------------------------------------------------
+
+
+_DEFAULT_POLICY = DefaultRecoveryPolicy()
 
 
 def classify_session_health(signals: SessionSignals) -> SessionHealth:
-    """Classify session health from collected signals."""
-    if not signals.window_present:
-        return SessionHealth.EXITED
+    """Classify session health from collected signals.
 
-    if signals.pane_dead:
-        return SessionHealth.EXITED
-
-    if signals.auth_failure:
-        return SessionHealth.AUTH_BROKEN
-
-    if signals.capacity_state in FAILOVER_TRIGGERS:
-        return SessionHealth.BLOCKED_NO_CAPACITY
-
-    # Check if the session was classified as "blocked" (waiting on input)
-    # by the heuristic classifier in _process_session
-    if signals.last_verdict == "blocked":
-        return SessionHealth.WAITING_ON_USER
-
-    if signals.snapshot_repeated >= 3:
-        return SessionHealth.LOOPING
-
-    if signals.output_stale and signals.idle_cycles >= 3:
-        return SessionHealth.STUCK
-
-    if signals.output_stale:
-        return SessionHealth.IDLE
-
-    if signals.has_transcript_delta:
-        return SessionHealth.ACTIVE
-
-    return SessionHealth.HEALTHY
-
-
-# ---------------------------------------------------------------------------
-# Intervention selection
-# ---------------------------------------------------------------------------
+    Thin wrapper over :meth:`DefaultRecoveryPolicy.classify` kept for
+    back-compat with call sites that predate the plugin. New code should
+    resolve a :class:`RecoveryPolicy` via the plugin host.
+    """
+    return _DEFAULT_POLICY.classify(signals)
 
 
 def select_intervention(
@@ -147,107 +87,17 @@ def select_intervention(
     *,
     previous_interventions: int = 0,
 ) -> InterventionAction | None:
-    """Select the appropriate intervention based on health and escalation state.
+    """Select the appropriate intervention based on health and history.
 
-    Follows the intervention ladder:
-    nudge → reset → relaunch → failover → escalate
+    Thin wrapper over :meth:`DefaultRecoveryPolicy.select_intervention`
+    that accepts the legacy ``previous_interventions`` count. New code
+    should pass a full :class:`InterventionHistoryEntry` list to the
+    policy directly.
     """
-    if health in (SessionHealth.ACTIVE, SessionHealth.HEALTHY):
-        return None
-
-    if health == SessionHealth.WAITING_ON_USER:
-        # Workers asking "should I continue?" should be pushed forward.
-        # The heartbeat triage will use Haiku to decide the right action.
-        # The operator can legitimately sit waiting for inbox/user direction.
-        if signals.session_name == "operator":
-            return None
-        return InterventionAction(
-            session_name=signals.session_name,
-            action="nudge",
-            reason="Session is waiting — triage will decide whether to push forward",
-        )
-
-    if health == SessionHealth.IDLE:
-        # The operator being idle at the prompt is normal when there is no
-        # queue to process. Avoid escalating prompt-idle control lanes.
-        if signals.session_name == "operator":
-            return None
-        if previous_interventions == 0:
-            return InterventionAction(
-                session_name=signals.session_name,
-                action="nudge",
-                reason="Session has been idle, sending reminder",
-            )
-        elif previous_interventions == 1:
-            return InterventionAction(
-                session_name=signals.session_name,
-                action="reset",
-                reason="Session remains idle after nudge",
-            )
-        else:
-            return InterventionAction(
-                session_name=signals.session_name,
-                action="escalate",
-                reason="Session persistently idle after multiple interventions",
-            )
-
-    if health == SessionHealth.STUCK:
-        if previous_interventions < 2:
-            return InterventionAction(
-                session_name=signals.session_name,
-                action="reset",
-                reason="Session appears stuck with no progress",
-            )
-        else:
-            return InterventionAction(
-                session_name=signals.session_name,
-                action="relaunch",
-                reason="Session stuck after reset attempts",
-            )
-
-    if health == SessionHealth.LOOPING:
-        if previous_interventions < 2:
-            return InterventionAction(
-                session_name=signals.session_name,
-                action="reset",
-                reason="Session is producing repeated identical output",
-            )
-        else:
-            return InterventionAction(
-                session_name=signals.session_name,
-                action="relaunch",
-                reason="Session looping after reset attempts",
-            )
-
-    if health == SessionHealth.EXITED:
-        return InterventionAction(
-            session_name=signals.session_name,
-            action="relaunch",
-            reason="Session has exited unexpectedly",
-        )
-
-    if health == SessionHealth.AUTH_BROKEN:
-        return InterventionAction(
-            session_name=signals.session_name,
-            action="failover",
-            reason="Authentication failure detected",
-        )
-
-    if health == SessionHealth.BLOCKED_NO_CAPACITY:
-        return InterventionAction(
-            session_name=signals.session_name,
-            action="failover",
-            reason=f"Account capacity: {signals.capacity_state}",
-        )
-
-    if health == SessionHealth.ERROR:
-        return InterventionAction(
-            session_name=signals.session_name,
-            action="escalate",
-            reason="Session in error state",
-        )
-
-    return None
+    history = [
+        InterventionHistoryEntry(action="") for _ in range(previous_interventions)
+    ]
+    return _DEFAULT_POLICY.select_intervention(health, signals, history)
 
 
 # ---------------------------------------------------------------------------

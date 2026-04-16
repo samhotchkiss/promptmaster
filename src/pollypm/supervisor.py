@@ -144,6 +144,8 @@ class Supervisor:
         self._cached_launches: list[SessionLaunchSpec] | None = None
         # Lazy-init session service to avoid circular imports at construction
         self._session_service = None
+        # Lazy-init recovery policy (resolved via plugin host)
+        self._recovery_policy = None
         # Register ourselves as a subsystem so CoreRail.start()/stop() can
         # drive our lifecycle. Readonly supervisors (used by the cockpit
         # for passive inspection) don't register — they never drive boot.
@@ -197,6 +199,27 @@ class Supervisor:
             from pollypm.session_services.tmux import TmuxSessionService
             self._session_service = TmuxSessionService(config=self.config, store=self.store)
         return self._session_service
+
+    @property
+    def recovery_policy(self):
+        """The recovery policy decides classification + intervention.
+
+        Resolved once via the plugin host. Applying interventions (the
+        tmux / state mutations) stays on the Supervisor — the policy is
+        a pure decision maker.
+        """
+        if self._recovery_policy is None:
+            try:
+                from pollypm.recovery import get_recovery_policy
+                self._recovery_policy = get_recovery_policy(
+                    "default", root_dir=self.config.project.root_dir,
+                )
+            except Exception:  # noqa: BLE001
+                # Plugin host unavailable (tests, partial boot) — fall back
+                # to an in-process default so classification still works.
+                from pollypm.recovery.default import DefaultRecoveryPolicy
+                self._recovery_policy = DefaultRecoveryPolicy()
+        return self._recovery_policy
 
     @property
     def tmux(self):
@@ -1777,6 +1800,54 @@ class Supervisor:
     # Failure types where the session is gone — no live interaction to protect.
     _DEAD_SESSION_FAILURES = frozenset({"missing_window", "pane_dead", "shell_returned"})
 
+    # Map detected failure types to the raw signals the RecoveryPolicy
+    # expects. Keeps the policy decoupled from Supervisor's vocabulary.
+    _FAILURE_TO_SIGNAL_KW = {
+        "missing_window": {"window_present": False},
+        "pane_dead": {"pane_dead": True},
+        "shell_returned": {"pane_dead": True},
+        "auth_broken": {"auth_failure": True},
+    }
+
+    def _policy_recommendation(
+        self,
+        launch: SessionLaunchSpec,
+        failure_type: str,
+    ) -> object | None:
+        """Ask the recovery policy for an intervention given ``failure_type``.
+
+        Returns ``None`` when the policy declines (e.g. already healthy).
+        Never raises — a broken policy falls back to no-recommendation so
+        the existing apply path still runs.
+        """
+        try:
+            from pollypm.capacity import CapacityState
+            from pollypm.recovery.base import (
+                InterventionHistoryEntry,
+                SessionSignals,
+            )
+
+            signal_kwargs: dict[str, object] = {
+                "session_name": launch.session.name,
+            }
+            signal_kwargs.update(self._FAILURE_TO_SIGNAL_KW.get(failure_type, {}))
+            if failure_type in ("capacity_exhausted", "capacity_low"):
+                # Both map to a failover-triggering state — capacity_low
+                # proactively rolls over before hitting exhaustion.
+                signal_kwargs["capacity_state"] = CapacityState.EXHAUSTED
+            signals = SessionSignals(**signal_kwargs)  # type: ignore[arg-type]
+
+            runtime = self.store.get_session_runtime(launch.session.name)
+            previous = runtime.recovery_attempts if runtime else 0
+            history = [
+                InterventionHistoryEntry(action="") for _ in range(previous)
+            ]
+
+            health = self.recovery_policy.classify(signals)
+            return self.recovery_policy.select_intervention(health, signals, history)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _maybe_recover_session(self, launch: SessionLaunchSpec, *, failure_type: str, failure_message: str) -> None:
         return self.maybe_recover_session(launch, failure_type=failure_type, failure_message=failure_message)
 
@@ -1787,7 +1858,27 @@ class Supervisor:
         ``"pane_dead"``, ``"auth_broken"``), and a human-readable
         ``failure_message``. Output: ``None`` — side effects include alert
         upserts, lease handling, and session restarts per recovery policy.
+
+        The decision side (what action to take) runs through the pluggable
+        :class:`pollypm.recovery.RecoveryPolicy`. The apply side (which
+        tmux / state mutations happen) lives in this method and is slated
+        to move to a SessionRecovery subsystem in Step 8 of the Supervisor
+        decomposition.
         """
+        # Consult the recovery policy for a canonical intervention
+        # recommendation. The apply side below currently only branches on
+        # ``failure_type`` — Step 8 will fold these into intervention-kind
+        # dispatch. Recording the recommendation now means events/alerts
+        # carry the policy-selected action kind.
+        recommendation = self._policy_recommendation(launch, failure_type)
+        if recommendation is not None:
+            self.store.record_event(
+                launch.session.name,
+                "recovery_recommendation",
+                f"policy={self.recovery_policy.name} action={recommendation.action} "
+                f"reason={recommendation.reason[:120]}",
+            )
+
         lease = self.store.get_lease(launch.session.name)
         if lease is not None and lease.owner != "pollypm":
             if failure_type in self._DEAD_SESSION_FAILURES:

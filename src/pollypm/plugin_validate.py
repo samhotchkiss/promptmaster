@@ -240,6 +240,36 @@ def _validate_transcript_source_factory(name: str, factory: object) -> tuple[lis
     return checks, errors
 
 
+def _validate_recovery_policy_factory(name: str, factory: object) -> tuple[list[str], list[str]]:
+    """Validate a recovery_policy factory produces a working policy."""
+    checks: list[str] = []
+    errors: list[str] = []
+
+    if not callable(factory):
+        errors.append(f"Recovery policy factory '{name}' is not callable")
+        return checks, errors
+
+    checks.append(f"Recovery policy factory '{name}' is callable")
+
+    try:
+        instance = factory()
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"Recovery policy factory '{name}' raised on instantiation: {exc}")
+        return checks, errors
+
+    checks.append(f"Recovery policy factory '{name}' instantiated successfully")
+
+    for method_name in ("classify", "select_intervention"):
+        if not hasattr(instance, method_name):
+            errors.append(f"Recovery policy '{name}' missing required method '{method_name}'")
+        elif not callable(getattr(instance, method_name)):
+            errors.append(f"Recovery policy '{name}' '{method_name}' is not callable")
+        else:
+            checks.append(f"Recovery policy '{name}' has '{method_name}' method")
+
+    return checks, errors
+
+
 def _validate_observers(plugin: PollyPMPlugin) -> tuple[list[str], list[str]]:
     """Validate observer hooks are callable."""
     checks: list[str] = []
@@ -324,6 +354,11 @@ def validate_plugin(plugin: PollyPMPlugin) -> ValidationResult:
 
     for name, factory in plugin.transcript_sources.items():
         checks, errors = _validate_transcript_source_factory(name, factory)
+        result.checks.extend(checks)
+        result.errors.extend(errors)
+
+    for name, factory in plugin.recovery_policies.items():
+        checks, errors = _validate_recovery_policy_factory(name, factory)
         result.checks.extend(checks)
         result.errors.extend(errors)
 
