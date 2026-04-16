@@ -167,7 +167,7 @@ class PollyPMService:
 
     def raise_alert(self, alert_type: str, session_name: str, message: str, *, severity: str = "warn") -> object:
         supervisor = self.load_supervisor()
-        supervisor._require_session(session_name)
+        supervisor.require_session(session_name)
         supervisor.store.upsert_alert(session_name, alert_type, severity, message)
         alert = next(
             (
@@ -199,7 +199,7 @@ class PollyPMService:
 
     def set_session_status(self, session_name: str, status: str, *, reason: str = "") -> object:
         supervisor = self.load_supervisor()
-        supervisor._require_session(session_name)
+        supervisor.require_session(session_name)
         supervisor.store.upsert_session_runtime(
             session_name=session_name,
             status=status,
@@ -213,8 +213,8 @@ class PollyPMService:
 
     def record_heartbeat(self, session_name: str, payload: dict[str, object]) -> object:
         supervisor = self.load_supervisor()
-        supervisor._require_session(session_name)
-        launch = supervisor._launch_by_session(session_name)
+        supervisor.require_session(session_name)
+        launch = supervisor.launch_by_session(session_name)
         supervisor.store.record_heartbeat(
             session_name=session_name,
             tmux_window=str(payload.get("tmux_window", launch.window_name)),

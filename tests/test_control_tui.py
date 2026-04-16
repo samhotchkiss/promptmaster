@@ -226,10 +226,10 @@ def test_session_detail_uses_role_specific_tmux_session(tmp_path: Path) -> None:
         def plan_launches(self) -> list[SessionLaunchSpec]:
             return [launch]
 
-        def _tmux_session_for_launch(self, _launch: SessionLaunchSpec) -> str:
+        def tmux_session_for_launch(self, _launch: SessionLaunchSpec) -> str:
             return "pollypm-storage-closet"
 
-        def _window_map(self) -> dict[str, FakeWindow]:
+        def window_map(self) -> dict[str, FakeWindow]:
             return {"pm-heartbeat": FakeWindow()}
 
     supervisor = FakeSupervisor()

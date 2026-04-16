@@ -96,7 +96,9 @@ def _sanitize_provider_args(args: list[str], provider: ProviderKind) -> list[str
 
 class Supervisor:
     _CONTROL_ROLES = {"heartbeat-supervisor", "operator-pm", "triage", "reviewer"}
-    _CONSOLE_WINDOW = "PollyPM"
+    #: Name of the PollyPM console/cockpit window inside a tmux session.
+    CONSOLE_WINDOW = "PollyPM"
+    _CONSOLE_WINDOW = CONSOLE_WINDOW  # deprecated alias — use CONSOLE_WINDOW
     _STORAGE_CLOSET_SESSION_SUFFIX = "-storage-closet"
     _CONTROL_HOMES_DIR = "control-homes"
     _RECOVERY_WINDOW = timedelta(minutes=30)
@@ -149,7 +151,13 @@ class Supervisor:
         """Allow external code (e.g. dashboard_data) to inject a TmuxClient."""
         self.session_service.tmux = value
 
-    def _effective_session(self, session: SessionConfig, controller_account: str | None = None) -> SessionConfig:
+    def effective_session(self, session: SessionConfig, controller_account: str | None = None) -> SessionConfig:
+        """Return ``session`` with runtime account overrides applied.
+
+        Inputs: the declared ``SessionConfig`` and an optional ``controller_account``
+        that overrides control-role sessions. Output: a (possibly new)
+        ``SessionConfig`` reflecting the effective account/provider/args/prompt.
+        """
         effective = session
         try:
             runtime = self.store.get_session_runtime(session.name)
@@ -219,6 +227,9 @@ class Supervisor:
                 effective = replace(effective, args=_sanitize_provider_args(effective.args, account.provider))
         return effective
 
+    def _effective_session(self, session: SessionConfig, controller_account: str | None = None) -> SessionConfig:
+        return self.effective_session(session, controller_account)
+
     def _default_agent_profile(self, session: SessionConfig) -> str | None:
         if session.role == "heartbeat-supervisor":
             return "heartbeat"
@@ -252,8 +263,16 @@ class Supervisor:
     def _tmux_session_for_role(self, role: str) -> str:
         return self.storage_closet_session_name()
 
-    def _tmux_session_for_launch(self, launch: SessionLaunchSpec) -> str:
+    def tmux_session_for_launch(self, launch: SessionLaunchSpec) -> str:
+        """Return the tmux session name that should host ``launch``.
+
+        Input: a ``SessionLaunchSpec``. Output: the tmux session name string
+        where the launch's window lives (typically the storage-closet session).
+        """
         return self._tmux_session_for_role(launch.session.role)
+
+    def _tmux_session_for_launch(self, launch: SessionLaunchSpec) -> str:
+        return self.tmux_session_for_launch(launch)
 
     def _tmux_session_for_session(self, session_name: str) -> str:
         launch = self._launch_by_session(session_name)
@@ -265,6 +284,14 @@ class Supervisor:
         if storage not in names:
             names.append(storage)
         return names
+
+    def invalidate_launch_cache(self) -> None:
+        """Drop the cached :meth:`plan_launches` result.
+
+        Inputs: none. Output: ``None`` — forces the next :meth:`plan_launches`
+        call (with no controller override) to recompute from config.
+        """
+        self._cached_launches = None
 
     def plan_launches(self, *, controller_account: str | None = None) -> list[SessionLaunchSpec]:
         # Cache launches for the default (no controller override) case.
@@ -563,7 +590,13 @@ class Supervisor:
             assignments.setdefault(launch.session.project, []).append(launch)
         return assignments
 
-    def _window_map(self) -> dict[str, TmuxWindow]:
+    def window_map(self) -> dict[str, TmuxWindow]:
+        """Return ``{window_name: TmuxWindow}`` for every PollyPM-owned window.
+
+        Inputs: none (reads live tmux state plus the cockpit mount override).
+        Output: a dict keyed by window name containing ``TmuxWindow`` entries
+        for the project and storage-closet sessions, plus any mounted window.
+        """
         our_sessions = set(self._all_tmux_session_names())
         windows: dict[str, TmuxWindow] = {}
         for window in self.session_service.tmux.list_all_windows():
@@ -573,6 +606,9 @@ class Supervisor:
         if mounted is not None:
             windows[mounted.name] = mounted
         return windows
+
+    def _window_map(self) -> dict[str, TmuxWindow]:
+        return self.window_map()
 
     def _mounted_window_override(self) -> TmuxWindow | None:
         state_path = self.config.project.base_dir / "cockpit_state.json"
@@ -1074,7 +1110,13 @@ class Supervisor:
         )
         return backend.run_due(self)
 
-    def _write_snapshot(self, window: TmuxWindow, snapshot_lines: int) -> tuple[Path, str]:
+    def write_snapshot(self, window: TmuxWindow, snapshot_lines: int) -> tuple[Path, str]:
+        """Capture ``window`` and persist its tail to a snapshot file.
+
+        Inputs: a ``TmuxWindow`` and the number of trailing lines to capture.
+        Output: a ``(snapshot_path, content)`` tuple — the file on disk and the
+        captured text.
+        """
         target = window.pane_id or f"{window.session}:{window.name}"
         content = self.session_service.tmux.capture_pane(target, lines=snapshot_lines)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -1082,6 +1124,9 @@ class Supervisor:
         snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         snapshot_path.write_text(content)
         return snapshot_path, content
+
+    def _write_snapshot(self, window: TmuxWindow, snapshot_lines: int) -> tuple[Path, str]:
+        return self.write_snapshot(window, snapshot_lines)
 
     def _update_alerts(
         self,
@@ -1671,6 +1716,16 @@ class Supervisor:
     _DEAD_SESSION_FAILURES = frozenset({"missing_window", "pane_dead", "shell_returned"})
 
     def _maybe_recover_session(self, launch: SessionLaunchSpec, *, failure_type: str, failure_message: str) -> None:
+        return self.maybe_recover_session(launch, failure_type=failure_type, failure_message=failure_message)
+
+    def maybe_recover_session(self, launch: SessionLaunchSpec, *, failure_type: str, failure_message: str) -> None:
+        """Attempt automatic recovery for ``launch`` given a detected failure.
+
+        Inputs: the ``SessionLaunchSpec``, a ``failure_type`` label (e.g.
+        ``"pane_dead"``, ``"auth_broken"``), and a human-readable
+        ``failure_message``. Output: ``None`` — side effects include alert
+        upserts, lease handling, and session restarts per recovery policy.
+        """
         lease = self.store.get_lease(launch.session.name)
         if lease is not None and lease.owner != "pollypm":
             if failure_type in self._DEAD_SESSION_FAILURES:
@@ -1790,6 +1845,16 @@ class Supervisor:
         )
 
     def _restart_session(self, session_name: str, account_name: str, *, failure_type: str) -> None:
+        return self.restart_session(session_name, account_name, failure_type=failure_type)
+
+    def restart_session(self, session_name: str, account_name: str, *, failure_type: str) -> None:
+        """Restart ``session_name`` on ``account_name`` after a failure.
+
+        Inputs: the session name, the target account to switch to, and the
+        ``failure_type`` that triggered the restart. Output: ``None`` — tears
+        down the existing window, re-launches under the chosen account, and
+        updates runtime/alert state.
+        """
         launch = self._launch_by_session(session_name)
         self._assert_lease_available(
             session_name,
@@ -1887,14 +1952,31 @@ class Supervisor:
         ]:
             self.store.clear_alert(session_name, alert_type)
 
-    def _launch_by_session(self, session_name: str) -> SessionLaunchSpec:
+    def launch_by_session(self, session_name: str) -> SessionLaunchSpec:
+        """Return the ``SessionLaunchSpec`` for ``session_name``.
+
+        Input: the declared session name. Output: the matching
+        ``SessionLaunchSpec`` from :meth:`plan_launches`. Raises ``KeyError``
+        if no session with that name exists.
+        """
         for launch in self.plan_launches():
             if launch.session.name == session_name:
                 return launch
         raise KeyError(f"Unknown session: {session_name}")
 
+    def _launch_by_session(self, session_name: str) -> SessionLaunchSpec:
+        return self.launch_by_session(session_name)
+
+    def require_session(self, session_name: str) -> None:
+        """Raise ``KeyError`` if ``session_name`` is not a planned session.
+
+        Input: a session name. Output: ``None`` on success; used as a guard
+        before operating on a session.
+        """
+        self.launch_by_session(session_name)
+
     def _require_session(self, session_name: str) -> None:
-        self._launch_by_session(session_name)
+        return self.require_session(session_name)
 
     def launch_session(
         self,
@@ -2031,13 +2113,17 @@ class Supervisor:
         root = shlex.quote(str(self.config.project.root_dir))
         return f"cd {root} && uv run pm cockpit"
 
-    def _console_command(self) -> str:
-        """Shell command for the cockpit rail pane — just a login shell.
+    def console_command(self) -> str:
+        """Return the shell command for the cockpit rail pane.
 
-        The TUI is launched separately AFTER the layout split is done,
-        to avoid SIGWINCH crashes during the initial split.
+        Inputs: none. Output: a shell command string (currently ``"bash -l"``)
+        used as the initial rail-pane process. The TUI is launched separately
+        after the layout split to avoid SIGWINCH crashes.
         """
         return "bash -l"
+
+    def _console_command(self) -> str:
+        return self.console_command()
 
     def start_cockpit_tui(self, session_name: str) -> None:
         """Send the cockpit TUI command to the rail pane with a restart loop."""
@@ -2164,6 +2250,21 @@ class Supervisor:
         target: str,
         on_status: Callable[[str], None] | None = None,
     ) -> None:
+        return self.stabilize_launch(launch, target, on_status=on_status)
+
+    def stabilize_launch(
+        self,
+        launch: SessionLaunchSpec,
+        target: str,
+        on_status: Callable[[str], None] | None = None,
+    ) -> None:
+        """Wait for ``launch`` to reach a ready state at tmux ``target``.
+
+        Inputs: the ``SessionLaunchSpec``, the ``"session:window"`` target
+        string, and an optional ``on_status`` callback for progress messages.
+        Output: ``None`` — blocks until provider-specific stabilization
+        succeeds, then sends initial input if the launch is fresh.
+        """
         name = launch.session.name
 
         def _prefixed_status(msg: str) -> None:

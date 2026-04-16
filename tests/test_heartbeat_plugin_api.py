@@ -192,8 +192,8 @@ def test_supervisor_heartbeat_api_persists_cursor_and_reads_incremental_delta(tm
         pane_current_path=str(tmp_path),
         pane_dead=False,
     )
-    monkeypatch.setattr(supervisor, "_window_map", lambda: {launch.window_name: window})
-    monkeypatch.setattr(supervisor, "_write_snapshot", lambda _window, _lines: (snapshot_path, "snapshot\n"))
+    monkeypatch.setattr(supervisor, "window_map", lambda: {launch.window_name: window})
+    monkeypatch.setattr(supervisor, "write_snapshot", lambda _window, _lines: (snapshot_path, "snapshot\n"))
 
     api = SupervisorHeartbeatAPI(supervisor)
     context = api.list_sessions()[0]
@@ -254,7 +254,7 @@ def test_supervisor_heartbeat_api_lists_unmanaged_windows(tmp_path: Path, monkey
     )
     monkeypatch.setattr(
         supervisor,
-        "_window_map",
+        "window_map",
         lambda: {
             managed_window.name: managed_window,
             console_window.name: console_window,

@@ -636,8 +636,8 @@ class PollyPMApp(App[None]):
         tmux_exists = supervisor.tmux.has_session(session_name)
         controller = supervisor.config.pollypm.controller_account
         controller_label = supervisor.config.accounts[controller].email or controller
-        operator_session = supervisor._effective_session(supervisor.config.sessions["operator"])
-        heartbeat_session = supervisor._effective_session(supervisor.config.sessions["heartbeat"])
+        operator_session = supervisor.effective_session(supervisor.config.sessions["operator"])
+        heartbeat_session = supervisor.effective_session(supervisor.config.sessions["heartbeat"])
         operator_label = supervisor.config.accounts[operator_session.account].email or operator_session.account
         heartbeat_label = supervisor.config.accounts[heartbeat_session.account].email or heartbeat_session.account
         failover = ", ".join(supervisor.config.pollypm.failover_accounts) or "none"
@@ -735,8 +735,8 @@ class PollyPMApp(App[None]):
             left,
             Columns(metrics, expand=True, equal=True),
         )
-        operator_session = supervisor._effective_session(supervisor.config.sessions["operator"])
-        heartbeat_session = supervisor._effective_session(supervisor.config.sessions["heartbeat"])
+        operator_session = supervisor.effective_session(supervisor.config.sessions["operator"])
+        heartbeat_session = supervisor.effective_session(supervisor.config.sessions["heartbeat"])
         operator_label = supervisor.config.accounts[operator_session.account].email or operator_session.account
         heartbeat_label = supervisor.config.accounts[heartbeat_session.account].email or heartbeat_session.account
         return Panel(
@@ -1212,10 +1212,10 @@ class PollyPMApp(App[None]):
             launch = next(item for item in supervisor.plan_launches() if item.session.name == session_name)
         except StopIteration:
             return "Unknown session."
-        tmux_session = supervisor._tmux_session_for_launch(launch)
+        tmux_session = supervisor.tmux_session_for_launch(launch)
         if not supervisor.tmux.has_session(tmux_session):
             return f"tmux session {tmux_session} is not running."
-        window_map = supervisor._window_map()
+        window_map = supervisor.window_map()
         window = window_map.get(launch.window_name)
         if window is None:
             return "Window is not running."

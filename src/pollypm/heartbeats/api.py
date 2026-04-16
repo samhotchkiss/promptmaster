@@ -29,7 +29,7 @@ class SupervisorHeartbeatAPI:
         expected_window_names = {launch.window_name for launch in self.supervisor.plan_launches()}
         expected_window_names.add(self.supervisor.console_window_name())
         unmanaged: list[HeartbeatUnmanagedWindow] = []
-        for window in self.supervisor._window_map().values():
+        for window in self.supervisor.window_map().values():
             if window.name in expected_window_names:
                 continue
             # Per-task worker sessions (task-<project>-<number>) are managed
@@ -91,7 +91,7 @@ class SupervisorHeartbeatAPI:
     def record_checkpoint(self, context: HeartbeatSessionContext, *, alerts: list[str]) -> None:
         if not context.window_present or context.snapshot_path is None:
             return
-        launch = self.supervisor._launch_by_session(context.session_name)
+        launch = self.supervisor.launch_by_session(context.session_name)
         artifact = write_mechanical_checkpoint(
             self.supervisor.config,
             launch,
@@ -155,8 +155,8 @@ class SupervisorHeartbeatAPI:
         return [item.snapshot_hash for item in self.supervisor.store.recent_heartbeats(session_name, limit=limit)]
 
     def recover_session(self, session_name: str, *, failure_type: str, message: str) -> None:
-        launch = self.supervisor._launch_by_session(session_name)
-        self.supervisor._maybe_recover_session(launch, failure_type=failure_type, failure_message=message)
+        launch = self.supervisor.launch_by_session(session_name)
+        self.supervisor.maybe_recover_session(launch, failure_type=failure_type, failure_message=message)
 
     def send_session_message(self, session_name: str, text: str, *, owner: str = "heartbeat") -> None:
         try:
@@ -201,7 +201,7 @@ class SupervisorHeartbeatAPI:
             pass
 
     def _build_contexts(self) -> list[HeartbeatSessionContext]:
-        window_map = self.supervisor._window_map()
+        window_map = self.supervisor.window_map()
         contexts: list[HeartbeatSessionContext] = []
         for launch in self.supervisor.plan_launches():
             cursor = self.get_cursor(launch.session.name)
@@ -223,7 +223,7 @@ class SupervisorHeartbeatAPI:
                 pane_command = window.pane_current_command
                 pane_dead = window.pane_dead
                 try:
-                    raw_snapshot_path, pane_text = self.supervisor._write_snapshot(window, self.snapshot_lines)
+                    raw_snapshot_path, pane_text = self.supervisor.write_snapshot(window, self.snapshot_lines)
                 except Exception:
                     window = None
                     pane_text = ""
@@ -239,7 +239,7 @@ class SupervisorHeartbeatAPI:
                     provider=launch.session.provider.value,
                     account_name=launch.account.name,
                     cwd=str(launch.session.cwd),
-                    tmux_session=self.supervisor._tmux_session_for_launch(launch),
+                    tmux_session=self.supervisor.tmux_session_for_launch(launch),
                     window_name=launch.window_name,
                     source_path=str(source_path),
                     source_bytes=source_bytes,
