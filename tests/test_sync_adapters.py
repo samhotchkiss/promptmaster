@@ -535,3 +535,139 @@ class TestMigration:
         title, desc = _parse_content("no heading here")
         assert title == ""
         assert desc == "no heading here"
+
+
+# ---------------------------------------------------------------------------
+# sync_status / trigger_sync — SQLiteWorkService implementation of Protocol
+# ---------------------------------------------------------------------------
+
+
+class _RecordingAdapter:
+    """Simple adapter that records every call and can be told to fail."""
+
+    def __init__(self, name: str = "rec", fail: bool = False) -> None:
+        self.name = name
+        self.fail = fail
+        self.creates: list[str] = []
+        self.transitions: list[tuple[str, str, str]] = []
+        self.updates: list[tuple[str, list[str]]] = []
+
+    def on_create(self, task):
+        if self.fail:
+            raise RuntimeError(f"{self.name}: boom")
+        self.creates.append(task.task_id)
+
+    def on_transition(self, task, old_status, new_status):
+        self.transitions.append((task.task_id, old_status, new_status))
+
+    def on_update(self, task, changed_fields):
+        self.updates.append((task.task_id, list(changed_fields)))
+
+
+class TestSyncStatus:
+    def test_sync_status_unknown_task_raises(self, svc):
+        from pollypm.work.sqlite_service import TaskNotFoundError
+
+        with pytest.raises(TaskNotFoundError):
+            svc.sync_status("proj/999")
+
+    def test_sync_status_no_adapters(self, svc):
+        """A task with no sync adapters returns an empty dict."""
+        task = _make_task(svc)
+        assert svc.sync_status(task.task_id) == {}
+
+    def test_sync_status_lists_registered_adapters_with_no_row(self, tmp_path):
+        """Adapters that have never synced show as attempts=0 entries."""
+        mgr = SyncManager()
+        mgr.register(_RecordingAdapter(name="rec"))
+        svc = SQLiteWorkService(db_path=tmp_path / "work.db", sync_manager=mgr)
+        task = _make_task(svc)
+
+        status = svc.sync_status(task.task_id)
+        assert "rec" in status
+        assert status["rec"]["attempts"] == 0
+        assert status["rec"]["last_synced_at"] is None
+        assert status["rec"]["last_error"] is None
+
+
+class TestTriggerSync:
+    def test_trigger_sync_all_tasks(self, tmp_path):
+        mgr = SyncManager()
+        ad = _RecordingAdapter(name="rec")
+        mgr.register(ad)
+        svc = SQLiteWorkService(db_path=tmp_path / "work.db", sync_manager=mgr)
+
+        t1 = _make_task(svc, title="A")
+        t2 = _make_task(svc, title="B")
+        # Clear creates accumulated by on_create during svc.create()
+        ad.creates.clear()
+
+        result = svc.trigger_sync()
+        assert result["synced"] == 2
+        # Adapter was called for both tasks
+        assert set(ad.creates) == {t1.task_id, t2.task_id}
+
+        # sync_status reflects the successful sync with attempts incremented
+        status = svc.sync_status(t1.task_id)
+        assert status["rec"]["attempts"] >= 1
+        assert status["rec"]["last_error"] is None
+        assert status["rec"]["last_synced_at"] is not None
+
+    def test_trigger_sync_specific_task(self, tmp_path):
+        mgr = SyncManager()
+        ad = _RecordingAdapter(name="rec")
+        mgr.register(ad)
+        svc = SQLiteWorkService(db_path=tmp_path / "work.db", sync_manager=mgr)
+
+        t1 = _make_task(svc, title="A")
+        _make_task(svc, title="B")
+        ad.creates.clear()
+
+        result = svc.trigger_sync(task_id=t1.task_id)
+        assert result["synced"] == 1
+        assert ad.creates == [t1.task_id]
+
+    def test_trigger_sync_adapter_filter(self, tmp_path):
+        mgr = SyncManager()
+        a1 = _RecordingAdapter(name="one")
+        a2 = _RecordingAdapter(name="two")
+        mgr.register(a1)
+        mgr.register(a2)
+        svc = SQLiteWorkService(db_path=tmp_path / "work.db", sync_manager=mgr)
+
+        t = _make_task(svc)
+        a1.creates.clear()
+        a2.creates.clear()
+
+        result = svc.trigger_sync(adapter="one")
+        assert result["synced"] == 1
+        assert a1.creates == [t.task_id]
+        assert a2.creates == []
+
+    def test_trigger_sync_records_errors(self, tmp_path):
+        mgr = SyncManager()
+        failing = _RecordingAdapter(name="boomer", fail=True)
+        mgr.register(failing)
+        svc = SQLiteWorkService(db_path=tmp_path / "work.db", sync_manager=mgr)
+        task = _make_task(svc)
+
+        result = svc.trigger_sync()
+        assert result["synced"] == 0
+        assert task.task_id in result["errors"]["boomer"]
+
+        # sync_status must surface the last_error and a bumped attempt count
+        status = svc.sync_status(task.task_id)
+        assert "boom" in status["boomer"]["last_error"]
+        assert status["boomer"]["attempts"] >= 1
+
+    def test_trigger_sync_unknown_task_raises(self, svc):
+        from pollypm.work.sqlite_service import TaskNotFoundError
+
+        with pytest.raises(TaskNotFoundError):
+            svc.trigger_sync(task_id="proj/999")
+
+    def test_trigger_sync_no_adapters(self, svc):
+        """Without a sync manager attached, returns an empty summary."""
+        _make_task(svc)
+        result = svc.trigger_sync()
+        assert result == {"synced": 0, "errors": {}}

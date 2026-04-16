@@ -223,6 +223,29 @@ def create_work_tables(conn: sqlite3.Connection) -> None:
 # ------------------------------------------------------------------
 _WORK_MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (1, "Initial schema — baseline version", []),
+    (
+        2,
+        "Add work_sync_state table for per-adapter per-task sync tracking",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS work_sync_state (
+                task_project TEXT NOT NULL,
+                task_number INTEGER NOT NULL,
+                adapter_name TEXT NOT NULL,
+                last_synced_at TEXT,
+                last_error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (task_project, task_number, adapter_name),
+                FOREIGN KEY (task_project, task_number)
+                    REFERENCES work_tasks(project, task_number)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_work_sync_state_adapter
+                ON work_sync_state(adapter_name)
+            """,
+        ],
+    ),
 ]
 
 
