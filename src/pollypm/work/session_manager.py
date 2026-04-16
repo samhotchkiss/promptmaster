@@ -14,6 +14,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from subprocess import CalledProcessError as _CalledProcessError
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,15 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     def teardown_worker(self, task_id: str) -> TeardownResult:
-        """Archive JSONL, record tokens, kill session, clean worktree. Idempotent."""
+        """Archive JSONL, record tokens, kill session, clean worktree.
+
+        Idempotent. Each phase (archive, kill window, remove worktree)
+        is isolated so a failure in one doesn't prevent the others from
+        running. ``ended_at`` is only stamped if the tmux window was
+        confirmed killed (or there was no pane to begin with); that way
+        a future pass can detect and re-attempt teardown of a session
+        whose pane we failed to kill.
+        """
         project, task_number = _parse_task_id(task_id)
 
         conn = self._get_conn()
@@ -342,46 +351,91 @@ class SessionManager:
         pane_id = row["pane_id"]
         worktree_path = Path(row["worktree_path"]) if row["worktree_path"] else None
 
-        # Archive JSONL
-        archive_path = None
+        # Phase 1: Archive JSONL. Don't let a copy/parse failure block
+        # the rest of teardown.
+        archive_path: Path | None = None
         input_tokens = 0
         output_tokens = 0
         jsonl_archived = False
         if worktree_path is not None:
-            archive_path, input_tokens, output_tokens = self._archive_jsonl(
-                task_id, worktree_path
-            )
-            jsonl_archived = archive_path is not None
+            try:
+                archive_path, input_tokens, output_tokens = self._archive_jsonl(
+                    task_id, worktree_path
+                )
+                jsonl_archived = archive_path is not None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "teardown_worker[%s]: archive phase failed: %s",
+                    task_id, exc,
+                )
 
-        # Kill tmux window (not just the pane). With remain-on-exit=on on
-        # the storage-closet session, kill_pane alone leaves a dead pane
-        # in a named window that blocks subsequent create_window calls.
+        # Phase 2: Kill tmux window (not just the pane). With
+        # remain-on-exit=on on the storage-closet session, kill_pane
+        # alone leaves a dead pane in a named window that blocks
+        # subsequent create_window calls.
         task_slug = f"{project}-{task_number}"
         window_name = f"task-{task_slug}"
         window_target = f"{self._storage_closet_name}:{window_name}"
-        try:
-            self._tmux.kill_window(window_target)
-        except subprocess.CalledProcessError:
-            logger.debug("Window %s already gone during teardown", window_target)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "kill_window %s failed during teardown: %s", window_target, exc,
-            )
+        pane_killed = False
+        if not pane_id:
+            # Nothing to kill — treat as already dead.
+            pane_killed = True
+        else:
+            try:
+                self._tmux.kill_window(window_target)
+                pane_killed = True
+            except _CalledProcessError:
+                # tmux returned non-zero, typically "window not found"
+                # which means it's already gone.
+                logger.debug(
+                    "Window %s already gone during teardown", window_target,
+                )
+                pane_killed = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "teardown_worker[%s]: kill_window phase failed for %s: %s",
+                    task_id, window_target, exc,
+                )
 
-        # Remove worktree
+        # Phase 3: Remove worktree.
         worktree_removed = False
         if worktree_path is not None:
-            worktree_removed = self._remove_worktree(worktree_path)
+            try:
+                worktree_removed = self._remove_worktree(worktree_path)
+                if not worktree_removed:
+                    logger.warning(
+                        "teardown_worker[%s]: worktree removal returned "
+                        "False for %s (see earlier warnings)",
+                        task_id, worktree_path,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "teardown_worker[%s]: remove_worktree phase failed "
+                    "for %s: %s",
+                    task_id, worktree_path, exc,
+                )
 
-        # Update session record
-        conn.execute(
-            "UPDATE work_sessions SET ended_at = ?, total_input_tokens = ?, "
-            "total_output_tokens = ?, archive_path = ? "
-            "WHERE task_project = ? AND task_number = ?",
-            (_now(), input_tokens, output_tokens,
-             str(archive_path) if archive_path else None,
-             project, task_number),
-        )
+        # Only stamp ended_at when the pane was confirmed killed. If the
+        # kill phase failed, leave ended_at=NULL so a future pass can
+        # retry — but still record the archive results for observability.
+        if pane_killed:
+            conn.execute(
+                "UPDATE work_sessions SET ended_at = ?, total_input_tokens = ?, "
+                "total_output_tokens = ?, archive_path = ? "
+                "WHERE task_project = ? AND task_number = ?",
+                (_now(), input_tokens, output_tokens,
+                 str(archive_path) if archive_path else None,
+                 project, task_number),
+            )
+        else:
+            conn.execute(
+                "UPDATE work_sessions SET total_input_tokens = ?, "
+                "total_output_tokens = ?, archive_path = ? "
+                "WHERE task_project = ? AND task_number = ?",
+                (input_tokens, output_tokens,
+                 str(archive_path) if archive_path else None,
+                 project, task_number),
+            )
         conn.commit()
 
         return TeardownResult(
