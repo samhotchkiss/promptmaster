@@ -32,4 +32,6 @@ Produce exactly three artifacts:
 3. `docs/planning-session-log.md` — narrative of the session.
 
 Every module entry in the plan includes: name, purpose, user-level test description, acceptance criteria, dependencies, magic note, and estimated size.
+
+Stage-0 (Research) additionally produces `docs/planning-context.md` via a ReAct loop (grep/read/list_files/web_search). Stage 1 (Discover) will not start until that artifact is non-empty. Stage-0 details (loop, budget, contract) are spelled out in the research-stage prompt block that the flow engine injects when you enter the research node.
 </output_contract>

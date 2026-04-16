@@ -382,3 +382,95 @@ def test_user_level_tests_pass_passes_with_receipt(tmp_path: Path) -> None:
     )
     result = gate.check(_make_task(), project_root=tmp_path)
     assert result.passed is True
+
+
+# ---------------------------------------------------------------------------
+# pp04 — ReAct research stage (stage 0 of plan_project)
+# ---------------------------------------------------------------------------
+
+
+def test_research_stage_prompt_contains_react_loop() -> None:
+    from pollypm.plugins_builtin.project_planning.research_stage import (
+        research_stage_prompt,
+    )
+    text = research_stage_prompt()
+    assert "ReAct" in text
+    for tool in ("grep", "read", "list_files", "web_search"):
+        assert tool in text, f"ReAct prompt missing tool '{tool}'"
+    assert "budget" in text.lower()
+    assert "docs/planning-context.md" in text
+
+
+def test_research_stage_prompt_respects_custom_budget() -> None:
+    from pollypm.plugins_builtin.project_planning.research_stage import (
+        research_stage_prompt,
+    )
+    text = research_stage_prompt(budget_seconds=900)
+    assert "900 seconds" in text
+    assert "15 min" in text
+
+
+def test_research_budget_expires_with_zero_total() -> None:
+    from pollypm.plugins_builtin.project_planning.research_stage import (
+        ResearchBudget,
+    )
+    budget = ResearchBudget(total_seconds=0)
+    budget.start()
+    assert budget.expired() is True
+
+
+def test_research_budget_reports_time_remaining() -> None:
+    from pollypm.plugins_builtin.project_planning.research_stage import (
+        ResearchBudget,
+    )
+    budget = ResearchBudget(total_seconds=600)
+    # Before start — full budget.
+    assert budget.seconds_remaining() == 600.0
+    budget.start()
+    assert budget.seconds_remaining() <= 600.0
+    assert budget.expired() is False
+
+
+def test_context_artifact_ready_requires_non_empty_file(tmp_path: Path) -> None:
+    from pollypm.plugins_builtin.project_planning.research_stage import (
+        context_artifact_ready,
+        context_artifact_path,
+        write_context_artifact,
+    )
+    assert context_artifact_ready(tmp_path) is False
+
+    # Writing a non-empty body makes the guard pass.
+    path = write_context_artifact(
+        tmp_path,
+        "# Context\n\nProject: demo\nStack: Python 3.14\n",
+    )
+    assert path == context_artifact_path(tmp_path)
+    assert context_artifact_ready(tmp_path) is True
+
+
+def test_context_artifact_rejects_empty_body(tmp_path: Path) -> None:
+    import pytest
+
+    from pollypm.plugins_builtin.project_planning.research_stage import (
+        write_context_artifact,
+    )
+    with pytest.raises(ValueError):
+        write_context_artifact(tmp_path, "   \n")
+
+
+def test_architect_profile_points_at_research_stage() -> None:
+    """The architect persona prompt references the research stage so
+    the agent knows where the ReAct loop fits in the overall flow.
+    """
+    root = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "pollypm"
+        / "plugins_builtin"
+        / "project_planning"
+        / "profiles"
+        / "architect.md"
+    )
+    text = root.read_text(encoding="utf-8")
+    assert "planning-context.md" in text
+    assert "research" in text.lower()
