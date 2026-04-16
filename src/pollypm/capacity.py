@@ -42,6 +42,11 @@ FAILOVER_TRIGGERS = frozenset({
     CapacityState.THROTTLED,
 })
 
+# Remaining capacity (percent left) at or below which we proactively roll
+# sessions over to a backup account, instead of waiting for the hard 0%
+# limit. 10% left = 90% used — matches the #103 requirement.
+PROACTIVE_ROLLOVER_THRESHOLD_PCT = 10
+
 # Recovery priority: which sessions to recover first when capacity returns
 RECOVERY_PRIORITY = (
     "heartbeat",
@@ -152,6 +157,28 @@ def probe_all_accounts(
         probe_capacity(config, store, name)
         for name in config.accounts
     ]
+
+
+def account_needs_proactive_rollover(
+    config: PollyPMConfig,
+    store: StateStore,
+    account_name: str,
+    *,
+    threshold_pct: int = PROACTIVE_ROLLOVER_THRESHOLD_PCT,
+) -> tuple[bool, CapacityProbeResult]:
+    """Return (True, probe) when an account is healthy but close to its limit.
+
+    Used by the supervisor to trigger a graceful failover before hitting the
+    hard 0% cutoff. Returns False for accounts that are already unhealthy
+    (those are handled by the existing FAILOVER_TRIGGERS path) or for accounts
+    with unknown usage (we don't roll on uncertainty).
+    """
+    probe = probe_capacity(config, store, account_name)
+    if probe.state in FAILOVER_TRIGGERS:
+        return False, probe  # already handled by the hard-failure path
+    if probe.remaining_pct is None:
+        return False, probe  # unknown usage — don't gamble
+    return probe.remaining_pct <= threshold_pct, probe
 
 
 # ---------------------------------------------------------------------------
