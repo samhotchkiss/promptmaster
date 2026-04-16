@@ -53,6 +53,44 @@ def _prefix_for_owner(owner: str, text: str) -> str:
     return f"{prefix} {text}"
 
 
+# Flags that belong to a specific provider and should be stripped when
+# the session's account uses a different provider.
+_CODEX_ONLY_FLAGS = frozenset({
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--sandbox",
+    "--ask-for-approval",
+})
+_CLAUDE_ONLY_FLAGS = frozenset({
+    "--dangerously-skip-permissions",
+    "--allowedTools",
+    "--disallowedTools",
+})
+
+
+def _sanitize_provider_args(args: list[str], provider: ProviderKind) -> list[str]:
+    """Remove flags that belong to a different provider."""
+    bad_flags = _CODEX_ONLY_FLAGS if provider is ProviderKind.CLAUDE else _CLAUDE_ONLY_FLAGS
+    cleaned: list[str] = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in bad_flags:
+            # Flags like --sandbox take a value argument; skip it too
+            if arg in ("--sandbox", "--ask-for-approval", "--allowedTools", "--disallowedTools"):
+                skip_next = True
+            continue
+        cleaned.append(arg)
+    # If we stripped everything, fall back to the provider's default open-permissions flag
+    if not cleaned:
+        if provider is ProviderKind.CLAUDE:
+            return ["--dangerously-skip-permissions"]
+        if provider is ProviderKind.CODEX:
+            return ["--dangerously-bypass-approvals-and-sandbox"]
+    return cleaned
+
+
 class Supervisor:
     _CONTROL_ROLES = {"heartbeat-supervisor", "operator-pm", "triage", "reviewer"}
     _CONSOLE_WINDOW = "PollyPM"
@@ -149,6 +187,9 @@ class Supervisor:
                         role=effective.role,
                     ),
                 )
+            else:
+                # Sanitize: strip provider-incompatible flags from project-local configs
+                effective = replace(effective, args=_sanitize_provider_args(effective.args, account.provider))
         return effective
 
     def _default_agent_profile(self, session: SessionConfig) -> str | None:
