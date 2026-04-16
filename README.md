@@ -181,34 +181,19 @@ stateDiagram-v2
 ## Quick Start
 
 ```bash
-# Install
-pip install -e .
+# First run — walks you through account setup and launches everything
+pm
 
-# Initialize a project
-pm init
-
-# Add a Claude account
-pm add-account claude
-
-# Launch all sessions (heartbeat, operator, reviewer, workers)
-pm up
-
-# Open the cockpit TUI
-pm ui
-
-# Send work to Polly
+# That's it. From here you talk to Polly.
 pm send operator "Build a weather CLI with current conditions and 5-day forecast"
-
-# Check system status
-pm status
 ```
 
-## Commit Message Hook
-
-Install the Conventional Commits `commit-msg` hook with:
+`pm` is the only command you need. On first run it handles onboarding, account login, and session launch. After that:
 
 ```bash
-python3 scripts/install_commit_msg_hook.py
+pm                  # Attach to the cockpit
+pm ui               # Open the cockpit TUI
+pm status           # System overview
+pm send operator …  # Send work to Polly
+pm down             # Shut everything down
 ```
-
-Git will then run `scripts/commit-msg` on each commit and reject messages that do not match `type(scope): description`.
