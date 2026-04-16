@@ -99,7 +99,19 @@
 ### CLI Verification
 - recipe_share CLI: WORKS (tested add, list, search by ingredient, export to markdown)
 - team_standup CLI: WORKS from task branch (post, list, missing, serve)
-- expense_tracker CLI: pending re-review
+- expense_tracker CLI: expense_tracker/8 APPROVED (README), expense_tracker/9 REJECTED AGAIN
+  - Russell found real bug: cmd_add passes args.description into merchant column = data corruption
+  - Also missing README and tests
+  - Full reject → rework → re-review → reject again cycle verified
+
+### Review Decision Summary
+| Task | Decision | Reason |
+|------|----------|--------|
+| recipe_share/10 | APPROVED | All criteria met, CLI tested manually |
+| team_standup/13 | APPROVED | All 4 commands work, XSS-safe HTML, fixed conflict markers |
+| expense_tracker/8 | REJECTED then APPROVED | First: no commits. Second: README added |
+| expense_tracker/9 | REJECTED twice | First: no commits. Second: data corruption bug, no README, no tests |
+| Total | 3 approved, 3 rejected | Quality gate is enforced |
 
 ### Issues Found
 1. `worker-start` is a blocking call — Polly can't process other specs while waiting for it to finish. Should be async or have a timeout.
