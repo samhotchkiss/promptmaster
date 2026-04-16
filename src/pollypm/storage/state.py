@@ -9,6 +9,12 @@ from pathlib import Path
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    description TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     name TEXT PRIMARY KEY,
     role TEXT NOT NULL,
@@ -422,33 +428,63 @@ class StateStore:
     def _now(self) -> str:
         return datetime.now(UTC).isoformat()
 
+    # ------------------------------------------------------------------
+    # Schema migrations — append-only list.  Each entry is
+    # (version, description, sql_statements).  The runner applies any
+    # migration whose version is greater than the current DB version.
+    # Existing migrations are idempotent (IF NOT EXISTS / column checks)
+    # so they are safe to replay on databases created before versioning.
+    # ------------------------------------------------------------------
+    _MIGRATIONS: list[tuple[int, str, list[str]]] = [
+        (1, "Rebuild alerts unique index", [
+            "DROP INDEX IF EXISTS idx_alerts_open",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_open
+               ON alerts(session_name, alert_type) WHERE status = 'open'""",
+        ]),
+        (2, "Add project column to sessions", [
+            # Column-existence check is handled by _safe_add_column below.
+        ]),
+        (3, "Add snapshot_hash to heartbeats", []),
+        (4, "Add cache_read_tokens to token_usage_hourly", []),
+    ]
+
     def _migrate(self) -> None:
-        self.execute("DROP INDEX IF EXISTS idx_alerts_open")
-        self.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_open
-            ON alerts(session_name, alert_type)
-            WHERE status = 'open'
-            """
-        )
-        columns = {
-            row[1]
-            for row in self.execute("PRAGMA table_info(sessions)").fetchall()
-        }
-        if "project" not in columns:
-            self.execute("ALTER TABLE sessions ADD COLUMN project TEXT NOT NULL DEFAULT 'pollypm'")
-        heartbeat_columns = {
-            row[1]
-            for row in self.execute("PRAGMA table_info(heartbeats)").fetchall()
-        }
-        if "snapshot_hash" not in heartbeat_columns:
-            self.execute("ALTER TABLE heartbeats ADD COLUMN snapshot_hash TEXT NOT NULL DEFAULT ''")
-        token_columns = {
-            row[1]
-            for row in self.execute("PRAGMA table_info(token_usage_hourly)").fetchall()
-        }
-        if "cache_read_tokens" not in token_columns:
-            self.execute("ALTER TABLE token_usage_hourly ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0")
+        # Determine current version.  The schema_version table may not
+        # exist on databases created before versioning was introduced —
+        # CREATE TABLE IF NOT EXISTS in the SCHEMA constant handles that.
+        try:
+            row = self.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version"
+            ).fetchone()
+            current = row[0] if row else 0
+        except Exception:  # noqa: BLE001
+            current = 0
+
+        for version, description, stmts in self._MIGRATIONS:
+            if version <= current:
+                continue
+            for sql in stmts:
+                self.execute(sql)
+            # Migrations 2-4 are column additions — run them via helper
+            if version == 2:
+                self._safe_add_column("sessions", "project", "TEXT NOT NULL DEFAULT 'pollypm'")
+            elif version == 3:
+                self._safe_add_column("heartbeats", "snapshot_hash", "TEXT NOT NULL DEFAULT ''")
+            elif version == 4:
+                self._safe_add_column("token_usage_hourly", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0")
+            self.execute(
+                "INSERT INTO schema_version (version, description, applied_at) VALUES (?, ?, ?)",
+                (version, description, datetime.now(UTC).isoformat()),
+            )
+
+    @staticmethod
+    def _column_exists(cursor, table: str, column: str) -> bool:
+        cols = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+        return column in cols
+
+    def _safe_add_column(self, table: str, column: str, typedef: str) -> None:
+        if not self._column_exists(self.conn, table, column):
+            self.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
 
     def upsert_session(
         self,

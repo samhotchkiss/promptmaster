@@ -782,6 +782,16 @@ class Supervisor:
             ("project_intelligence", {}),
             ("gc_maintenance", {}),
         ])
+
+        # Re-arm the heartbeat schedule so the next sweep is always queued.
+        # Without this, the scheduler permanently stops if the heartbeat
+        # session enters an interactive conversation and misses a sweep
+        # window — dead workers go undetected indefinitely.
+        try:
+            self.ensure_heartbeat_schedule()
+        except Exception:  # noqa: BLE001
+            pass  # Schedule failure shouldn't discard a successful sweep
+
         return alerts
 
     def ensure_heartbeat_schedule(self) -> None:

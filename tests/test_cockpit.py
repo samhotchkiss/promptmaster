@@ -269,7 +269,9 @@ def test_cockpit_router_selected_key_clears_stale_mounted_session_only(monkeypat
         def list_panes(self, target: str):
             return [
                 FakePane("%1", pane_dead=False, command="uv", path=tmp_path),
-                FakePane("%2", pane_dead=False, command="node", path=other_cwd),
+                # A dead pane triggers stale mount cleanup — CWD matching
+                # was removed in favour of trusting live provider panes.
+                FakePane("%2", pane_dead=True, command="node", path=other_cwd),
             ]
 
     router = CockpitRouter(config_path)
@@ -286,7 +288,8 @@ def test_cockpit_router_selected_key_clears_stale_mounted_session_only(monkeypat
     assert router.selected_key() == "project:demo"
     state = router._load_state()
     assert state["selected"] == "project:demo"
-    assert state["right_pane_id"] == "%2"
+    # Dead pane causes right_pane_id and mounted_session to be cleared
+    assert "right_pane_id" not in state
     assert "mounted_session" not in state
 
 
@@ -917,7 +920,10 @@ def test_cockpit_router_validation_releases_stale_cockpit_lease(monkeypatch, tmp
         def list_panes(self, target: str):
             return [
                 FakePane("%1", pane_dead=False, command="uv", path=tmp_path),
-                FakePane("%2", pane_dead=False, command="node", path=other_cwd),
+                # Pane is alive but running a non-provider command ("bash"),
+                # so _is_live_provider_pane returns False and the mounted
+                # session is considered stale — triggering lease release.
+                FakePane("%2", pane_dead=False, command="bash", path=other_cwd),
             ]
 
     router = CockpitRouter(config_path)
