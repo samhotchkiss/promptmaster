@@ -411,14 +411,14 @@ class Supervisor:
             first = launches[0]
             if on_status:
                 on_status(f"Creating {first.session.name}...")
-            self.tmux.create_session(storage_session, first.window_name, first.command)
+            first_pane_id = self.tmux.create_session(storage_session, first.window_name, first.command)
             window_target = f"{storage_session}:{first.window_name}"
             self.tmux.set_window_option(window_target, "allow-passthrough", "on")
             self.tmux.set_window_option(window_target, "focus-events", "on")
             self.tmux.pipe_pane(window_target, first.log_path)
             self._record_launch(first)
-            # Resolve pane ID for unambiguous targeting during stabilization
-            pane_target = self._resolve_pane_id(storage_session, first.window_name) or window_target
+            # Use pane ID from create_session for unambiguous targeting
+            pane_target = first_pane_id or window_target
             targets.append((first, pane_target))
             for launch in launches[1:]:
                 if on_status:

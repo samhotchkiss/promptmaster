@@ -115,17 +115,19 @@ class TmuxClient:
             return None
         return result.stdout.strip() or None
 
-    def create_session(self, name: str, window_name: str, command: str, *, remain_on_exit: bool = True, history_limit: int | None = 500) -> None:
-        """Create a tmux session. No-op if session already exists."""
+    def create_session(self, name: str, window_name: str, command: str, *, remain_on_exit: bool = True, history_limit: int | None = 500) -> str | None:
+        """Create a tmux session. Returns pane ID of the first window, or None if already exists."""
         self._validate_name(name, "session name")
         self._validate_name(window_name, "window name")
         if self.has_session(name):
             logger.debug("Session %r already exists, skipping create", name)
-            return
-        self.run("new-session", "-d", "-s", name, "-n", window_name, command)
+            return None
+        result = self.run("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-n", window_name, command)
+        pane_id = result.stdout.strip()
         self.run("set-option", "-t", self._exact_target(f"{name}:"), "remain-on-exit", "on" if remain_on_exit else "off")
         if history_limit is not None:
             self.run("set-option", "-t", self._exact_target(f"{name}:"), "history-limit", str(history_limit))
+        return pane_id if pane_id.startswith("%") else None
 
     def new_session_attached(self, name: str, window_name: str, command: str) -> int:
         result = subprocess.run(
