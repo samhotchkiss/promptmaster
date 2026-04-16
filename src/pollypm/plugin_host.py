@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.util import module_from_spec, spec_from_file_location
@@ -8,6 +9,8 @@ import tomllib
 import types
 
 from pollypm.plugin_api.v1 import HookContext, HookFilterResult, PollyPMPlugin
+
+logger = logging.getLogger(__name__)
 
 PLUGIN_MANIFEST = "pollypm-plugin.toml"
 PLUGIN_API_VERSION = "1"
@@ -59,9 +62,16 @@ class ExtensionHost:
 
     def _resolve_factory(self, name: str, registry_getter, kind: str) -> object:
         registry: dict[str, object] = {}
+        sources: dict[str, str] = {}
         for plugin in self.plugins().values():
             for item_name, factory in registry_getter(plugin).items():
+                if item_name in registry and sources.get(item_name) != plugin.name:
+                    logger.debug(
+                        "%s '%s' from plugin '%s' overrides '%s' from plugin '%s'",
+                        kind, item_name, plugin.name, item_name, sources[item_name],
+                    )
                 registry[item_name] = factory
+                sources[item_name] = plugin.name
         factory = registry.get(name)
         if factory is not None:
             try:
