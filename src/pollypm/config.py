@@ -295,8 +295,18 @@ def _validate_cross_references(
             )
 
 
+_config_cache: dict[Path, tuple[float, "PollyPMConfig"]] = {}
+
+
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> PollyPMConfig:
     config_path = path.resolve()
+    try:
+        mtime = config_path.stat().st_mtime
+        cached = _config_cache.get(config_path)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+    except OSError:
+        pass
     base = config_path.parent
     raw = _load_raw_toml(config_path)
     project = _parse_project_settings(raw, base=base)
@@ -308,7 +318,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> PollyPMConfig:
     _merge_project_local_config(sessions, projects)
     _validate_cross_references(accounts=accounts, sessions=sessions, pollypm=pollypm)
 
-    return PollyPMConfig(
+    config = PollyPMConfig(
         project=project,
         pollypm=pollypm,
         accounts=accounts,
@@ -316,6 +326,11 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> PollyPMConfig:
         projects=projects,
         memory=memory,
     )
+    try:
+        _config_cache[config_path] = (config_path.stat().st_mtime, config)
+    except OSError:
+        pass
+    return config
 
 
 def _render_global_config(config: PollyPMConfig) -> str:
