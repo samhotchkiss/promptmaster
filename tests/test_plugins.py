@@ -577,6 +577,126 @@ def test_entry_point_plugin_with_wrong_api_version_skipped(monkeypatch, tmp_path
 
 
 # ---------------------------------------------------------------------------
+# Issue #169 — content_paths(plugin, kind) helper
+# ---------------------------------------------------------------------------
+
+
+def test_content_paths_returns_bundled_user_and_project_paths(monkeypatch, tmp_path: Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    project_plugin = tmp_path / ".pollypm" / "plugins" / "content_host"
+    _write_structured_plugin(
+        project_plugin,
+        name="content_host",
+        manifest_extras=(
+            '[[capabilities]]\n'
+            'kind = "agent_profile"\n'
+            'name = "content_host"\n'
+            '\n'
+            '[content]\n'
+            'kinds = ["magic_skill", "deploy_recipe"]\n'
+            'user_paths = ["skills", "deploys"]\n'
+        ),
+        body=(
+            "from pollypm.plugin_api.v1 import PollyPMPlugin\n"
+            "plugin = PollyPMPlugin(name='content_host')\n"
+        ),
+    )
+
+    host = ExtensionHost(tmp_path)
+    host.plugins()  # force load
+    paths = host.content_paths("content_host", kind="magic_skill")
+
+    # Bundled path is <plugin_dir>/skills/ AND <plugin_dir>/deploys/ —
+    # the helper returns all declared user_paths when kind is requested.
+    # (kind filtering is a per-file concern; the helper returns all
+    # bundled paths and layers user/project paths specific to kind.)
+    bundled = [p for p in paths if p.is_relative_to(project_plugin)]
+    assert len(bundled) >= 1
+    # User content path for this plugin + kind
+    assert fake_home / ".pollypm" / "content" / "content_host" / "magic_skill" in paths
+    # Project content path for this plugin + kind
+    assert tmp_path / ".pollypm" / "content" / "content_host" / "magic_skill" in paths
+
+
+def test_content_paths_missing_directories_are_not_errors(tmp_path: Path) -> None:
+    host = ExtensionHost(tmp_path)
+    # A plugin that hasn't declared any content block still returns
+    # user-global + project-local overlay directories.
+    paths = host.content_paths("claude", kind="magic_skill")
+    assert all(isinstance(p, Path) for p in paths)
+    # No raised exceptions; directories don't need to exist.
+    for path in paths:
+        assert not path.exists() or path.is_dir()
+
+
+def test_content_paths_precedence_order(monkeypatch, tmp_path: Path) -> None:
+    """Bundled paths come first; user comes before project."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    project_plugin = tmp_path / ".pollypm" / "plugins" / "precedence_test"
+    _write_structured_plugin(
+        project_plugin,
+        name="precedence_test",
+        manifest_extras=(
+            '[[capabilities]]\n'
+            'kind = "agent_profile"\n'
+            'name = "precedence_test"\n'
+            '\n'
+            '[content]\n'
+            'kinds = ["skill"]\n'
+            'user_paths = ["skills"]\n'
+        ),
+        body=(
+            "from pollypm.plugin_api.v1 import PollyPMPlugin\n"
+            "plugin = PollyPMPlugin(name='precedence_test')\n"
+        ),
+    )
+
+    host = ExtensionHost(tmp_path)
+    host.plugins()
+    paths = host.content_paths("precedence_test", kind="skill")
+
+    bundled_idx = next(i for i, p in enumerate(paths) if p.is_relative_to(project_plugin))
+    user_idx = next(i for i, p in enumerate(paths) if p.is_relative_to(fake_home / ".pollypm" / "content"))
+    project_idx = next(i for i, p in enumerate(paths) if p.is_relative_to(tmp_path / ".pollypm" / "content"))
+    assert bundled_idx < user_idx < project_idx
+
+
+def test_content_declaration_accessible(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / ".pollypm" / "plugins" / "decl_test"
+    _write_structured_plugin(
+        plugin_dir,
+        name="decl_test",
+        manifest_extras=(
+            '[[capabilities]]\n'
+            'kind = "agent_profile"\n'
+            'name = "decl_test"\n'
+            '\n'
+            '[content]\n'
+            'kinds = ["a", "b"]\n'
+            'user_paths = ["one", "two"]\n'
+        ),
+        body=(
+            "from pollypm.plugin_api.v1 import PollyPMPlugin\n"
+            "plugin = PollyPMPlugin(name='decl_test')\n"
+        ),
+    )
+    host = ExtensionHost(tmp_path)
+    host.plugins()
+    decl = host.content_declaration("decl_test")
+    assert decl is not None
+    assert decl.kinds == ("a", "b")
+    assert decl.user_paths == ("one", "two")
+
+
+# ---------------------------------------------------------------------------
 # Issue #172 — [plugins].disabled config key
 # ---------------------------------------------------------------------------
 
