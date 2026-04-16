@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -26,6 +26,21 @@ PLUGIN_MANIFEST = "pollypm-plugin.toml"
 PLUGIN_API_VERSION = "1"
 
 
+@dataclass(slots=True, frozen=True)
+class ContentDeclaration:
+    """A plugin's ``[content]`` manifest block.
+
+    ``kinds`` — tags the plugin recognises when callers request content
+    paths (e.g. ``"magic_skill"``, ``"flow_template"``).
+    ``user_paths`` — directories under the plugin root that ship bundled
+    content. Each entry resolves to ``<plugin_dir>/<entry>/`` at
+    runtime. Per docs/plugin-discovery-spec.md §5.
+    """
+
+    kinds: tuple[str, ...] = ()
+    user_paths: tuple[str, ...] = ()
+
+
 @dataclass(slots=True)
 class PluginManifest:
     name: str
@@ -38,6 +53,7 @@ class PluginManifest:
     plugin_dir: Path
     source: str
     requires_api: str | None = None
+    content: ContentDeclaration = field(default_factory=ContentDeclaration)
 
 
 @dataclass(slots=True)
@@ -70,6 +86,12 @@ class ExtensionHost:
         # so ``pm plugins list`` can still show them with a reason.
         self._disabled: dict[str, DisabledPluginRecord] = {}
         self._disabled_names: frozenset[str] = frozenset(disabled)
+        # Per-plugin content declarations keyed by plugin name — populated
+        # during manifest load, consulted by content_paths().
+        self._content_declarations: dict[str, ContentDeclaration] = {}
+        # Per-plugin install directory (for directory-style plugins) so
+        # content_paths can resolve <plugin_dir>/<user_paths> entries.
+        self._plugin_dirs: dict[str, Path] = {}
         self._job_handler_registry = None
         self._job_handlers_loaded = False
 
@@ -87,6 +109,63 @@ class ExtensionHost:
         if self._plugins is None:
             self.plugins()
         return self._plugin_sources.get(name)
+
+    def content_paths(self, plugin_name: str, kind: str | None = None) -> list[Path]:
+        """Return the ordered content directories a plugin should scan.
+
+        Per docs/plugin-discovery-spec.md §5, the precedence is:
+
+          1. ``<plugin_dir>/<user_paths[i]>/`` — bundled content shipped
+             with the plugin.
+          2. ``~/.pollypm/content/<plugin_name>/<kind>/`` — user-added.
+          3. ``<project>/.pollypm/content/<plugin_name>/<kind>/`` —
+             project-added.
+
+        Later paths shadow earlier ones by filename (callers apply the
+        shadow when iterating).
+
+        If ``kind`` is provided and the plugin's manifest declared
+        ``[content].kinds``, only the plugin-bundled ``user_paths`` are
+        returned when ``kind`` is in the declared set — otherwise all
+        bundled paths are returned (a plugin with no [content] block
+        still gets the user/project overlay directories).
+
+        Directories are returned even if they don't exist yet; callers
+        filter with ``path.is_dir()`` and mkdir-on-write as needed.
+        """
+        if self._plugins is None:
+            self.plugins()
+
+        paths: list[Path] = []
+
+        # 1) Plugin-bundled paths.
+        declaration = self._content_declarations.get(plugin_name)
+        plugin_dir = self._plugin_dirs.get(plugin_name)
+        if declaration is not None and plugin_dir is not None:
+            if kind is None or not declaration.kinds or kind in declaration.kinds:
+                for user_path in declaration.user_paths:
+                    paths.append((plugin_dir / user_path).resolve())
+
+        # 2) User-global content path.
+        user_home = Path.home()
+        if kind is not None:
+            paths.append(user_home / ".pollypm" / "content" / plugin_name / kind)
+        else:
+            paths.append(user_home / ".pollypm" / "content" / plugin_name)
+
+        # 3) Project-local content path.
+        if kind is not None:
+            paths.append(self.root_dir / ".pollypm" / "content" / plugin_name / kind)
+        else:
+            paths.append(self.root_dir / ".pollypm" / "content" / plugin_name)
+
+        return paths
+
+    def content_declaration(self, plugin_name: str) -> ContentDeclaration | None:
+        """Return the parsed ``[content]`` block for a plugin, or ``None``."""
+        if self._plugins is None:
+            self.plugins()
+        return self._content_declarations.get(plugin_name)
 
     def plugins(self) -> dict[str, PollyPMPlugin]:
         if self._plugins is None:
@@ -324,15 +403,28 @@ class ExtensionHost:
             loaded[name] = plugin
             sources[name] = source
 
+        def _install_from_manifest(manifest: PluginManifest) -> None:
+            if manifest.name in self._disabled_names:
+                _mark_disabled(
+                    manifest.name, manifest.source, "config",
+                    "disabled by pollypm.toml [plugins].disabled",
+                )
+                return
+            plugin = self._load_plugin_from_manifest(manifest)
+            if plugin is None:
+                return
+            # Record content declaration + plugin install dir BEFORE
+            # _install so content_paths works even if validation later
+            # removes the plugin — the declaration itself is data.
+            self._plugin_dirs[manifest.name] = manifest.plugin_dir
+            if manifest.content.kinds or manifest.content.user_paths:
+                self._content_declarations[manifest.name] = manifest.content
+            _install(manifest.name, plugin, manifest.source)
+
         # Order matters: later sources win on name collision, matching
         # the spec §2 precedence table.
         for manifest in self._discover_directory_manifests(sources=("builtin",)):
-            if manifest.name in self._disabled_names:
-                _mark_disabled(manifest.name, manifest.source, "config", "disabled by pollypm.toml [plugins].disabled")
-                continue
-            plugin = self._load_plugin_from_manifest(manifest)
-            if plugin is not None:
-                _install(manifest.name, plugin, manifest.source)
+            _install_from_manifest(manifest)
 
         for name, plugin, source in self._discover_entry_points():
             _install(name, plugin, source)
@@ -340,12 +432,7 @@ class ExtensionHost:
         # "repo" is a legacy alias for "project" used by older tests; we
         # accept both so internal call sites can transition gradually.
         for manifest in self._discover_directory_manifests(sources=("user", "project", "repo")):
-            if manifest.name in self._disabled_names:
-                _mark_disabled(manifest.name, manifest.source, "config", "disabled by pollypm.toml [plugins].disabled")
-                continue
-            plugin = self._load_plugin_from_manifest(manifest)
-            if plugin is not None:
-                _install(manifest.name, plugin, manifest.source)
+            _install_from_manifest(manifest)
 
         self._plugin_sources = sources  # exposed for doctor / CLI later
         return loaded
@@ -448,6 +535,7 @@ class ExtensionHost:
         raw = tomllib.loads(manifest_path.read_text())
         name = str(raw["name"])
         capabilities = self._parse_capability_entries(raw.get("capabilities", []), plugin_name=name)
+        content = self._parse_content_declaration(raw.get("content"), plugin_name=name)
         return PluginManifest(
             name=name,
             api_version=str(raw["api_version"]),
@@ -459,6 +547,34 @@ class ExtensionHost:
             plugin_dir=manifest_path.parent,
             source=source,
             requires_api=(str(raw["requires_api"]) if raw.get("requires_api") is not None else None),
+            content=content,
+        )
+
+    def _parse_content_declaration(
+        self, raw: object, *, plugin_name: str,
+    ) -> ContentDeclaration:
+        """Parse the ``[content]`` manifest block — ``kinds`` and
+        ``user_paths`` tuples. Missing block is an empty declaration.
+        """
+        if raw is None:
+            return ContentDeclaration()
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"[content] must be a table in plugin '{plugin_name}', got {type(raw).__name__}"
+            )
+        kinds_raw = raw.get("kinds", ())
+        paths_raw = raw.get("user_paths", ())
+        if not isinstance(kinds_raw, (list, tuple)):
+            raise ValueError(
+                f"[content].kinds must be a list in plugin '{plugin_name}'"
+            )
+        if not isinstance(paths_raw, (list, tuple)):
+            raise ValueError(
+                f"[content].user_paths must be a list in plugin '{plugin_name}'"
+            )
+        return ContentDeclaration(
+            kinds=tuple(str(item) for item in kinds_raw),
+            user_paths=tuple(str(item) for item in paths_raw),
         )
 
     def _parse_capability_entries(
