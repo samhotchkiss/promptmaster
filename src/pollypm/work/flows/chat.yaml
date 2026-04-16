@@ -1,0 +1,27 @@
+name: chat
+description: Lightweight conversation between a user and an agent.
+
+roles:
+  operator:
+    description: The agent that responds to the user (defaults to Polly; override at create time with --role operator=<name>).
+    optional: true
+  requester:
+    description: The user who started the conversation.
+    optional: true
+
+nodes:
+  user_message:
+    type: work
+    actor_type: human
+    next_node: agent_response
+
+  agent_response:
+    type: work
+    actor_type: role
+    actor_role: operator
+    next_node: done
+
+  done:
+    type: terminal
+
+start_node: user_message
