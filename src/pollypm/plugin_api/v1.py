@@ -53,6 +53,7 @@ KNOWN_CAPABILITY_KINDS: frozenset[str] = frozenset(
         "sync_adapter",
         "transcript_source",
         "recovery_policy",
+        "launch_planner",
         "job_handler",
         "roster_entry",
         # Plugin-level hook capability (observers / filters) — not tied to
