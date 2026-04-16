@@ -126,6 +126,11 @@ class SessionManager:
         a short kickoff string is fed as keystrokes so the worker reads
         the file and gets to work. Relies on ``teardown_worker`` to kill
         the window on approval/cancel.
+
+        Concurrent provision calls for the same ``task_id`` are
+        serialized via a per-task session lock so two racing ``claim()``
+        invocations can't both run ``git worktree add`` against the
+        same path.
         """
         project, task_number = _parse_task_id(task_id)
 
@@ -138,6 +143,67 @@ class SessionManager:
         task_slug = f"{project}-{task_number}"
         branch_name = f"task/{task_slug}"
 
+        # Serialize concurrent provisions of the same task. The lock
+        # lives in the worktree's parent directory so both the lock and
+        # the worktree-add race on the same filesystem target.
+        worktree_parent = self._project_path / ".pollypm" / "worktrees"
+        session_id = f"task-{task_slug}"
+        lock_acquired = False
+        try:
+            from pollypm.projects import ensure_session_lock, release_session_lock
+
+            try:
+                ensure_session_lock(worktree_parent, session_id)
+                lock_acquired = True
+            except Exception as exc:  # noqa: BLE001
+                # Another provision is in-flight or the lock is stuck.
+                # Re-check: if the other provision won, just return its
+                # session. Otherwise surface the lock failure.
+                logger.warning(
+                    "provision_worker[%s]: session lock conflict: %s",
+                    task_id, exc,
+                )
+                existing = self.session_for_task(task_id)
+                if existing is not None:
+                    return existing
+                raise
+
+            # Re-check after acquiring the lock in case another provision
+            # completed while we were waiting.
+            existing = self.session_for_task(task_id)
+            if existing is not None:
+                return existing
+
+            worker_session = self._provision_locked(
+                task_id=task_id,
+                agent_name=agent_name,
+                project=project,
+                task_number=task_number,
+                task_slug=task_slug,
+                branch_name=branch_name,
+            )
+            return worker_session
+        finally:
+            if lock_acquired:
+                try:
+                    release_session_lock(worktree_parent, session_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "provision_worker[%s]: failed to release session lock: %s",
+                        task_id, exc,
+                    )
+
+    def _provision_locked(
+        self,
+        *,
+        task_id: str,
+        agent_name: str,
+        project: str,
+        task_number: int,
+        task_slug: str,
+        branch_name: str,
+    ) -> WorkerSession:
+        """Inner provision body — runs under the per-task session lock."""
         # Create worktree
         worktree_path = self._create_worktree(task_id, task_slug, self._project_path)
 
