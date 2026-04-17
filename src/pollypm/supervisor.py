@@ -60,11 +60,11 @@ from pollypm.runtimes import get_runtime
 from pollypm.schedulers import ScheduledJob, get_scheduler_backend
 from pollypm.transcript_ledger import sync_token_ledger_for_config
 from pollypm.storage.state import AlertRecord, LeaseRecord, StateStore
+from pollypm.tmux.client import TmuxWindow
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pollypm.core import CoreRail
-    from pollypm.tmux.client import TmuxWindow
 
 
 _OWNER_PREFIXES = {
