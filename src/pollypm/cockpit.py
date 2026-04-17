@@ -1058,6 +1058,12 @@ class CockpitRouter:
         if key == "settings":
             self._show_static_view(supervisor, window_target, "settings")
             return
+        if key == "activity":
+            # Live activity feed (lf03) — a plugin-owned view served
+            # through the standard static-view plumbing. The right-pane
+            # launcher resolves "activity" to the plugin's Textual app.
+            self._show_static_view(supervisor, window_target, "activity")
+            return
         if key.startswith("project:"):
             parts = key.split(":")
             project_key = parts[1]
@@ -1737,6 +1743,13 @@ def _build_cockpit_detail_dispatch(supervisor, config_path: Path, kind: str, tar
 
     if kind == "inbox":
         return _render_inbox_panel(config)
+
+    if kind == "activity":
+        from pollypm.plugins_builtin.activity_feed.cockpit.feed_panel import (
+            render_activity_feed_text,
+        )
+
+        return render_activity_feed_text(config)
 
     if kind == "settings":
         recent_usage = supervisor.store.recent_token_usage(limit=5)
