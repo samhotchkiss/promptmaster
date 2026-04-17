@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pollypm.plugin_api.v1 import PollyPMPlugin
+from pollypm.plugin_api.v1 import Capability, PollyPMPlugin
 
 
 def _factory(**kwargs):
@@ -16,6 +16,6 @@ def _factory(**kwargs):
 
 plugin = PollyPMPlugin(
     name="default_launch_planner",
-    capabilities=("launch_planner",),
+    capabilities=(Capability(kind="launch_planner", name="default"),),
     launch_planners={"default": _factory},
 )
