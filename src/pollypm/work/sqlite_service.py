@@ -1685,6 +1685,32 @@ class SQLiteWorkService:
                 ),
             )
 
+            # Plan-presence gate (#281): when the architect's user_approval
+            # node on a plan_project task is approved, stamp a dedicated
+            # ``plan_approved`` context entry. The gate in
+            # ``plan_presence.has_acceptable_plan`` reads this timestamp
+            # instead of relying on ``plan.md``'s mtime — file mtimes are
+            # perturbed by git checkouts, editor saves, and the planner's
+            # own stage-8 emit, so they make the gate unstable.
+            if (
+                task.flow_template_id == "plan_project"
+                and task.current_node_id == "user_approval"
+            ):
+                self._conn.execute(
+                    "INSERT INTO work_context_entries "
+                    "(task_project, task_number, actor, text, "
+                    "created_at, entry_type) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        task.project,
+                        task.task_number,
+                        actor,
+                        "plan approved",
+                        now,
+                        "plan_approved",
+                    ),
+                )
+
             # Advance to next node
             self._advance_to_node(
                 task,
