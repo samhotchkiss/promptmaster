@@ -18,7 +18,15 @@ from typing import Any
 
 import typer
 
-plugins_app = typer.Typer(help="Manage PollyPM plugins.")
+plugins_app = typer.Typer(
+    help=(
+        "Manage PollyPM plugins.\n\n"
+        "Examples:\n\n"
+        "• pm plugins list                    — show installed plugins\n"
+        "• pm plugins show <name>             — inspect one plugin's manifest\n"
+        "• pm plugins scaffold <name>         — scaffold a new plugin\n"
+    )
+)
 
 
 USER_PLUGINS_DIR = Path.home() / ".pollypm" / "plugins"

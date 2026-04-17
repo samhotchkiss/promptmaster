@@ -32,7 +32,15 @@ from pollypm.jobs import Job, JobQueue, JobStatus
 __all__ = ["jobs_app", "build_queue_for_config"]
 
 
-jobs_app = typer.Typer(help="Inspect and manage the durable job queue.")
+jobs_app = typer.Typer(
+    help=(
+        "Inspect and manage the durable job queue.\n\n"
+        "Examples:\n\n"
+        "• pm jobs list                       — show queued / running jobs\n"
+        "• pm jobs show <id>                  — inspect one job\n"
+        "• pm jobs retry <id>                 — retry a failed job\n"
+    )
+)
 
 
 # ---------------------------------------------------------------------------

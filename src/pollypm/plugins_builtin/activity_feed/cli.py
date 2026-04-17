@@ -40,7 +40,13 @@ from pollypm.plugins_builtin.activity_feed.plugin import build_projector
 
 
 activity_app = typer.Typer(
-    help="Live activity feed. `pm activity --follow` tails live events.",
+    help=(
+        "Live activity feed. `pm activity --follow` tails live events.\n\n"
+        "Examples:\n\n"
+        "• pm activity                        — print the most recent events\n"
+        "• pm activity --follow               — tail the event stream\n"
+        "• pm activity --since 15m            — events from the last 15 minutes\n"
+    ),
     invoke_without_command=True,
     no_args_is_help=False,
 )

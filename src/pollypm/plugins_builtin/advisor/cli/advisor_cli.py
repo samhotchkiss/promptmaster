@@ -43,7 +43,14 @@ from pollypm.plugins_builtin.advisor.state import (
 
 
 advisor_app = typer.Typer(
-    help="Manage the advisor (every-30m alignment coach).",
+    help=(
+        "Manage the advisor (every-30m alignment coach).\n\n"
+        "Examples:\n\n"
+        "• pm advisor status                  — show advisor state and next run\n"
+        "• pm advisor enable                  — turn on the advisor\n"
+        "• pm advisor pause                   — stop runs without disabling\n"
+        "• pm advisor history                 — recent advisor decisions\n"
+    ),
     no_args_is_help=True,
 )
 

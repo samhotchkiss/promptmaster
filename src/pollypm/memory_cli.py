@@ -28,7 +28,15 @@ from pollypm.memory_backends import FileMemoryBackend, MemoryEntry, get_memory_b
 __all__ = ["memory_app", "build_backend_for_config"]
 
 
-memory_app = typer.Typer(help="Inspect and manage the memory store.")
+memory_app = typer.Typer(
+    help=(
+        "Inspect and manage the memory store.\n\n"
+        "Examples:\n\n"
+        "• pm memory list                     — show memories for the user\n"
+        "• pm memory show <id>                — print one memory's body\n"
+        "• pm memory search <query>           — full-text search across memories\n"
+    )
+)
 
 
 # ---------------------------------------------------------------------------

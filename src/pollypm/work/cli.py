@@ -28,8 +28,37 @@ from pollypm.work.sqlite_service import (
     WorkServiceError,
 )
 
-task_app = typer.Typer(help="Manage work tasks.")
-flow_app = typer.Typer(help="Manage flow templates.")
+# Worked examples block — shown in `pm task --help` so a worker
+# hitting --help for the first time sees a copy-paste flow instead of
+# just a table of subcommands. wg05 / #242.
+#
+# Typer's rich renderer collapses whitespace inside epilog, but
+# preserves bullet-formatted lines in the help text itself, so we
+# embed examples there.
+_TASK_APP_HELP = """Manage work tasks.
+
+Examples (typical worker flow):
+
+• pm task next                                 — find work
+• pm task get shortlink_gen/1                  — read the spec
+• pm task claim shortlink_gen/1                — pick it up
+• pm task done shortlink_gen/1 --output '...'  — hand to review
+
+Run `pm help worker` for the full worker guide with --output payload
+templates and common failure modes.
+"""
+
+task_app = typer.Typer(help=_TASK_APP_HELP)
+flow_app = typer.Typer(
+    help=(
+        "Manage flow templates.\n"
+        "\n"
+        "Examples:\n"
+        "\n"
+        "• pm flow list                              — show registered flows\n"
+        "• pm flow validate standard                 — check a flow template\n"
+    )
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
