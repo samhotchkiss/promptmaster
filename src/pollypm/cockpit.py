@@ -261,85 +261,644 @@ def _render_inbox_panel(config) -> str:
                 pass
 
 
-def _render_project_dashboard(project: object, project_key: str, config_path, supervisor) -> str | None:
-    """Render a project dashboard with task counts, active tasks, alerts, and sessions."""
+# ---------------------------------------------------------------------------
+# Per-project dashboard (#245) — info-dense, section-based layout.
+#
+# Each ``_section_*`` helper renders one block of the dashboard. All helpers
+# degrade gracefully: when their data source is missing or malformed they
+# return an empty string (omitted section) or a "(none)" line rather than
+# raising. The top-level ``_render_project_dashboard`` threads a single
+# gathered ``_ProjectSnapshot`` through them to keep SQLite opens to one per
+# render.
+# ---------------------------------------------------------------------------
+
+_DASHBOARD_DIVIDER_WIDTH = 72
+_DASHBOARD_BULLET = "  "  # two-space indent for every row
+
+
+def _dashboard_divider(title: str = "") -> str:
+    """Return a section divider line ``─── title ──────``."""
+    if not title:
+        return _DASHBOARD_BULLET + "─" * (_DASHBOARD_DIVIDER_WIDTH - 2)
+    prefix = f"─── {title} "
+    remaining = max(3, _DASHBOARD_DIVIDER_WIDTH - 2 - len(prefix))
+    return _DASHBOARD_BULLET + prefix + "─" * remaining
+
+
+def _format_tokens(n: int) -> str:
+    """Human-readable token count: ``1234`` → ``1.2k``, ``2_100_000`` → ``2.1M``."""
+    if n < 1000:
+        return str(int(n))
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k"
+    return f"{n / 1_000_000:.1f}M"
+
+
+def _iso_to_dt(value: object):
+    """Best-effort ISO-string → aware datetime. Returns ``None`` on failure."""
+    from datetime import UTC, datetime
+
+    if value is None:
+        return None
+    if hasattr(value, "tzinfo"):
+        dt = value  # already a datetime
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except (ValueError, TypeError):
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def _age_from_dt(dt, now=None) -> str:
+    """Relative age: '5m ago', '2h ago'. Empty string on None."""
+    from datetime import UTC, datetime
+
+    if dt is None:
+        return ""
+    now = now or datetime.now(UTC)
+    secs = (now - dt).total_seconds()
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
+
+
+def _format_clock(dt) -> str:
+    """Render ``HH:MM`` from a datetime for activity timeline rows."""
+    from datetime import UTC, datetime
+
+    if dt is None:
+        return "     "
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.strftime("%H:%M")
+
+
+def _find_commit_sha(task) -> str | None:
+    """Pull a commit SHA from a task's most recent completed execution.
+
+    Walks the task's executions newest-first and looks for an artifact
+    with ``kind == ArtifactKind.COMMIT``. Returns the 7-char short SHA
+    so the row stays narrow, or ``None`` if no commit was produced.
+    """
+    try:
+        from pollypm.work.models import ArtifactKind
+    except Exception:  # noqa: BLE001
+        return None
+    executions = getattr(task, "executions", None) or []
+    for execution in reversed(executions):
+        output = getattr(execution, "work_output", None)
+        if output is None:
+            continue
+        for artifact in getattr(output, "artifacts", None) or []:
+            if getattr(artifact, "kind", None) == ArtifactKind.COMMIT:
+                ref = getattr(artifact, "ref", None)
+                if ref:
+                    return str(ref)[:7]
+    return None
+
+
+def _task_cycle_minutes(task) -> int | None:
+    """Minutes between first in_progress transition and the terminal one.
+
+    Falls back to ``None`` when transitions are missing or dates can't be
+    parsed — keeps the rendering tolerant of partial state on old tasks.
+    """
+    transitions = getattr(task, "transitions", None) or []
+    start = None
+    end = None
+    for tr in transitions:
+        ts = getattr(tr, "timestamp", None)
+        to_state = getattr(tr, "to_state", "")
+        if to_state == "in_progress" and start is None:
+            start = ts
+        if to_state in ("done", "cancelled"):
+            end = ts
+    if start is None or end is None:
+        return None
+    try:
+        return max(0, int((end - start).total_seconds() // 60))
+    except (TypeError, ValueError):
+        return None
+
+
+def _aggregate_project_tokens(
+    db_path: Path, project_key: str,
+) -> tuple[int, int] | None:
+    """SUM(total_input_tokens), SUM(total_output_tokens) for ``project_key``.
+
+    Queries ``work_sessions`` directly — when #86 lands its aggregate
+    helper we can swap this out for a single method call. Returns
+    ``None`` when the table is missing (old DB) or the query fails, so
+    the Tokens line degrades to "(n/a)" rather than breaking the render.
+    """
+    import sqlite3
+
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(total_input_tokens), 0), "
+                "       COALESCE(SUM(total_output_tokens), 0) "
+                "FROM work_sessions WHERE task_project = ?",
+                (project_key,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return 0, 0
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+def _worker_presence(supervisor, project_key: str) -> str:
+    """Render the header right-gutter: ``● worker alive`` / ``○ worker idle`` / ``– none``.
+
+    A worker is "alive" when at least one planned session for this project
+    has a recent heartbeat. "idle" means we know about the session but the
+    heartbeat is stale / absent. "none" means no worker session is planned
+    for this project at all.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    try:
+        launches = list(supervisor.plan_launches())
+    except Exception:  # noqa: BLE001
+        return "– no supervisor"
+
+    session_names = [
+        l.session.name for l in launches
+        if getattr(l.session, "project", None) == project_key
+        and getattr(l.session, "role", "") != "operator-pm"
+    ]
+    if not session_names:
+        return "– no worker"
+
+    alive_cutoff = datetime.now(UTC) - timedelta(minutes=5)
+    for name in session_names:
+        try:
+            hb = supervisor.store.latest_heartbeat(name)
+        except Exception:  # noqa: BLE001
+            continue
+        if hb is None:
+            continue
+        dt = _iso_to_dt(hb.created_at)
+        if dt is not None and dt > alive_cutoff and not hb.pane_dead:
+            return "● worker alive"
+    return "○ worker idle"
+
+
+def _section_header(name: str, presence: str) -> str:
+    """Project-name header with worker presence in the right gutter."""
+    gutter = presence or ""
+    # Pad the name so ``presence`` sits at the right edge of the divider.
+    total_width = _DASHBOARD_DIVIDER_WIDTH
+    # account for 2-space indent; name on the left, presence on the right
+    pad = max(1, total_width - len(name) - len(gutter) - 2)
+    return f"{_DASHBOARD_BULLET}{name}{' ' * pad}{gutter}"
+
+
+def _section_summary(counts: dict[str, int]) -> str:
+    """Counts bar: ``⟳ 1 in progress · ◉ 0 review · ○ 2 queued · ✓ 1 done``."""
+    parts: list[str] = []
+    for status in ("in_progress", "review", "queued", "blocked", "on_hold", "draft"):
+        n = counts.get(status, 0)
+        if n:
+            icon = _STATUS_ICONS.get(status, "·")
+            parts.append(f"{icon} {n} {status.replace('_', ' ')}")
+    done = counts.get("done", 0)
+    if done:
+        parts.append(f"✓ {done} done")
+    if not parts:
+        return f"{_DASHBOARD_BULLET}No tasks yet."
+    return _DASHBOARD_BULLET + " · ".join(parts)
+
+
+def _section_velocity(tasks: list, tokens: tuple[int, int] | None) -> list[str]:
+    """Velocity + cycle-time sparklines and token aggregation."""
+    from datetime import UTC, datetime, timedelta
+
+    lines: list[str] = []
+    now = datetime.now(UTC)
+
+    # Weekly velocity over the last 7 weeks: count of tasks that hit a
+    # terminal state in each week. The sparkline reads left-to-right
+    # oldest → newest.
+    weekly: list[int] = [0] * 7
+    for t in tasks:
+        if getattr(t, "work_status", None) is None:
+            continue
+        if t.work_status.value not in ("done", "cancelled"):
+            continue
+        dt = _iso_to_dt(t.updated_at)
+        if dt is None:
+            continue
+        age_days = (now - dt).days
+        if age_days < 0 or age_days >= 49:
+            continue
+        week_idx = 6 - (age_days // 7)
+        if 0 <= week_idx < 7:
+            weekly[week_idx] += 1
+    if any(weekly):
+        per_week = weekly[-1]
+        trend = (
+            "trending up" if weekly[-1] > weekly[0] + 1 else
+            "trending down" if weekly[-1] + 1 < weekly[0] else
+            "steady"
+        )
+        lines.append(
+            f"{_DASHBOARD_BULLET}Velocity    {_spark_bar(weekly):<8}    "
+            f"{per_week} tasks/wk, {trend}"
+        )
+
+    # Cycle time sparkline: median minutes for each of the last 7 completed tasks.
+    cycles: list[int] = []
+    completed = [
+        t for t in tasks if getattr(t, "work_status", None) is not None
+        and t.work_status.value == "done"
+    ]
+    completed.sort(
+        key=lambda t: _iso_to_dt(t.updated_at)
+        or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+    for t in completed[:7]:
+        m = _task_cycle_minutes(t)
+        if m is not None:
+            cycles.append(m)
+    if cycles:
+        avg_min = sum(cycles) // len(cycles)
+        cycles_asc = list(reversed(cycles))  # oldest-left, newest-right
+        lines.append(
+            f"{_DASHBOARD_BULLET}Cycle time  {_spark_bar(cycles_asc):<8}    "
+            f"{avg_min}m avg"
+        )
+
+    # Token aggregation — drops the line entirely when unavailable.
+    if tokens is not None:
+        tin, tout = tokens
+        if tin or tout:
+            lines.append(
+                f"{_DASHBOARD_BULLET}Tokens      "
+                f"{_format_tokens(tin)} in · {_format_tokens(tout)} out"
+            )
+    return lines
+
+
+def _section_you_need_to(
+    review_tasks: list,
+    alerts: list,
+    insights_pending: int,
+) -> list[str]:
+    """Attention-first block — approvals, alerts, advisor insights."""
+    lines = [_dashboard_divider("You need to"), ""]
+    if not review_tasks and not alerts and not insights_pending:
+        lines.append(f"{_DASHBOARD_BULLET}Nothing pending.")
+        lines.append("")
+        return lines
+    for t in review_tasks[:5]:
+        lines.append(
+            f"{_DASHBOARD_BULLET}◉ approve #{t.task_number} {t.title}"
+        )
+    for a in alerts[:3]:
+        sess = getattr(a, "session_name", "")
+        kind = getattr(a, "alert_type", "")
+        msg = (getattr(a, "message", "") or "")[:60]
+        lines.append(f"{_DASHBOARD_BULLET}▲ {sess}: {kind} — {msg}")
+    if insights_pending:
+        lines.append(
+            f"{_DASHBOARD_BULLET}✦ {insights_pending} advisor "
+            f"insight{'s' if insights_pending != 1 else ''} to review"
+        )
+    lines.append("")
+    return lines
+
+
+def _section_in_flight(in_progress: list) -> list[str]:
+    """Tasks currently being worked on."""
+    lines = [_dashboard_divider("In flight"), ""]
+    if not in_progress:
+        lines.extend([f"{_DASHBOARD_BULLET}(none)", ""])
+        return lines
+    for t in in_progress:
+        icon = _STATUS_ICONS.get(t.work_status.value, "⟳")
+        assignee = f" [{t.assignee}]" if getattr(t, "assignee", None) else ""
+        node = (
+            f" @ {t.current_node_id}"
+            if getattr(t, "current_node_id", None)
+            else ""
+        )
+        age = _age_from_dt(_iso_to_dt(getattr(t, "updated_at", None)))
+        age_part = f" · {age}" if age else ""
+        lines.append(
+            f"{_DASHBOARD_BULLET}{icon} #{t.task_number} {t.title}"
+            f"{assignee}{node}{age_part}"
+        )
+    lines.append("")
+    return lines
+
+
+def _section_recent(completed: list) -> list[str]:
+    """Most recently finished task with commit SHA, cycle time, approver."""
+    lines = [_dashboard_divider("Recent"), ""]
+    if not completed:
+        lines.extend([f"{_DASHBOARD_BULLET}(none)", ""])
+        return lines
+    t = completed[0]
+    dt = _iso_to_dt(getattr(t, "updated_at", None))
+    clock = _format_clock(dt)
+    icon = _STATUS_ICONS.get(t.work_status.value, "✓")
+
+    # Approver = the actor on the last done/approve transition.
+    approver = ""
+    for tr in reversed(getattr(t, "transitions", None) or []):
+        if tr.to_state in ("done",) and tr.actor:
+            approver = f"approved by {tr.actor}"
+            break
+    if not approver:
+        approver = ""
+
+    title = t.title[:40]
+    right = f"  {approver}" if approver else ""
+    lines.append(
+        f"{_DASHBOARD_BULLET}{clock}  {icon} #{t.task_number} {title}{right}"
+    )
+
+    # Sub-line: commit SHA + cycle time.
+    sub_parts: list[str] = []
+    sha = _find_commit_sha(t)
+    if sha:
+        sub_parts.append(f"commit {sha}")
+    cycle = _task_cycle_minutes(t)
+    if cycle is not None:
+        sub_parts.append(f"{cycle}m cycle")
+    if sub_parts:
+        lines.append(f"{_DASHBOARD_BULLET}       └ " + " · ".join(sub_parts))
+    lines.append("")
+    return lines
+
+
+def _section_activity(
+    tasks: list,
+    system_events: list,
+    *,
+    now=None,
+    limit: int = 10,
+) -> list[str]:
+    """Unified timeline: task transitions + system events from last 24h."""
+    from datetime import UTC, datetime, timedelta
+
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(hours=24)
+
+    entries: list[tuple[object, str]] = []  # (datetime, rendered row)
+
+    for t in tasks:
+        for tr in getattr(t, "transitions", None) or []:
+            dt = getattr(tr, "timestamp", None)
+            if dt is None:
+                continue
+            if getattr(dt, "tzinfo", None) is None:
+                dt = dt.replace(tzinfo=UTC)
+            if dt < cutoff:
+                continue
+            clock = _format_clock(dt)
+            actor = tr.actor or "?"
+            entries.append(
+                (
+                    dt,
+                    f"{_DASHBOARD_BULLET}{clock}  task/{t.task_number} "
+                    f"→ {tr.to_state:<15}({actor})",
+                )
+            )
+
+    for ev in system_events:
+        dt = _iso_to_dt(getattr(ev, "created_at", None))
+        if dt is None or dt < cutoff:
+            continue
+        etype = getattr(ev, "event_type", "")
+        if etype in ("heartbeat", "token_ledger", "polly_followup"):
+            continue
+        sess = getattr(ev, "session_name", "") or "system"
+        msg = (getattr(ev, "message", "") or "")[:50]
+        clock = _format_clock(dt)
+        entries.append(
+            (
+                dt,
+                f"{_DASHBOARD_BULLET}{clock}  {etype} {msg} ({sess})",
+            )
+        )
+
+    entries.sort(key=lambda row: row[0], reverse=True)
+
+    lines = [_dashboard_divider("Activity (last 24h)"), ""]
+    if not entries:
+        lines.extend([f"{_DASHBOARD_BULLET}(none)", ""])
+        return lines
+    for _dt, row in entries[:limit]:
+        lines.append(row)
+    lines.append("")
+    return lines
+
+
+def _section_insights(project_path: Path, project_key: str) -> list[str]:
+    """Last 7 days of advisor insights (emit=true) for this project."""
+    from datetime import UTC, datetime, timedelta
+
+    lines = [_dashboard_divider("Insights"), ""]
+    log_path = project_path / ".pollypm-state" / "advisor-log.jsonl"
+    if not log_path.exists():
+        lines.extend(
+            [f"{_DASHBOARD_BULLET}(no advisor insights in last 7 days)", ""]
+        )
+        return lines
+
+    cutoff = datetime.now(UTC) - timedelta(days=7)
+    kept: list[tuple[object, str, str]] = []
+    try:
+        raw = log_path.read_text(encoding="utf-8")
+    except OSError:
+        raw = ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("project") != project_key:
+            continue
+        if data.get("decision") != "emit":
+            continue
+        dt = _iso_to_dt(data.get("timestamp"))
+        if dt is None or dt < cutoff:
+            continue
+        summary = str(data.get("summary") or "")[:60]
+        severity = str(data.get("severity") or "")
+        kept.append((dt, severity, summary))
+    if not kept:
+        lines.extend(
+            [f"{_DASHBOARD_BULLET}(no advisor insights in last 7 days)", ""]
+        )
+        return lines
+    kept.sort(key=lambda row: row[0], reverse=True)
+    for dt, severity, summary in kept[:5]:
+        age = _age_from_dt(dt)
+        sev = f"[{severity}] " if severity else ""
+        lines.append(f"{_DASHBOARD_BULLET}✦ {sev}{summary} ({age})")
+    lines.append("")
+    return lines
+
+
+def _section_downtime(project_path: Path) -> list[str]:
+    """First 5 items from ``docs/downtime-backlog.md`` if present."""
+    lines = [_dashboard_divider("Downtime backlog"), ""]
+    backlog_path = project_path / "docs" / "downtime-backlog.md"
+    if not backlog_path.exists():
+        lines.extend([f"{_DASHBOARD_BULLET}(none queued)", ""])
+        return lines
+    try:
+        raw = backlog_path.read_text(encoding="utf-8")
+    except OSError:
+        raw = ""
+    entries: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        # Accept markdown bullets only — skip headings and prose.
+        if stripped.startswith(("- ", "* ", "+ ")):
+            entries.append(stripped[2:].strip())
+        if len(entries) >= 5:
+            break
+    if not entries:
+        lines.extend([f"{_DASHBOARD_BULLET}(none queued)", ""])
+        return lines
+    for e in entries:
+        lines.append(f"{_DASHBOARD_BULLET}• {e[:60]}")
+    lines.append("")
+    return lines
+
+
+def _section_quick_actions() -> list[str]:
+    """Row of keyboard hotkey hints."""
+    return [
+        _dashboard_divider("Quick actions"),
+        "",
+        f"{_DASHBOARD_BULLET}n  new task    w  start worker    r  replan    "
+        f"i  inbox    c  chat",
+    ]
+
+
+def _render_project_dashboard(
+    project: object,
+    project_key: str,
+    config_path,
+    supervisor,
+) -> str | None:
+    """Info-dense per-project dashboard (spec: #245).
+
+    Sections (top to bottom): header, summary bar, velocity/cycle/tokens,
+    "you need to" (approvals + alerts + pending insights), in-flight
+    tasks, most-recent completion, 24h activity timeline, advisor
+    insights (7d), downtime backlog, quick-action hotkeys.
+
+    Each section is rendered by a dedicated ``_section_*`` helper that
+    degrades gracefully on missing data so a fresh project with empty
+    state still produces a readable surface.
+    """
     from pollypm.work.sqlite_service import SQLiteWorkService
 
     db_path = project.path / ".pollypm" / "state.db"
     if not db_path.exists():
         return None
 
+    # Single SQLite open per render — every downstream section reuses
+    # this hydrated task list and the counts map.
     with SQLiteWorkService(db_path=db_path, project_path=project.path) as svc:
         counts = svc.state_counts(project=project_key)
         tasks = svc.list_tasks(project=project_key)
 
+    tokens = _aggregate_project_tokens(db_path, project_key)
+
     name = getattr(project, "name", None) or project_key
-    lines = [f"{name}", ""]
 
-    # Summary bar
-    total = sum(counts.values())
-    count_parts = []
-    for status in ("queued", "in_progress", "review", "blocked", "on_hold", "draft"):
-        n = counts.get(status, 0)
-        if n:
-            icon = _STATUS_ICONS.get(status, "·")
-            count_parts.append(f"{icon} {n} {status.replace('_', ' ')}")
-    done_count = counts.get("done", 0)
-    if done_count:
-        count_parts.append(f"✓ {done_count} done")
-    if count_parts:
-        lines.append(" · ".join(count_parts))
-    else:
-        lines.append("No tasks yet.")
-    lines.append("")
+    # Partition tasks for downstream sections.
+    in_progress = [
+        t for t in tasks if t.work_status.value == "in_progress"
+    ]
+    review = [t for t in tasks if t.work_status.value == "review"]
+    completed = [t for t in tasks if t.work_status.value == "done"]
+    completed.sort(
+        key=lambda t: _iso_to_dt(t.updated_at) or 0,
+        reverse=True,
+    )
 
-    # Active tasks (non-terminal) — sorted by status priority
-    _status_order = {"in_progress": 0, "review": 1, "queued": 2, "blocked": 3, "on_hold": 4, "draft": 5}
-    active = [t for t in tasks if t.work_status.value not in ("done", "cancelled")]
-    active.sort(key=lambda t: _status_order.get(t.work_status.value, 9))
-    if active:
-        lines.append("── Active ──")
-        for t in active:
-            icon = _STATUS_ICONS.get(t.work_status.value, "·")
-            assignee = f" [{t.assignee}]" if t.assignee else ""
-            node = f" @ {t.current_node_id}" if t.current_node_id else ""
-            lines.append(f"  {icon} #{t.task_number} {t.title}{assignee}{node}")
-        lines.append("")
-
-    # Recently completed (last 5)
-    completed = [t for t in tasks if t.work_status.value in ("done", "cancelled")]
-    completed.sort(key=lambda t: t.updated_at or "", reverse=True)
-    if completed:
-        lines.append(f"── Completed ({len(completed)}) ──")
-        for t in completed[:5]:
-            icon = _STATUS_ICONS.get(t.work_status.value, "·")
-            lines.append(f"  {icon} #{t.task_number} {t.title}")
-        if len(completed) > 5:
-            lines.append(f"  ... and {len(completed) - 5} more")
-        lines.append("")
-
-    # Alerts for this project
+    # Project-scoped alerts, filtered the same way the legacy renderer did.
+    project_alerts: list = []
     try:
         project_alerts = [
             a for a in supervisor.store.open_alerts()
             if any(
-                l.session.project == project_key and l.session.name == a.session_name
+                l.session.project == project_key
+                and l.session.name == a.session_name
                 for l in supervisor.plan_launches()
-            ) and a.alert_type not in ("suspected_loop", "stabilize_failed", "needs_followup")
+            )
+            and a.alert_type
+            not in ("suspected_loop", "stabilize_failed", "needs_followup")
         ]
-        if project_alerts:
-            lines.append("── Alerts ──")
-            for a in project_alerts:
-                lines.append(f"  ⚠ {a.alert_type}: {a.message}")
-            lines.append("")
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001
+        project_alerts = []
 
-    if not active and not completed:
-        lines.append("No active live lane is running for this project.")
-        lines.append("Select the project in the left rail and press N to start a worker lane.")
+    try:
+        system_events = supervisor.store.recent_events(limit=200)
+    except Exception:  # noqa: BLE001
+        system_events = []
+    system_events = [
+        e for e in system_events
+        if any(
+            l.session.project == project_key
+            and l.session.name == getattr(e, "session_name", None)
+            for l in (
+                supervisor.plan_launches()
+                if hasattr(supervisor, "plan_launches")
+                else []
+            )
+        )
+    ] if system_events else []
 
-    return "\n".join(lines)
+    presence = _worker_presence(supervisor, project_key)
+
+    out: list[str] = [
+        _section_header(name, presence),
+        _DASHBOARD_BULLET + "─" * (_DASHBOARD_DIVIDER_WIDTH - 2),
+        _section_summary(counts),
+        "",
+    ]
+    velocity_lines = _section_velocity(tasks, tokens)
+    if velocity_lines:
+        out.extend(velocity_lines)
+        out.append("")
+
+    out.extend(_section_you_need_to(review, project_alerts, 0))
+    out.extend(_section_in_flight(in_progress))
+    out.extend(_section_recent(completed))
+    out.extend(_section_activity(tasks, system_events))
+    out.extend(_section_insights(project.path, project_key))
+    out.extend(_section_downtime(project.path))
+    out.extend(_section_quick_actions())
+
+    return "\n".join(out)
 
 
 @dataclass(slots=True)
