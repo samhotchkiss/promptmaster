@@ -16,7 +16,15 @@ from typing import Any
 
 import typer
 
-rail_app = typer.Typer(help="Manage cockpit rail items.")
+rail_app = typer.Typer(
+    help=(
+        "Manage cockpit rail items.\n\n"
+        "Examples:\n\n"
+        "• pm rail list                       — show configured rail items\n"
+        "• pm rail add <plugin>               — add a plugin's rail item\n"
+        "• pm rail remove <plugin>            — remove a plugin's rail item\n"
+    )
+)
 
 
 USER_CONFIG_PATH = Path.home() / ".pollypm" / "pollypm.toml"

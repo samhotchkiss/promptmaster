@@ -48,7 +48,14 @@ from pollypm.tz import get_timezone
 
 
 briefing_app = typer.Typer(
-    help="Manage the morning briefing (daily inbox digest).",
+    help=(
+        "Manage the morning briefing (daily inbox digest).\n\n"
+        "Examples:\n\n"
+        "• pm briefing status                 — show briefing configuration\n"
+        "• pm briefing enable                 — turn on the daily briefing\n"
+        "• pm briefing now                    — render today's briefing immediately\n"
+        "• pm briefing preview                — dry-run without delivering\n"
+    ),
     no_args_is_help=True,
 )
 

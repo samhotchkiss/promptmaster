@@ -33,7 +33,13 @@ from pollypm.config import (
 
 
 project_app = typer.Typer(
-    help="Planner-backed project lifecycle (new / plan / replan).",
+    help=(
+        "Planner-backed project lifecycle (new / plan / replan).\n\n"
+        "Examples:\n\n"
+        "• pm project new <name>              — create a new planner-backed project\n"
+        "• pm project plan <name>             — (re)run the tree-of-plans planner\n"
+        "• pm project replan <name>           — regenerate the plan from current state\n"
+    ),
     no_args_is_help=True,
 )
 

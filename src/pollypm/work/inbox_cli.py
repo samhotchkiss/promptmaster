@@ -25,7 +25,14 @@ from pollypm.work.cli import (
 from pollypm.work.inbox_view import inbox_tasks
 
 
-inbox_app = typer.Typer(help="Work assigned to the user (work-service-backed).")
+inbox_app = typer.Typer(
+    help=(
+        "Work assigned to the user (work-service-backed).\n\n"
+        "Examples:\n\n"
+        "• pm inbox                           — list inbox items\n"
+        "• pm inbox show <id>                 — print one inbox item\n"
+    )
+)
 
 
 @inbox_app.callback(invoke_without_command=True)

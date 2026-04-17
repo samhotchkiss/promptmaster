@@ -43,7 +43,13 @@ from pollypm.plugins_builtin.downtime.state import (
 
 
 downtime_app = typer.Typer(
-    help="Manage the downtime exploration plugin (idle-LLM-budget tasks).",
+    help=(
+        "Manage the downtime exploration plugin (idle-LLM-budget tasks).\n\n"
+        "Examples:\n\n"
+        "• pm downtime status                 — show downtime state\n"
+        "• pm downtime enable                 — turn on downtime exploration\n"
+        "• pm downtime list                   — show exploration runs\n"
+    ),
     no_args_is_help=True,
 )
 

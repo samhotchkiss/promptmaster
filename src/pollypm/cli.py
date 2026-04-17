@@ -46,13 +46,73 @@ from pollypm.workers import create_worker_session, launch_worker_session
 from pollypm.worktrees import list_worktrees as list_project_worktrees
 
 
-app = typer.Typer(help="PollyPM CLI", invoke_without_command=True, no_args_is_help=False)
-alert_app = typer.Typer(help="Manage durable alerts.")
-session_app = typer.Typer(help="Manage session runtime state.")
-heartbeat_app = typer.Typer(help="Run or record heartbeat state.")
-issue_app = typer.Typer(help="Manage project issues through the configured backend.")
-report_app = typer.Typer(help="Report project status summaries.")
-itsalive_app = typer.Typer(help="Manage itsalive deployments.")
+# wg05 / #242: every `pm ... --help` gains an Examples section so
+# first-time users see copy-paste-ready commands for the common flows
+# alongside the raw subcommand table. Bullet formatting survives
+# typer's rich re-flow (epilog does not).
+_APP_HELP = """PollyPM CLI.
+
+Examples (primary flows):
+
+• pm                                — bring up / attach to the PollyPM session
+• pm task next                      — find the next queued task to work on
+• pm task claim shortlink_gen/1     — claim a queued task (provisions worktree)
+• pm worker-start <project>         — spin up a managed worker for a project
+• pm projects                       — list registered projects
+• pm help worker                    — full worker onboarding guide
+
+Sub-help:  pm task --help, pm session --help, pm project --help, pm plugins --help.
+"""
+
+app = typer.Typer(help=_APP_HELP, invoke_without_command=True, no_args_is_help=False)
+alert_app = typer.Typer(
+    help=(
+        "Manage durable alerts.\n\n"
+        "Examples:\n\n"
+        "• pm alert list                      — show open alerts\n"
+        "• pm alert ack <id>                  — acknowledge one\n"
+    )
+)
+session_app = typer.Typer(
+    help=(
+        "Manage session runtime state.\n\n"
+        "Examples:\n\n"
+        "• pm session set-status <name> idle       — mark a session idle\n"
+        "• pm session set-status <name> working    — mark a session as working\n"
+    )
+)
+heartbeat_app = typer.Typer(
+    help=(
+        "Run or record heartbeat state.\n\n"
+        "Examples:\n\n"
+        "• pm heartbeat run                   — run the heartbeat loop once\n"
+        "• pm heartbeat status                — show last heartbeat tick\n"
+    )
+)
+issue_app = typer.Typer(
+    help=(
+        "Manage project issues through the configured backend.\n\n"
+        "Examples:\n\n"
+        "• pm issue list                      — list issues for the active project\n"
+        "• pm issue show <id>                 — print a single issue\n"
+    )
+)
+report_app = typer.Typer(
+    help=(
+        "Report project status summaries.\n\n"
+        "Examples:\n\n"
+        "• pm report status                   — summarize all projects\n"
+        "• pm report status --project <name>  — summarize one project\n"
+    )
+)
+itsalive_app = typer.Typer(
+    help=(
+        "Manage itsalive deployments.\n\n"
+        "Examples:\n\n"
+        "• pm itsalive status                 — show deployment state\n"
+        "• pm itsalive deploy                 — deploy the project\n"
+    )
+)
 app.add_typer(alert_app, name="alert")
 app.add_typer(session_app, name="session")
 app.add_typer(heartbeat_app, name="heartbeat")
@@ -197,6 +257,67 @@ def init(
 @app.command()
 def example_config() -> None:
     typer.echo(render_example_config())
+
+
+_ROLE_GUIDES = {
+    "worker": ("docs/worker-guide.md", "Worker onboarding guide"),
+}
+
+
+@app.command("help")
+def role_help(
+    role: str = typer.Argument(
+        ...,
+        help="Role whose guide to print. Currently supported: worker.",
+    ),
+) -> None:
+    """Print the canonical guide for a role (worker, ...).
+
+    Role-scoped help surfaces the same content that's auto-injected
+    into a role's session prompt. Use this when you're outside a
+    managed session and need the playbook.
+    """
+    role_norm = role.strip().lower()
+    entry = _ROLE_GUIDES.get(role_norm)
+    if entry is None:
+        available = ", ".join(sorted(_ROLE_GUIDES.keys())) or "<none>"
+        typer.echo(
+            f"No guide registered for role '{role}'. "
+            f"Available: {available}.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    rel_path, title = entry
+    # Resolve against the repo root. ``pollypm`` is installed editable
+    # during dev; at runtime we prefer the packaged doc if it exists,
+    # falling back to the repo copy.
+    from importlib.resources import files as _files
+
+    doc_text: str | None = None
+    try:
+        # Packaged layout: src/pollypm/defaults/worker-guide.md (if we
+        # later ship it). For now fall through to the repo docs dir.
+        candidate = _files("pollypm").joinpath(f"../../{rel_path}")
+        if candidate.is_file():
+            doc_text = candidate.read_text()
+    except (ModuleNotFoundError, FileNotFoundError, TypeError):
+        pass
+    if doc_text is None:
+        # Walk up from this file to find the project root's docs/ dir.
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            candidate = parent / rel_path
+            if candidate.is_file():
+                doc_text = candidate.read_text()
+                break
+    if doc_text is None:
+        typer.echo(
+            f"Could not locate {rel_path} on disk. "
+            f"The guide exists in the PollyPM repo at that path.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    typer.echo(doc_text)
 
 
 @app.command()
