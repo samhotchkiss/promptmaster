@@ -49,15 +49,31 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def detect_changes(project_path: Path, since: datetime | None) -> bool:
-    """Stub change detection — returns False until ad02 lands.
+def detect_changes(
+    project_path: Path,
+    since: datetime | None,
+    *,
+    project_key: str | None = None,
+    work_service: Any | None = None,
+) -> bool:
+    """Return True when the project has a commit or task transition since ``since``.
 
-    ad02 replaces this with a real ``ChangeReport`` via
-    ``handlers/detect_changes.py``. Until then, the tick handler will
-    find no changed projects and schedule no sessions — which is the
-    correct degenerate behavior for a half-finished plugin: silence.
+    Thin adapter over :func:`pollypm.plugins_builtin.advisor.handlers.
+    detect_changes.detect_changes` — unit tests of the tick handler
+    monkeypatch this symbol to force particular outcomes; ad03's
+    context-packing imports the full :class:`ChangeReport` directly
+    from ``detect_changes.py``.
     """
-    return False
+    from pollypm.plugins_builtin.advisor.handlers.detect_changes import (
+        detect_changes as _detect,
+    )
+    report = _detect(
+        project_path,
+        since,
+        project_key=project_key,
+        work_service=work_service,
+    )
+    return report.has_changes
 
 
 def enqueue_advisor_review(
@@ -205,7 +221,21 @@ def _should_review(
     try:
         # Call via module attribute so tests can monkeypatch detect_changes.
         from pollypm.plugins_builtin.advisor.handlers import advisor_tick as _self
-        changed = bool(_self.detect_changes(project_path, since))
+        # detect_changes takes project_key + work_service kwargs in the ad02
+        # signature; older tests that monkeypatch it with a simpler
+        # positional-only signature still work because we route through
+        # the adapter below.
+        try:
+            changed = bool(
+                _self.detect_changes(
+                    project_path, since,
+                    project_key=project_key,
+                    work_service=work_service,
+                )
+            )
+        except TypeError:
+            # Backwards-compat: some tests patch a two-arg stub.
+            changed = bool(_self.detect_changes(project_path, since))
     except Exception as exc:  # noqa: BLE001
         logger.debug("advisor: detect_changes failed for %s: %s", project_key, exc)
         return False, "detect-error"
@@ -276,6 +306,15 @@ def advisor_tick_handler(payload: dict[str, Any]) -> dict[str, Any]:
     work_service = payload.get("work_service") if isinstance(payload, dict) else None
 
     state = load_state(base_dir)
+
+    # Drop the per-tick change-detection cache so each tick starts fresh.
+    # Cache is in-process only; it exists to deduplicate the work when
+    # assess.py (ad03) re-reads a ChangeReport inside the same tick.
+    try:
+        from pollypm.plugins_builtin.advisor.handlers.detect_changes import clear_cache
+        clear_cache()
+    except Exception:  # noqa: BLE001
+        pass
 
     projects = _iter_tracked_projects(config)
     results: list[dict[str, Any]] = []
