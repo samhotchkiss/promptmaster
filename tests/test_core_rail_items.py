@@ -124,9 +124,14 @@ def test_build_items_identical_to_legacy_shape(monkeypatch, tmp_path: Path) -> N
 
 
 def test_removing_core_rail_items_yields_empty_rail(monkeypatch, tmp_path: Path) -> None:
-    """Acceptance: if `core_rail_items` is removed, the rail is empty."""
-    # Simulate the plugin being disabled by config.
-    host = ExtensionHost(tmp_path, disabled=("core_rail_items",))
+    """Acceptance: if `core_rail_items` is removed, the rail is empty.
+
+    The activity_feed plugin also registers a rail entry (lf03) — we
+    disable it here too so the assertion still isolates the effect of
+    removing the core items.
+    """
+    # Simulate the plugins being disabled by config.
+    host = ExtensionHost(tmp_path, disabled=("core_rail_items", "activity_feed"))
     assert "core_rail_items" not in host.plugins()
 
     monkeypatch.setattr(
@@ -207,9 +212,16 @@ plugin = PollyPMPlugin(name="thirdparty", initialize=_init)
             for earlier in order[:idx]:
                 e_section, e_plugin, _e_label = earlier
                 if e_section == "workflows":
-                    # Any other workflow item must be a core item (<100).
-                    # None currently exists; if one did it should be a core.
-                    assert e_plugin == "core_rail_items" or e_plugin == "thirdparty"
+                    # Any earlier workflow item must be a core
+                    # registration (e.g. activity_feed at index 30) or
+                    # the third-party item itself. Plugin-contributed
+                    # items at 100+ must always sort after thirdparty
+                    # (150) only if their index is higher.
+                    assert e_plugin in {
+                        "core_rail_items",
+                        "activity_feed",
+                        "thirdparty",
+                    }
 
 
 def test_rail_registry_items_honour_index_and_section_order() -> None:

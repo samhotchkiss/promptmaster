@@ -298,6 +298,18 @@ class EventProjector:
                 f"{where_sql} ORDER BY id DESC LIMIT ?",
                 (*params, int(limit)),
             ).fetchall()
+        except sqlite3.OperationalError as exc:
+            # A missing ``events`` table is the common case on a brand-
+            # new state DB that hasn't seen any record_event call yet;
+            # demote to debug so we don't spam tests/CI.
+            if "no such table" in str(exc):
+                logger.debug(
+                    "activity_feed: events table absent on %s — skipping",
+                    self._state_db,
+                )
+            else:
+                logger.exception("activity_feed: state-store projection failed")
+            rows = []
         except sqlite3.DatabaseError:
             logger.exception("activity_feed: state-store projection failed")
             rows = []

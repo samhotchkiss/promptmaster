@@ -365,6 +365,15 @@ def cockpit_pane(
         from pollypm.cockpit_ui import PollyTasksApp
         PollyTasksApp(config_path, target).run(mouse=True)
         return
+    if kind == "activity":
+        # Live Activity Feed (lf03) — Textual app owned by the plugin
+        # so the cockpit pane doesn't need to know its internals.
+        from pollypm.plugins_builtin.activity_feed.cockpit.feed_panel import (
+            ActivityFeedApp,
+        )
+
+        ActivityFeedApp(config_path).run(mouse=True)
+        return
     from pollypm.cockpit_ui import PollyCockpitPaneApp
     PollyCockpitPaneApp(config_path, kind, target).run(mouse=True)
 
