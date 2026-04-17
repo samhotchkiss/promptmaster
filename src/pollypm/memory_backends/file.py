@@ -590,6 +590,117 @@ class FileMemoryBackend(MemoryBackend):
         )
         return updated
 
+    def forget(self, entry_id: int) -> bool:
+        """Hard-delete an entry by id. Returns True when a row was removed.
+
+        The on-disk markdown file is left in place for forensic reasons
+        (a stray ``.md`` is harmless and makes accidental forgets
+        recoverable by re-import). Callers that want aggressive cleanup
+        can delete the file themselves via ``entry.file_path`` before
+        calling forget.
+        """
+        existing = self._state_store.get_memory_entry(entry_id)
+        if existing is None:
+            return False
+        removed = self._state_store.delete_memory_entry(entry_id)
+        if removed:
+            self._plugins.run_observers(
+                "memory.after_forget",
+                _record_to_entry(existing),
+                metadata={"scope": existing.scope, "kind": existing.kind, "type": existing.type},
+            )
+        return removed
+
+    def update(
+        self,
+        entry_id: int,
+        *,
+        body: str | None = None,
+        importance: int | None = None,
+        tags: list[str] | None = None,
+    ) -> MemoryEntry | None:
+        """Edit an entry in place. Returns the refreshed MemoryEntry, or None.
+
+        Only ``body``, ``importance``, and ``tags`` are mutable via the
+        operator CLI — changing type / scope_tier requires a full
+        rewrite because it changes the retrieval-time semantics.
+        """
+        changed = self._state_store.update_memory_entry(
+            entry_id,
+            body=body,
+            importance=importance,
+            tags=tags,
+        )
+        if not changed:
+            return self.read_entry(entry_id)
+        refreshed = self._state_store.get_memory_entry(entry_id)
+        if refreshed is None:
+            return None
+        entry = _record_to_entry(refreshed)
+        self._plugins.run_observers(
+            "memory.after_edit",
+            entry,
+            metadata={"scope": entry.scope, "kind": entry.kind, "type": entry.type},
+        )
+        return entry
+
+    def stats(self) -> dict[str, int | dict[str, int]]:
+        """Return aggregate counts for the ``pm memory stats`` CLI.
+
+        Shape::
+
+            {
+                "total": <int>,
+                "by_type": {"user": N, "feedback": N, ...},
+                "by_scope": {"pollypm": N, "operator": N, ...},
+                "by_importance": {"1": N, "2": N, ...},
+                "by_tier": {"project": N, "task": N, ...},
+                "superseded": N,
+                "expired": N,
+            }
+
+        Cheap to compute — a handful of GROUP BY queries over a single
+        table.
+        """
+        store = self._state_store
+        total_row = store.execute(
+            "SELECT COUNT(*) FROM memory_entries"
+        ).fetchone()
+        total = int(total_row[0]) if total_row else 0
+
+        def _bucket(col: str) -> dict[str, int]:
+            rows = store.execute(
+                f"SELECT {col}, COUNT(*) FROM memory_entries GROUP BY {col}"
+            ).fetchall()
+            return {str(row[0]) if row[0] is not None else "(null)": int(row[1]) for row in rows}
+
+        by_type = _bucket("type")
+        by_scope = _bucket("scope")
+        by_importance = _bucket("importance")
+        by_tier = _bucket("scope_tier")
+
+        superseded = int(
+            store.execute(
+                "SELECT COUNT(*) FROM memory_entries WHERE superseded_by IS NOT NULL"
+            ).fetchone()[0]
+        )
+        now_iso = datetime.now(UTC).isoformat()
+        expired = int(
+            store.execute(
+                "SELECT COUNT(*) FROM memory_entries WHERE ttl_at IS NOT NULL AND ttl_at <= ?",
+                (now_iso,),
+            ).fetchone()[0]
+        )
+        return {
+            "total": total,
+            "by_type": by_type,
+            "by_scope": by_scope,
+            "by_importance": by_importance,
+            "by_tier": by_tier,
+            "superseded": superseded,
+            "expired": expired,
+        }
+
     def compact(self, scope: str, *, limit: int = 50) -> MemorySummary:
         entries = self.list_entries(scope=scope, limit=limit)
         summary_text = _summarize_entries(scope, entries)

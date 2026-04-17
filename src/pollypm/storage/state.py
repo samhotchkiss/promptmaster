@@ -1996,6 +1996,78 @@ class StateStore:
             self.commit()
         return updated
 
+    def delete_memory_entry(self, entry_id: int) -> bool:
+        """Hard-delete a single memory row. Returns True when a row was removed.
+
+        Used by the ``pm memory forget`` CLI and the curator's TTL
+        sweep. FTS triggers keep the virtual index consistent
+        automatically. The on-disk markdown file is left untouched —
+        callers that care about the file removing it belongs to a
+        separate concern (the file backend's ``forget`` wrapper).
+        """
+        cursor = self.execute(
+            "DELETE FROM memory_entries WHERE id = ?",
+            (int(entry_id),),
+        )
+        removed = int(cursor.rowcount) if cursor.rowcount is not None else 0
+        if removed:
+            self.commit()
+        return removed > 0
+
+    def update_memory_entry(
+        self,
+        entry_id: int,
+        *,
+        body: str | None = None,
+        importance: int | None = None,
+        tags: list[str] | None = None,
+        superseded_by: int | None = None,
+        clear_superseded: bool = False,
+    ) -> bool:
+        """Mutate a subset of fields on a memory row. Returns True on change.
+
+        ``body`` / ``importance`` / ``tags`` / ``superseded_by`` are all
+        optional — fields left at ``None`` keep their current values.
+        Pass ``clear_superseded=True`` to explicitly null the
+        ``superseded_by`` column (useful for reviewer rollback).
+
+        ``updated_at`` is bumped whenever any field changes.
+        """
+        sets: list[str] = []
+        params: list[object] = []
+        if body is not None:
+            sets.append("body = ?")
+            params.append(str(body))
+        if importance is not None:
+            if not (1 <= int(importance) <= 5):
+                raise ValueError(
+                    f"importance must be between 1 and 5 (got {importance})"
+                )
+            sets.append("importance = ?")
+            params.append(int(importance))
+        if tags is not None:
+            sets.append("tags = ?")
+            params.append(json.dumps([str(tag) for tag in tags], ensure_ascii=True))
+        if clear_superseded:
+            sets.append("superseded_by = NULL")
+        elif superseded_by is not None:
+            sets.append("superseded_by = ?")
+            params.append(int(superseded_by))
+        if not sets:
+            return False
+        now = self._now()
+        sets.append("updated_at = ?")
+        params.append(now)
+        params.append(int(entry_id))
+        cursor = self.execute(
+            f"UPDATE memory_entries SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+        changed = int(cursor.rowcount) if cursor.rowcount is not None else 0
+        if changed:
+            self.commit()
+        return changed > 0
+
     def record_memory_summary(
         self,
         *,
