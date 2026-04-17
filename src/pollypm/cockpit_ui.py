@@ -1220,8 +1220,9 @@ class PollyTasksApp(App[None]):
     CSS = """
     Screen { background: #10161b; color: #eef2f4; }
     #task-list { height: 1fr; padding: 1 2; }
-    #task-detail { height: 1fr; padding: 1 2; display: none; }
-    #task-detail.visible { display: block; }
+    #task-detail-scroll { height: 1fr; display: none; overflow-y: auto; }
+    #task-detail-scroll.visible { display: block; }
+    #task-detail { padding: 1 2; }
     .task-row { padding: 0 1; }
     .task-row:hover { background: #1a2530; }
     """
@@ -1239,8 +1240,10 @@ class PollyTasksApp(App[None]):
         self._selected_task_id: str | None = None
 
     def compose(self) -> ComposeResult:
+        from textual.containers import VerticalScroll
         yield ListView(id="task-list")
-        yield Static("", id="task-detail")
+        with VerticalScroll(id="task-detail-scroll"):
+            yield Static("", id="task-detail")
 
     def on_mount(self) -> None:
         self._refresh_list()
@@ -1433,11 +1436,11 @@ class PollyTasksApp(App[None]):
 
         detail = self.query_one("#task-detail", Static)
         detail.update("\n".join(lines))
-        detail.add_class("visible")
+        self.query_one("#task-detail-scroll").add_class("visible")
         self.query_one("#task-list", ListView).styles.display = "none"
 
     def action_back(self) -> None:
-        self.query_one("#task-detail", Static).remove_class("visible")
+        self.query_one("#task-detail-scroll").remove_class("visible")
         self.query_one("#task-list", ListView).styles.display = "block"
         self._selected_task_id = None
 
