@@ -1,0 +1,35 @@
+api_version = "1"
+name = "advisor"
+kind = "agent_profile"
+version = "0.1.0"
+entrypoint = "plugin.py:plugin"
+description = "Advisor plugin: every 30 minutes, reviews recent activity against the project's plan and emits an insight only when it sees something structurally worth saying. Silent by default — the persona is the quality filter."
+
+[[capabilities]]
+kind = "agent_profile"
+name = "advisor"
+requires_api = ">=1,<2"
+
+[[capabilities]]
+kind = "job_handler"
+name = "advisor.tick"
+requires_api = ">=1,<2"
+
+[[capabilities]]
+kind = "job_handler"
+name = "advisor.autoclose"
+requires_api = ">=1,<2"
+
+[[capabilities]]
+kind = "roster_entry"
+name = "advisor.tick"
+requires_api = ">=1,<2"
+
+[[capabilities]]
+kind = "roster_entry"
+name = "advisor.autoclose"
+requires_api = ">=1,<2"
+
+[content]
+kinds = ["flow_template"]
+user_paths = ["flows"]
