@@ -326,6 +326,17 @@ class Supervisor:
         if hasattr(self, "ensure_knowledge_extraction_schedule"):
             _log.debug("Supervisor.start(): ensure_knowledge_extraction_schedule")
             self.ensure_knowledge_extraction_schedule()
+        # #268 Gap B: rebuild the sessions table from live tmux state so
+        # SessionRoleIndex can resolve every running session. Older boots
+        # only wrote rows for newly-created windows, leaving pre-existing
+        # heartbeat/operator/reviewer/worker sessions unregistered. One-
+        # shot scan per cockpit start; failures are swallowed.
+        try:
+            repaired = self.repair_sessions_table()
+            if repaired:
+                _log.debug("Supervisor.start(): repaired %d sessions rows", repaired)
+        except Exception:  # noqa: BLE001
+            _log.debug("Supervisor.start(): repair_sessions_table failed", exc_info=True)
 
     def stop(self) -> None:
         """Gracefully release Supervisor-owned resources.
@@ -527,6 +538,57 @@ class Supervisor:
                     for marker in markers_dir.iterdir():
                         marker.unlink(missing_ok=True)
 
+    def repair_sessions_table(self) -> int:
+        """Upsert a ``sessions`` row for every configured session whose
+        tmux window is currently alive.
+
+        Repairs DBs that were populated by an older build that only
+        registered newly-created windows (see #268 Gap B). Intended to
+        run once at cockpit start — tmux is scanned in a single
+        ``list_all_windows`` call so the cost is bounded.
+
+        Returns the number of rows upserted.
+        """
+        storage_session = self.storage_closet_session_name()
+        live_windows: set[str] = set()
+        try:
+            if self.session_service.tmux.has_session(storage_session):
+                for w in self.session_service.tmux.list_windows(storage_session):
+                    live_windows.add(w.name)
+        except Exception:  # noqa: BLE001
+            # If tmux is unreachable, quietly skip — we'll try again next
+            # boot. Don't fail cockpit startup on a stat call.
+            return 0
+
+        if not live_windows:
+            return 0
+
+        try:
+            launches = self.plan_launches()
+        except Exception:  # noqa: BLE001
+            return 0
+
+        upserted = 0
+        for launch in launches:
+            if launch.window_name not in live_windows:
+                continue
+            try:
+                self.store.upsert_session(
+                    name=launch.session.name,
+                    role=launch.session.role,
+                    project=launch.session.project,
+                    provider=launch.session.provider.value,
+                    account=launch.account.name,
+                    cwd=str(launch.session.cwd),
+                    window_name=launch.window_name,
+                )
+                upserted += 1
+            except Exception:  # noqa: BLE001
+                # Per-session failure is non-fatal — we want to patch as
+                # many rows as we can.
+                continue
+        return upserted
+
     def _reconcile_existing(
         self,
         session_name: str,
@@ -544,6 +606,11 @@ class Supervisor:
         created = 0
         for launch in launches:
             if launch.window_name in existing_windows:
+                # Window already alive — still upsert the sessions row so
+                # SessionRoleIndex can resolve role:<role> to this session.
+                # #268 Gap B: pre-existing windows (heartbeat, operator,
+                # reviewer, workers) would otherwise never get registered.
+                self._record_launch(launch)
                 continue
             _status(f"Recreating {launch.session.name}...")
             if not self.session_service.tmux.has_session(storage_session):
