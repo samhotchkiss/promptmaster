@@ -40,7 +40,8 @@ SKILLS_DIR = (
 #  - Deploy / Infrastructure (6): 56
 #  - Workflow & Process (8): 64
 #  - Browser & Web Automation (4): 68
-EXPECTED_COUNT = 68
+#  - Meta (3): 71 — locked
+EXPECTED_COUNT = 71
 
 
 REQUIRED_FIELDS = {"name", "description", "when_to_trigger", "kind"}
