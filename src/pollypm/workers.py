@@ -5,7 +5,7 @@ from pathlib import Path
 
 import typer
 
-from pollypm.accounts import _account_logged_in
+from pollypm.acct import detect_logged_in
 from pollypm.config import load_config, write_config
 from pollypm.onboarding import default_session_args
 from pollypm.models import ProviderKind, SessionConfig
@@ -28,7 +28,7 @@ def _effective_control_accounts(config_path: Path) -> set[str]:
 def _account_is_available(config_path: Path, account_name: str) -> bool:
     config = load_config(config_path)
     account = config.accounts[account_name]
-    if not _account_logged_in(account):
+    if not detect_logged_in(account):
         return False
     store = StateStore(config.project.state_db)
     runtime = store.get_account_runtime(account_name)

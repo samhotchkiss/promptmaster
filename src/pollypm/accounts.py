@@ -116,56 +116,20 @@ def _account_usage_summary(account: AccountConfig) -> tuple[str, str, str]:
     return ("unknown", "unknown", "unknown")
 
 
-def _account_logged_in(account: AccountConfig) -> bool:
-    """Delegating shim — Phase D of #397 moved the live check to the manager.
-
-    Kept as a thin wrapper so existing callers (``pollypm.workers``,
-    internal ``_effective_logged_in``) continue to import the same
-    symbol while the real dispatch happens through the provider-agnostic
-    manager. Phase E removes this shim once call sites migrate.
-    """
-    from pollypm.acct import manager as _acct_manager
-
-    return _acct_manager.detect_logged_in(account)
-
-
 def _effective_logged_in(
     account: AccountConfig,
     *,
     cached_health: str | None = None,
     runtime_status: str | None = None,
 ) -> bool:
-    logged_in = _account_logged_in(account)
+    from pollypm.acct import detect_logged_in
+
+    logged_in = detect_logged_in(account)
     if runtime_status in {"auth-broken", "signed-out"}:
         return False
     if cached_health in {"auth-broken", "signed-out"}:
         return False
     return logged_in
-
-
-def _parse_claude_usage_text(text: str) -> tuple[str, str]:
-    """Deprecated — use :func:`pollypm.providers.claude.usage_parse.parse_claude_usage_text`.
-
-    Kept as a back-compat shim until Phase D of #397. The underlying
-    regex is unchanged.
-    """
-    from pollypm.providers.claude.usage_parse import parse_claude_usage_text
-
-    return parse_claude_usage_text(text)
-
-
-def _parse_codex_status_text(text: str) -> tuple[str, str]:
-    """Back-compat shim: Phase C of #397 moved this to the Codex package.
-
-    The real parser now lives at
-    :func:`pollypm.providers.codex.usage_parse.parse_codex_status_text`.
-    This shim preserves the legacy private import path so existing
-    tests (``tests/test_account_usage.py``) and the state-store writer
-    keep working; Phase D migrates callers and drops the shim.
-    """
-    from pollypm.providers.codex.usage_parse import parse_codex_status_text
-
-    return parse_codex_status_text(text)
 
 
 def _codex_credentials_store(home: Path) -> str:

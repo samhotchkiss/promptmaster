@@ -108,7 +108,7 @@ def test_auto_select_worker_avoids_effective_live_controller(tmp_path: Path, mon
         effective_provider=ProviderKind.CODEX.value,
     )
 
-    monkeypatch.setattr("pollypm.workers._account_logged_in", lambda account: True)
+    monkeypatch.setattr("pollypm.workers.detect_logged_in", lambda account: True)
 
     selected = auto_select_worker_account(config_path)
 
@@ -125,7 +125,7 @@ def test_auto_select_worker_skips_runtime_unhealthy_account(tmp_path: Path, monk
         reason="failed auth",
     )
 
-    monkeypatch.setattr("pollypm.workers._account_logged_in", lambda account: True)
+    monkeypatch.setattr("pollypm.workers.detect_logged_in", lambda account: True)
 
     selected = auto_select_worker_account(config_path)
 
@@ -146,7 +146,7 @@ def test_auto_select_worker_uses_control_plane_account_before_controller_last_re
     del config.accounts["claude_worker"]
     write_config(config, config_path, force=True)
 
-    monkeypatch.setattr("pollypm.workers._account_logged_in", lambda account: True)
+    monkeypatch.setattr("pollypm.workers.detect_logged_in", lambda account: True)
 
     selected = auto_select_worker_account(config_path)
 

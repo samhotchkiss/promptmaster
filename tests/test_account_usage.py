@@ -1,17 +1,17 @@
 from pathlib import Path
 
 from pollypm.accounts import (
-    _parse_claude_usage_text,
-    _parse_codex_status_text,
     inspect_account_isolation,
     probe_account_usage,
 )
 from pollypm.config import write_config
 from pollypm.models import AccountConfig, ProjectSettings, PollyPMConfig, PollyPMSettings, ProviderKind, RuntimeKind
+from pollypm.providers.claude.usage_parse import parse_claude_usage_text
+from pollypm.providers.codex.usage_parse import parse_codex_status_text
 
 
 def test_parse_claude_usage_text() -> None:
-    health, summary = _parse_claude_usage_text(
+    health, summary = parse_claude_usage_text(
         """
         Status   Config   Usage   Stats
 
@@ -26,7 +26,7 @@ def test_parse_claude_usage_text() -> None:
 
 
 def test_parse_codex_status_text() -> None:
-    health, summary = _parse_codex_status_text(
+    health, summary = parse_codex_status_text(
         """
         › Implement {feature}
 
