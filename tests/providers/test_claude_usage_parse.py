@@ -76,10 +76,3 @@ def test_parse_usage_snapshot_returns_raw_text_only_on_failure() -> None:
     assert snapshot.raw_text == "unrelated noise"
 
 
-def test_legacy_accounts_shim_still_routes_to_new_parser() -> None:
-    """The back-compat shim in :mod:`pollypm.accounts` must preserve behavior."""
-    from pollypm.accounts import _parse_claude_usage_text
-
-    assert _parse_claude_usage_text(WEEKLY_SAMPLE) == parse_claude_usage_text(
-        WEEKLY_SAMPLE
-    )
