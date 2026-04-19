@@ -5,9 +5,7 @@ from pathlib import Path
 from pollypm.models import ProviderKind
 from pollypm.onboarding import (
     _build_login_shell,
-    _detect_claude_email,
     _connect_account_via_tmux,
-    _detect_codex_email,
     _detect_email_from_pane,
     _login_completion_marker_seen,
     _provider_choices,
@@ -16,6 +14,8 @@ from pollypm.onboarding import (
     ConnectedAccount,
     LoginPreferences,
 )
+from pollypm.providers.claude.detect import detect_claude_email
+from pollypm.providers.codex.detect import detect_codex_email
 
 
 def test_slugify_email_generates_stable_account_name() -> None:
@@ -30,7 +30,7 @@ def test_detect_codex_email_reads_isolated_codex_auth_file(tmp_path: Path) -> No
     auth_path.parent.mkdir(parents=True)
     auth_path.write_text(json.dumps({"tokens": {"id_token": token}}))
 
-    assert _detect_codex_email(tmp_path) == "jane@example.com"
+    assert detect_codex_email(tmp_path) == "jane@example.com"
 
 
 def test_detect_codex_email_from_status_pane() -> None:
@@ -112,7 +112,7 @@ def test_detect_claude_email_requires_logged_in_flag(monkeypatch, tmp_path: Path
         lambda *args, **kwargs: Result('{"loggedIn": false, "email": "pearl@swh.me"}'),
     )
 
-    assert _detect_claude_email(tmp_path) is None
+    assert detect_claude_email(tmp_path) is None
 
 
 def test_provider_choices_hide_continue_before_first_account(tmp_path: Path) -> None:

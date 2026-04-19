@@ -280,6 +280,66 @@ def test_check_provider_account_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 
 
 # --------------------------------------------------------------------- #
+# Registered providers (#397 Phase E)
+# --------------------------------------------------------------------- #
+
+
+def test_check_registered_providers_passes_with_builtins() -> None:
+    """Every installed PollyPM ships with 'claude' + 'codex' registered.
+
+    The check walks the real entry-point registry; if this fails, the
+    package is installed without its own entry points — reinstall.
+    """
+    result = doctor.check_registered_providers()
+    assert result.passed, result.status
+    providers = result.data.get("providers", [])
+    assert "claude" in providers
+    assert "codex" in providers
+    assert "registered-providers:" in result.status
+
+
+def test_check_registered_providers_fails_when_registry_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pollypm.acct import registry as registry_mod
+
+    monkeypatch.setattr(registry_mod, "list_providers", lambda: [])
+    # Force the doctor module to resolve the patched symbol.
+    monkeypatch.setattr(
+        "pollypm.acct.list_providers", lambda: [], raising=False
+    )
+    result = doctor.check_registered_providers()
+    assert not result.passed
+    assert "no providers registered" in result.status
+    assert "uv tool install" in result.fix
+
+
+def test_check_registered_providers_reports_per_provider_load_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single broken adapter is reported by name without masking others."""
+
+    def _broken_get(name: str):
+        if name == "bogus":
+            raise ImportError("module 'bogus' has no attribute 'Adapter'")
+        return object()
+
+    monkeypatch.setattr(
+        "pollypm.acct.list_providers",
+        lambda: ["claude", "bogus"],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "pollypm.acct.get_provider", _broken_get, raising=False
+    )
+    result = doctor.check_registered_providers()
+    assert not result.passed
+    assert "bogus failed to load" in result.status
+    assert "ImportError" in result.status
+    assert "bogus" in result.data.get("failures", {})
+
+
+# --------------------------------------------------------------------- #
 # Plugins
 # --------------------------------------------------------------------- #
 
