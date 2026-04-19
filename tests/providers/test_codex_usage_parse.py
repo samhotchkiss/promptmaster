@@ -6,10 +6,9 @@ Run with::
         pytest tests/providers/test_codex_usage_parse.py -x
 
 Covers the weekly-quota parser that reads the Codex ``/status`` pane
-dump and returns ``(health, summary)``. The legacy test at
-``tests/test_account_usage.py::test_parse_codex_status_text`` exercises
-the back-compat shim; these tests pin the new module directly so the
-shim can be removed later without losing coverage.
+dump and returns ``(health, summary)``. These tests pin the canonical
+module directly; Phase E of #397 removed the back-compat shim at
+``pollypm.accounts._parse_codex_status_text``.
 """
 
 from __future__ import annotations
@@ -71,10 +70,3 @@ def test_parse_codex_status_text_percent_left_beats_usage_limit_marker() -> None
     assert parse_codex_status_text(text) == ("healthy", "42% left")
 
 
-def test_parse_codex_status_text_matches_legacy_shim() -> None:
-    """The back-compat shim at ``pollypm.accounts._parse_codex_status_text``
-    must return the same tuple so existing callers keep working."""
-    from pollypm.accounts import _parse_codex_status_text as _legacy_shim
-
-    text = "gpt-5.4 default · 33% left"
-    assert _legacy_shim(text) == parse_codex_status_text(text)

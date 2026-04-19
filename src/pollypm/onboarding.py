@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 import shlex
 import shutil
@@ -505,85 +504,42 @@ def _decode_jwt_payload(token: str) -> dict[str, object]:
     return json.loads(base64.urlsafe_b64decode(payload))
 
 
-def _detect_codex_email(home: Path) -> str | None:
-    """Back-compat shim: Phase C of #397 moved this to the Codex package.
-
-    The real implementation now lives at
-    :func:`pollypm.providers.codex.detect.detect_codex_email`. Existing
-    call sites inside this module (and tests) import the shim name
-    unchanged; once Phase D migrates callers, this shim can be deleted.
-    """
-    from pollypm.providers.codex.detect import detect_codex_email
-
-    return detect_codex_email(home)
-
-
-def _isolated_env(provider: ProviderKind, home: Path) -> dict[str, str]:
-    """Return provider-pinned env vars layered onto ``os.environ``.
-
-    Phase B of #397: the Claude branch delegates to
-    :func:`pollypm.providers.claude.env.isolated_env`; the Codex branch
-    stays here until Phase C extracts it. The shape is unchanged.
-    """
-    if provider is ProviderKind.CLAUDE:
-        from pollypm.providers.claude.env import isolated_env_with_os_environ
-
-        return isolated_env_with_os_environ(home)
-    return provider_profile_env_for_provider(provider, home, base_env=os.environ)
-
-
-def _detect_claude_email(home: Path) -> str | None:
-    """Deprecated — use :func:`pollypm.providers.claude.detect.detect_claude_email`.
-
-    Kept as a thin shim so existing callers (and tests) that import
-    ``pollypm.onboarding._detect_claude_email`` keep working until the
-    Phase D removal window. Behavior preserves the #396 fix.
-    """
-    from pollypm.providers.claude.detect import detect_claude_email as _impl
-
-    return _impl(home)
-
-
 def _detect_account_email(provider: ProviderKind, home: Path) -> str | None:
+    """Dispatch email-from-home detection to the provider package.
+
+    Tiny glue for the login-window loop in this module — the real
+    detectors live in :mod:`pollypm.providers.claude.detect` and
+    :mod:`pollypm.providers.codex.detect`. Kept here so the loop's
+    provider-agnostic flow (capture pane → try email → try home) has a
+    single entry point tests can monkeypatch.
+    """
     if provider is ProviderKind.CODEX:
-        return _detect_codex_email(home)
+        from pollypm.providers.codex.detect import detect_codex_email
+
+        return detect_codex_email(home)
     if provider is ProviderKind.CLAUDE:
-        return _detect_claude_email(home)
+        from pollypm.providers.claude.detect import detect_claude_email
+
+        return detect_claude_email(home)
     raise ValueError(f"Unsupported provider: {provider.value}")
 
 
 def _detect_email_from_pane(provider: ProviderKind, pane_text: str) -> str | None:
-    """Dispatch Codex pane-scraping to the Codex package (Phase C of #397).
+    """Dispatch pane-scraping to the provider package.
 
-    The Codex branch lives at
-    :func:`pollypm.providers.codex.detect.detect_email_from_pane`; the
-    Claude branch stays here until Phase B extracts it. Returning None
-    for unrecognised providers preserves the pre-split behaviour.
+    Mirror of :func:`_detect_account_email` — the heavy lifting happens
+    in the provider ``detect`` modules; this dispatcher exists so the
+    login-window loop can stay provider-agnostic.
     """
     if provider is ProviderKind.CODEX:
-        from pollypm.providers.codex.detect import (
-            detect_email_from_pane as _codex_detect_email_from_pane,
-        )
+        from pollypm.providers.codex.detect import detect_email_from_pane
 
-        return _codex_detect_email_from_pane(pane_text)
+        return detect_email_from_pane(pane_text)
     if provider is ProviderKind.CLAUDE:
-        from pollypm.providers.claude.detect import (
-            detect_email_from_pane as _claude_detect_email_from_pane,
-        )
+        from pollypm.providers.claude.detect import detect_email_from_pane
 
-        return _claude_detect_email_from_pane(pane_text)
+        return detect_email_from_pane(pane_text)
     return None
-
-
-def _claude_prompt_ready(pane_text: str) -> bool:
-    """Deprecated — use :func:`pollypm.providers.claude.detect.claude_prompt_ready`.
-
-    Thin shim for back-compat; kept for callers that imported the
-    private helper before Phase B.
-    """
-    from pollypm.providers.claude.detect import claude_prompt_ready as _impl
-
-    return _impl(pane_text)
 
 
 def _login_completion_marker_seen(pane_text: str) -> bool:

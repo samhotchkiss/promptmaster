@@ -709,6 +709,79 @@ def check_storage_backend() -> CheckResult:
     )
 
 
+def check_registered_providers() -> CheckResult:
+    """Probe the ``pollypm.provider`` entry-point registry (issue #397).
+
+    Phase E of the account-management refactor introduced a
+    provider-agnostic substrate at :mod:`pollypm.acct`; each provider
+    (Claude, Codex, and any third-party plugin) registers its adapter
+    via the ``pollypm.provider`` entry-point group. Doctor walks the
+    registry and confirms every registered adapter can be imported and
+    instantiated — a misconfigured entry point or a broken adapter
+    class would otherwise only surface when an account tries to probe.
+
+    Mirrors the ``storage-backend`` check: one call to the registry,
+    per-provider try/except so a single broken adapter does not mask
+    the others.
+    """
+    from pollypm.acct import get_provider, list_providers
+
+    names = list_providers()
+    if not names:
+        return _fail(
+            "no providers registered",
+            why=(
+                "PollyPM resolves every account (Claude, Codex, plugin) "
+                "via the 'pollypm.provider' entry-point group; with no "
+                "entry points registered, no account can run and every "
+                "`pm account` command will fail."
+            ),
+            fix=(
+                "Reinstall PollyPM so the built-in 'claude' and 'codex' "
+                "entry points are registered —\n"
+                "  uv tool install --editable --reinstall .\n"
+                "If a third-party provider is expected, reinstall the "
+                "plugin package that ships it.\n"
+                "Recheck: pm doctor"
+            ),
+            data={"providers": []},
+        )
+
+    failures: dict[str, str] = {}
+    for name in names:
+        try:
+            get_provider(name)
+        except Exception as exc:  # noqa: BLE001
+            failures[name] = f"{type(exc).__name__}: {exc}"
+
+    if failures:
+        first_name = next(iter(failures))
+        first_error = failures[first_name]
+        return _fail(
+            f"{first_name} failed to load ({first_error})",
+            why=(
+                "A registered provider adapter raised on import or "
+                "instantiation. Every account whose provider string "
+                "maps to that adapter will fail before any subprocess "
+                "runs — the failure is silent until the user actually "
+                "probes an account."
+            ),
+            fix=(
+                "Inspect the error above, verify the provider plugin's "
+                "installation, and fix the import / constructor issue.\n"
+                f"Registered providers: {', '.join(names)}\n"
+                f"Failing: {', '.join(sorted(failures))}\n"
+                "Recheck: pm doctor"
+            ),
+            data={"providers": names, "failures": failures},
+        )
+
+    return _ok(
+        f"registered-providers: {', '.join(names)}",
+        data={"providers": names},
+    )
+
+
 # --------------------------------------------------------------------- #
 # Plugin health
 # --------------------------------------------------------------------- #
@@ -2606,6 +2679,7 @@ def _registered_checks() -> list[Check]:
         Check("config-file", check_config_file, "install"),
         Check("provider-account", check_provider_account_configured, "install"),
         Check("storage-backend", check_storage_backend, "install"),
+        Check("registered-providers", check_registered_providers, "install"),
         # Plugins
         Check("builtin-plugin-manifests", check_builtin_plugin_manifests, "plugins"),
         Check("critical-plugins-enabled", check_no_critical_plugin_disabled, "plugins"),
