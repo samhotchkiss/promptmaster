@@ -356,9 +356,23 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         if not mechanical_only and context.previous_snapshot_hash and context.previous_snapshot_hash == context.snapshot_hash:
             hashes = api.recent_snapshot_hashes(context.session_name, limit=3)
             if len(hashes) == 3 and len(set(hashes)) == 1:
-                # Check if this worker has any assigned work — if not, it's
-                # legitimately idle and shouldn't be flagged.
-                if context.role == "worker" and not self._has_pending_work(api, context):
+                # Control-plane sessions (heartbeat / operator / reviewer /
+                # the PollyPM dogfood worker) legitimately idle whenever
+                # the user isn't chatting — their snapshot settles and
+                # stays settled. Firing ``suspected_loop`` on them every
+                # 30s floods the cockpit with false positives that never
+                # represent a real stall. Project-scoped workers still
+                # get checked against ``_has_pending_work``; when they
+                # idle with work queued THAT is a real signal.
+                control_role = context.role in {
+                    "heartbeat-supervisor", "operator-pm", "reviewer",
+                }
+                control_name = context.session_name in {"worker_pollypm"}
+                idle_worker = (
+                    context.role == "worker"
+                    and not self._has_pending_work(api, context)
+                )
+                if control_role or control_name or idle_worker:
                     api.clear_alert(context.session_name, "suspected_loop")
                 else:
                     api.raise_alert(
