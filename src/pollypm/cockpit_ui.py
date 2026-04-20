@@ -232,6 +232,47 @@ POLLY_SLOGANS = [
 ]
 
 
+def _wrap_alert_reason(reason: str, *, width: int = 60, max_lines: int = 3) -> list[str]:
+    """Break ``reason`` into ≤``max_lines`` display lines of ≤``width`` chars.
+
+    Word-wraps on whitespace so a 120-char alert like
+    ``"Window pm-operator has produced effectively the same
+    snapshot for 3 heartbeats"`` displays as three dim subtitle
+    lines instead of getting chopped at 18 characters — the
+    pre-fix behavior that rendered rail toasts unreadable on
+    2026-04-20.
+
+    Returns at most ``max_lines`` lines; the final line gets an
+    ellipsis when the text ran long. Always returns at least one
+    line, even for empty or whitespace-only input.
+    """
+    if not reason:
+        return [""]
+    words = reason.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if not current:
+            current = word
+            continue
+        if len(current) + 1 + len(word) <= width:
+            current = f"{current} {word}"
+        else:
+            lines.append(current)
+            current = word
+            if len(lines) >= max_lines:
+                break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if len(lines) == max_lines and (len(lines) * (width + 1)) < len(reason):
+        # Text overflowed the budget — signal it with an ellipsis.
+        trimmed = lines[-1][: max(0, width - 1)] + "\u2026"
+        lines[-1] = trimmed
+    return lines
+
+
 class RailItem(ListItem):
     def __init__(
         self,
@@ -291,11 +332,16 @@ class RailItem(ListItem):
         if len(label) > max_label:
             label = label[: max_label - 1] + "\u2026"
         text.append(label)
-        # Show alert reason as dim subtitle for items with alerts
+        # Show alert reason as dim subtitle for items with alerts.
+        # Wrap onto up to 3 lines (≈60 chars each, indented) instead of
+        # truncating at 18 chars — Sam on 2026-04-20 reported rail
+        # toasts cut off mid-word. The indent keeps them visually
+        # attached to the owning item while still readable.
         if self.item.state.startswith("!"):
             reason = self.item.state[2:].strip()  # strip "! " prefix
             if reason:
-                text.append(f"\n    {reason[:18]}", style="#ff5f6d dim")
+                for chunk in _wrap_alert_reason(reason, width=60, max_lines=3):
+                    text.append(f"\n    {chunk}", style="#ff5f6d dim")
         self.body.update(text)
 
     def _indicator(self) -> tuple[str, str]:
