@@ -375,6 +375,15 @@ def up(
         if hasattr(supervisor, "ensure_knowledge_extraction_schedule"):
             supervisor.ensure_knowledge_extraction_schedule()
 
+    # Spawn the headless rail daemon so heartbeat + recovery keep
+    # ticking even when the cockpit TUI isn't open. Without this,
+    # the rail only runs inside the cockpit process — a cockpit
+    # crash or a user who just uses the CLI would silently lose
+    # auto-recovery, which is exactly how the 2026-04-19 operator
+    # outage stayed dead for 5 hours. Idempotent: no-op if a live
+    # daemon already holds the PID file.
+    _spawn_rail_daemon(config_path)
+
     # Set up the cockpit layout (split panes) BEFORE the TUI starts,
     # then launch the TUI into the rail pane.
     from pollypm.cockpit import CockpitRouter
@@ -407,6 +416,120 @@ def launch(
     up(config_path=config_path)
 
 
+def _rail_daemon_pid_path() -> Path:
+    """Location of the rail-daemon PID file (~/.pollypm/rail_daemon.pid)."""
+    return Path(DEFAULT_CONFIG_PATH).parent / "rail_daemon.pid"
+
+
+def _rail_daemon_live() -> bool:
+    """Return True iff the PID file names a currently-running process."""
+    import os as _os
+    pid_path = _rail_daemon_pid_path()
+    if not pid_path.exists():
+        return False
+    try:
+        pid = int(pid_path.read_text().strip())
+    except (ValueError, OSError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        _os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        # Stale PID file — clean up for the caller.
+        pid_path.unlink(missing_ok=True)
+        return False
+    except PermissionError:
+        return True
+
+
+def _spawn_rail_daemon(config_path: Path) -> None:
+    """Launch ``pollypm.rail_daemon`` detached; best-effort.
+
+    Failures are non-fatal — ``pm up`` succeeds without the daemon,
+    users just don't get auto-recovery while the cockpit is closed.
+    A warning is printed so the degraded state is visible.
+    """
+    import subprocess as _sp
+    import sys as _sys
+
+    if _rail_daemon_live():
+        return
+    pollypm_home = Path(DEFAULT_CONFIG_PATH).parent
+    pollypm_home.mkdir(parents=True, exist_ok=True)
+    log_path = pollypm_home / "rail_daemon.log"
+    try:
+        log_fh = open(log_path, "a", buffering=1)  # line-buffered
+    except OSError as exc:
+        typer.echo(
+            f"Warning: could not open rail daemon log {log_path}: {exc}. "
+            "Skipping daemon spawn — auto-recovery will only run while "
+            "the cockpit is open.",
+            err=True,
+        )
+        return
+    try:
+        _sp.Popen(
+            [_sys.executable, "-m", "pollypm.rail_daemon",
+             "--config", str(config_path)],
+            stdout=log_fh, stderr=log_fh, stdin=_sp.DEVNULL,
+            start_new_session=True,  # detach from tty/process group
+            close_fds=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(
+            f"Warning: rail daemon spawn failed ({exc}). Auto-recovery "
+            "will only run while the cockpit is open.",
+            err=True,
+        )
+
+
+def _stop_rail_daemon() -> None:
+    """Signal the rail daemon to shut down (SIGTERM). Best-effort."""
+    import os as _os
+    import signal as _signal
+
+    pid_path = _rail_daemon_pid_path()
+    if not pid_path.exists():
+        return
+    try:
+        pid = int(pid_path.read_text().strip())
+    except (ValueError, OSError):
+        pid_path.unlink(missing_ok=True)
+        return
+    try:
+        _os.kill(pid, _signal.SIGTERM)
+    except ProcessLookupError:
+        pass  # already gone
+    except Exception:  # noqa: BLE001
+        pass
+    # Best effort; the daemon's atexit handler removes the file.
+    # Clean up here too in case the daemon crashed without signal.
+    pid_path.unlink(missing_ok=True)
+
+
+@app.command("rail-daemon")
+def rail_daemon(
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
+    poll_interval: float = typer.Option(60.0, "--poll-interval", help="Seconds between idle-loop wakeups."),
+) -> None:
+    """Run the headless heartbeat/recovery rail in the foreground.
+
+    This is the same rail ``pm up`` auto-spawns in the background.
+    Run it yourself if you want to:
+      - supervise it from launchd / systemd
+      - watch its log output directly
+      - debug scheduler / recovery behavior
+
+    The daemon auto-exits if another rail daemon is already live.
+    """
+    from pollypm.rail_daemon import run as _run_daemon
+
+    config_path = _discover_config_path(config_path)
+    raise typer.Exit(code=_run_daemon(config_path, poll_interval=poll_interval))
+
+
 @app.command()
 def reset(
     config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
@@ -434,6 +557,7 @@ def reset(
             abort=True,
         )
     supervisor.shutdown_tmux()
+    _stop_rail_daemon()
     # Clean up all transient state so pm up starts fresh
     jobs_path = supervisor.config.project.base_dir / "scheduler" / "jobs.json"
     jobs_path.unlink(missing_ok=True)
