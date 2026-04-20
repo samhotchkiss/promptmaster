@@ -249,7 +249,9 @@ class TestNoSessionAlerts:
         assert alert.session_name == "worker-ghost"
         assert alert.severity == "warn"
         assert "ghost" in alert.message
-        assert "pm worker-start ghost" in alert.message
+        # Fix-it now points at both supported flows post-#406-era cleanup.
+        assert "pm task claim" in alert.message
+        assert "pm worker-start --role architect ghost" in alert.message
 
         store.close()
 

@@ -296,7 +296,9 @@ def _escalate_no_session(event: TaskAssignmentEvent, store: Any | None) -> None:
     message = (
         f"Task {event.task_id} queued for "
         f"{event.actor_type.value}:{event.actor_name} but no session running. "
-        f"Fix: pm worker-start {event.project}"
+        f"Fix: claim the task (`pm task claim {event.task_id}`) to provision a "
+        f"per-task worker, or spawn the architect "
+        f"(`pm worker-start --role architect {event.project}`)."
     )
     try:
         store.upsert_alert(

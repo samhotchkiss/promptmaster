@@ -1717,7 +1717,9 @@ class Supervisor:
         raise RuntimeError(
             f"Session '{launch.session.name}' (window '{launch.window_name}') not found in "
             f"storage closet or cockpit. The worker may have crashed or been decommissioned. "
-            f"Try `pm worker-start {launch.session.project}` to relaunch it."
+            f"For an architect: `pm worker-start --role architect {launch.session.project}`. "
+            f"For a per-task worker: `pm task claim <task_id>` — claiming a task provisions "
+            f"a fresh worker session."
         )
 
     def send_input(

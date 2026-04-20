@@ -226,7 +226,8 @@ def _emit_no_session_alert(
     message = (
         f"Queued task {example_task_id} has no live session for "
         f"{actor_type.value}:{role} in project '{project}'. "
-        f"Fix: pm worker-start {project}"
+        f"Fix: `pm task claim {example_task_id}` for a per-task worker, or "
+        f"`pm worker-start --role architect {project}` to spawn the architect."
     )
     try:
         store.upsert_alert(expected_name, "no_session", "warn", message)
