@@ -300,9 +300,10 @@ class TestNotifyEscalation:
         assert outcome["outcome"] == "no_session"
         alerts = state_store.open_alerts()
         assert any(a.alert_type == f"no_session_for_assignment:demo/1" for a in alerts)
-        # Message guides the user to the fix command.
+        # Message guides the user to the supported fix commands.
         matching = [a for a in alerts if a.alert_type.endswith(":demo/1")]
-        assert any("pm worker-start demo" in a.message for a in matching)
+        assert any("pm task claim" in a.message for a in matching)
+        assert any("pm worker-start --role architect demo" in a.message for a in matching)
 
 
 # ---------------------------------------------------------------------------
