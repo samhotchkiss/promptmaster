@@ -1418,17 +1418,31 @@ class Supervisor:
             history = self.store.recent_heartbeats(session_name, limit=3)
             recent_hashes = [item.snapshot_hash for item in history[:3]]
             if len(recent_hashes) == 3 and len(set(recent_hashes)) == 1:
-                self._msg_store.upsert_alert(
-                    session_name,
-                    "suspected_loop",
-                    "warn",
-                    f"Window {window.name} has produced effectively the same snapshot for 3 heartbeats",
-                )
-                active_alerts.append("suspected_loop")
-                longer_history = self.store.recent_heartbeats(session_name, limit=5)
-                longer_hashes = [item.snapshot_hash for item in longer_history[:5]]
-                if len(longer_hashes) == 5 and len(set(longer_hashes)) == 1:
-                    self._maybe_nudge_stalled_session(launch)
+                # Skip the ``suspected_loop`` alert for control-plane
+                # sessions that legitimately idle (operator / reviewer /
+                # worker_pollypm). Their pane reaches a steady state
+                # whenever the user isn't actively chatting, and
+                # re-alerting on every heartbeat (~30s) floods the
+                # cockpit with false positives that never signal real
+                # work stalls. Project-scoped workers / architects
+                # still fire the alert so the nudge path catches
+                # genuinely-stuck agents.
+                role = launch.session.role
+                if role in {"heartbeat-supervisor", "operator-pm", "reviewer"} or \
+                        launch.session.name in {"worker_pollypm"}:
+                    self._msg_store.clear_alert(session_name, "suspected_loop")
+                else:
+                    self._msg_store.upsert_alert(
+                        session_name,
+                        "suspected_loop",
+                        "warn",
+                        f"Window {window.name} has produced effectively the same snapshot for 3 heartbeats",
+                    )
+                    active_alerts.append("suspected_loop")
+                    longer_history = self.store.recent_heartbeats(session_name, limit=5)
+                    longer_hashes = [item.snapshot_hash for item in longer_history[:5]]
+                    if len(longer_hashes) == 5 and len(set(longer_hashes)) == 1:
+                        self._maybe_nudge_stalled_session(launch)
             else:
                 self._msg_store.clear_alert(session_name, "suspected_loop")
         else:
