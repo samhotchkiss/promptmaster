@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
+_SESSION_MANIFEST_PATH = Path(".pollypm/MANIFEST.md")
+_SESSION_SECTION_LIMIT = 6
+
 
 @dataclass(slots=True)
 class CatalogFile:
@@ -208,6 +211,69 @@ def render_magic_manifest(project_root: Path) -> str:
     return "\n".join(lines)
 
 
+def _write_project_manifest(project_root: Path) -> None:
+    full_manifest = "\n\n".join(
+        part
+        for part in (
+            render_rules_manifest(project_root),
+            render_magic_manifest(project_root),
+        )
+        if part
+    )
+    if not full_manifest:
+        return
+    try:
+        dest = project_root / _SESSION_MANIFEST_PATH
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists() or dest.read_text() != full_manifest:
+            dest.write_text(full_manifest)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _render_compact_catalog(
+    title: str,
+    entries: dict[str, CatalogFile],
+    *,
+    intro: str,
+) -> str:
+    lines = [title, intro]
+    names = sorted(entries)
+    for name in names[:_SESSION_SECTION_LIMIT]:
+        entry = entries[name]
+        lines.append(f"- {entry.name}: {entry.description}")
+    remaining = len(names) - _SESSION_SECTION_LIMIT
+    if remaining > 0:
+        lines.append(f"- … {remaining} more in `{_SESSION_MANIFEST_PATH.as_posix()}`")
+    return "\n".join(lines)
+
+
 def render_session_manifest(project_root: Path) -> str:
-    parts = [render_rules_manifest(project_root), render_magic_manifest(project_root)]
-    return "\n\n".join(part for part in parts if part)
+    _write_project_manifest(project_root)
+    rules = discover_rules(project_root)
+    magic = discover_magic(project_root)
+    parts: list[str] = []
+    if rules:
+        parts.append(
+            _render_compact_catalog(
+                "## Available Rules",
+                rules,
+                intro=(
+                    "Rules and available magic skills are summarized in "
+                    f"`{_SESSION_MANIFEST_PATH.as_posix()}` (auto-regenerated). "
+                    "Read it when you need one."
+                ),
+            )
+        )
+    if magic:
+        parts.append(
+            _render_compact_catalog(
+                "## Available Magic",
+                magic,
+                intro=(
+                    f"See `{_SESSION_MANIFEST_PATH.as_posix()}` for the full "
+                    "catalog with paths and trigger details."
+                ),
+            )
+        )
+    return "\n\n".join(parts)

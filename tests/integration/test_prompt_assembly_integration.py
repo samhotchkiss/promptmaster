@@ -89,11 +89,13 @@ def test_worker_prompt_assembles_overview_manifest_issue_and_checkpoint(tmp_path
     # The critical invariant is that all sections exist, not their relative order.
     assert all(idx >= 0 for idx in [overview_index, rules_index, magic_index, issue_index, checkpoint_index])
     assert "Current architecture summary." in prompt
-    assert ".pollypm/rules/deploy.md" in prompt
-    assert ".pollypm/magic/ship.md" in prompt
+    assert "Project deploy process" in prompt
+    assert "Release helper" in prompt
+    assert ".pollypm/MANIFEST.md" in prompt
     assert "Source: `issues/02-in-progress/0007-fix-deploy.md`" in prompt
     assert "Ship the deployment fix." in prompt
     assert "Recent handoff notes." in prompt
+    assert (project_root / ".pollypm" / "MANIFEST.md").exists()
 
 
 def test_worker_prompt_reads_active_issue_from_github_backend(monkeypatch, tmp_path: Path) -> None:
