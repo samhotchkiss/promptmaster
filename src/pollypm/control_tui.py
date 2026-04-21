@@ -298,7 +298,6 @@ class PollyPMApp(App[None]):
         ("alerts-tab", "Alerts"),
         ("events-tab", "Events"),
     ]
-    USAGE_REFRESH_INTERVAL = timedelta(minutes=20)
     STATUS_REFRESH_INTERVAL = timedelta(seconds=20)
     SESSION_PREVIEW_REFRESH_INTERVAL = timedelta(seconds=3)
     UI_REFRESH_INTERVAL_SECONDS = 8
@@ -439,7 +438,6 @@ class PollyPMApp(App[None]):
         super().__init__()
         self.config_path = config_path
         self.service = PollyPMService(config_path)
-        self.pending_usage_refreshes: dict[str, datetime] = {}
         self.account_statuses: list[AccountStatus] = []
         self.account_statuses_updated_at: datetime | None = None
         self.session_preview_cache: tuple[str, str, datetime] | None = None
@@ -620,7 +618,6 @@ class PollyPMApp(App[None]):
         self._refresh_alerts(alerts)
         self._refresh_events(supervisor)
         self._refresh_details(show_loading=False)
-        self._refresh_usage_due_in_background()
 
     def action_refresh_all(self) -> None:
         self._refresh_view(force=True)
@@ -633,30 +630,8 @@ class PollyPMApp(App[None]):
             and now - self.account_statuses_updated_at < self.STATUS_REFRESH_INTERVAL
         ):
             return
-        self.account_statuses = self.service.list_account_statuses()
+        self.account_statuses = self.service.list_cached_account_statuses()
         self.account_statuses_updated_at = now
-
-    def _refresh_usage_due_in_background(self) -> None:
-        for account in self.account_statuses:
-            pending_started = self.pending_usage_refreshes.get(account.key)
-            if pending_started is not None:
-                if account.usage_updated_at:
-                    self.pending_usage_refreshes.pop(account.key, None)
-                    continue
-                if datetime.now() - pending_started < timedelta(minutes=3):
-                    continue
-                self.pending_usage_refreshes.pop(account.key, None)
-                continue
-            if not account.logged_in:
-                continue
-            if account.usage_updated_at:
-                try:
-                    updated = datetime.fromisoformat(account.usage_updated_at)
-                except ValueError:
-                    updated = None
-                if updated is not None and datetime.now(updated.tzinfo) - updated < self.USAGE_REFRESH_INTERVAL:
-                    continue
-            self._spawn_usage_refresh(account.key, notify=False)
 
     def _refresh_dashboard(self, supervisor, launches, windows, alerts, leases, errors) -> None:
         session_name = supervisor.config.project.tmux_session
@@ -1488,7 +1463,6 @@ class PollyPMApp(App[None]):
         self._run("Re-authenticate account", lambda: self.service.relogin_account(key))
 
     def _spawn_usage_refresh(self, account_key: str, *, notify: bool = True) -> None:
-        self.pending_usage_refreshes[account_key] = datetime.now()
         subprocess.Popen(
             ["uv", "run", "pm", "refresh-usage", account_key],
             cwd=self.config_path.parent,

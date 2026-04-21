@@ -142,7 +142,12 @@ def test_probe_account_usage_records_claude_refresh_failure(monkeypatch, tmp_pat
     config_path = tmp_path / "pollypm.toml"
     write_config(config, config_path)
 
-    monkeypatch.setattr("pollypm.accounts._run_usage_probe", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Claude probe session is not authenticated.")))
+    monkeypatch.setattr(
+        "pollypm.account_usage_sampler.collect_account_usage_sample",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("Claude probe session is not authenticated.")
+        ),
+    )
 
     status = probe_account_usage(config_path, "claude_primary")
 

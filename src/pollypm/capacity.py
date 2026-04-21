@@ -137,7 +137,11 @@ def probe_capacity(
         )
 
     state = _health_to_state(usage.health)
-    remaining = _parse_remaining_pct(usage.usage_summary)
+    remaining = (
+        usage.remaining_pct
+        if usage.remaining_pct is not None
+        else _parse_remaining_pct(usage.usage_summary)
+    )
 
     return CapacityProbeResult(
         account_name=account_name,
@@ -361,6 +365,13 @@ def persist_capacity_probe(
         health=result.state.value,
         usage_summary=result.reason,
         raw_text="",
+        remaining_pct=result.remaining_pct,
+        used_pct=(
+            None
+            if result.remaining_pct is None
+            else max(0, 100 - result.remaining_pct)
+        ),
+        reset_at=result.reset_time,
     )
 
 

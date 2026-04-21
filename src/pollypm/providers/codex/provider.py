@@ -18,8 +18,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from pollypm.acct.model import AccountConfig, AccountStatus
+from pollypm.models import SessionConfig
+from pollypm.provider_sdk import ProviderUsageSnapshot
 
 from . import login as _login
+from .adapter import CodexAdapter as _RuntimeCodexAdapter
 from .detect import detect_codex_email, detect_logged_in
 from .env import isolated_env as _codex_isolated_env
 from .login import run_login_flow as _codex_run_login_flow
@@ -80,6 +83,22 @@ class CodexProvider:
         manager context through.
         """
         return _codex_probe_usage(account)
+
+    def collect_usage_snapshot(
+        self,
+        tmux,
+        target: str,
+        *,
+        account: AccountConfig,
+        session: SessionConfig,
+    ) -> ProviderUsageSnapshot:
+        """Drive Codex's live usage probe for ``account`` in ``target``."""
+        return _RuntimeCodexAdapter().collect_usage_snapshot(
+            tmux,
+            target,
+            account=account,
+            session=session,
+        )
 
     def worker_launch_cmd(
         self,

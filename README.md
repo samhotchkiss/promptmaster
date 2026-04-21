@@ -2,6 +2,8 @@
 
 PollyPM is a tmux-first control plane for people who want multiple AI coding sessions working in parallel without losing visibility or control. It is built for operators managing Claude Code and Codex CLI across real projects, with a live cockpit, heartbeat supervision, and issue-driven worker coordination. At a high level, PollyPM launches and monitors dedicated operator and worker sessions, routes work through a shared task pipeline, and keeps state recoverable through logs, checkpoints, and project-aware context. The result is managed multi-session AI coordination through native terminal sessions rather than opaque background agents.
 
+Architecturally, PollyPM is a modular monolith: one local system with explicit replaceable boundaries for providers, runtimes, storage backends, scheduler/heartbeat hooks, and cockpit panes. The current cockpit includes a real split-pane task review surface, live session peeks, and cached account-usage tracking so the UI can stay responsive without probing providers inline.
+
 **New here? Start with [docs/getting-started.md](docs/getting-started.md)** — a 15-minute walkthrough from install to your first completed task. The rest of this README is the module map and architecture reference for contributors.
 
 ## Architecture
@@ -22,6 +24,7 @@ graph TB
         TmuxClient["Tmux Client<br/>Session · window · pane mgmt"]
         RailDaemon["Rail Daemon<br/>Headless heartbeat + recovery<br/>(survives cockpit close)"]
         ArchitectLifecycle["Architect Lifecycle<br/>2h-idle close +<br/>warm resume"]
+        UsageSampler["Account Usage Sampler<br/>5m cached usage probes"]
     end
 
     subgraph PluginHost["Plugin Host"]
@@ -67,6 +70,8 @@ graph TB
     Supervisor --> StateStore
     Supervisor --> Inbox
     Supervisor --> Config
+    UsageSampler --> TmuxClient
+    UsageSampler --> StateStore
 
     WorkService --> StateStore
 
@@ -90,7 +95,7 @@ graph TB
 
 ## Stability & Lifecycle
 
-Three background mechanisms keep PollyPM from leaking resources and
+Four background mechanisms keep PollyPM from leaking resources and
 keep sessions alive without operator intervention:
 
 ### Headless rail daemon
@@ -103,6 +108,23 @@ a standalone `pollypm.rail_daemon` process. `pm up` spawns it detached;
 Without this daemon the rail would only tick while the cockpit TUI is
 open — a cockpit crash or a CLI-only user would silently lose
 auto-recovery.
+
+### Cached account-usage sampler
+
+Account usage is sampled out of band instead of during UI reads. Every
+5 minutes the built-in `core_recurring` plugin runs the
+`account.usage_refresh` job, which:
+
+1. Starts a short-lived tmux probe session per configured account.
+2. Lets the provider adapter drive its native usage prompt/parser.
+3. Persists structured cache fields into `account_usage`
+   (`used_pct`, `remaining_pct`, `reset_at`, `period_label`).
+4. Tears the probe session down.
+
+The cockpit and settings panes read this cache instead of blocking on a
+live provider probe, so account surfaces stay fast while usage data is
+never more than about 5 minutes stale. `pm refresh-usage` remains the
+manual override.
 
 ### Architect idle-close + warm resume
 
@@ -197,7 +219,9 @@ Every major subsystem has a defined role, a fixed file path, and is independentl
 
 | Module | What it does | Path | Status |
 | --- | --- | --- | --- |
-| Heartbeat Backend | Mechanical session-health sweep (invoked by `core_recurring`'s `session.health_sweep` handler) | `src/pollypm/heartbeats/` | stable |
+| Heartbeat Backend | Mechanical session-health sweep (invoked by `core_recurring`'s `session.health_sweep` handler) | `src/pollypm/heartbeats/` | solid |
+| core_recurring plugin | Built-in recurring roster + job handlers | `src/pollypm/plugins_builtin/core_recurring/` | solid |
+| Account usage sampler | 5-minute cached provider usage probes persisted to `account_usage` | `src/pollypm/account_usage_sampler.py` | solid |
 | Scheduler Plugins | Cadence dispatcher | `src/pollypm/schedulers/` | refactor |
 | itsalive integration | Deploy-aware self-check | `src/pollypm/itsalive.py` | refactor |
 | Job Runner | Current placeholder job runner | `src/pollypm/job_runner.py` | partial |
@@ -214,9 +238,9 @@ Provider integration was extracted into a three-layer substrate so third-party p
 
 | Module | What it does | Path | Status |
 | --- | --- | --- | --- |
-| Provider Protocol | `ProviderAdapter` contract (10 methods: detect, login, probe, launch, env, warm-resume, prime_home, login_command/logout_command/marker) | `src/pollypm/acct/protocol.py` | solid |
+| Provider Protocol | `ProviderAdapter` contract (13 methods: detect, login, cached/live usage probe, launch/env, warm-resume, onboarding priming, login/logout command helpers) | `src/pollypm/acct/protocol.py` | solid |
 | Provider Registry | `pollypm.provider` entry-point discovery | `src/pollypm/acct/registry.py` | solid |
-| Account Manager | Centralized provider dispatcher | `src/pollypm/acct/manager.py` | solid |
+| Account Manager | Centralized provider dispatcher, including live usage-snapshot collection | `src/pollypm/acct/manager.py` | solid |
 | Account Model | `AccountConfig`/`AccountStatus`/`RuntimeStatus` re-exports | `src/pollypm/acct/model.py` | solid |
 | Account Errors | `ProviderNotFound`/`AccountNotFound` (three-question rule) | `src/pollypm/acct/errors.py` | solid |
 
@@ -321,7 +345,7 @@ graph TD
 | Transcript ingest | Claude/Codex JSONL parsing | `src/pollypm/transcript_ingest.py` | solid |
 | Transcript ledger | Per-session token accounting | `src/pollypm/transcript_ledger.py` | solid |
 | Knowledge extract | Post-session summary mining | `src/pollypm/knowledge_extract.py` | needs tests |
-| Capacity | Rate / usage-limit tracking | `src/pollypm/capacity.py` | solid |
+| Capacity | Cached failover / quota-state evaluation from runtime + usage snapshots | `src/pollypm/capacity.py` | solid |
 | History import | Backfill old transcripts | `src/pollypm/history_import.py` | partial |
 | Commit validator | Worker commit checks | `src/pollypm/commit_validator.py` | needs tests |
 | Rules | Validation / policy expressions | `src/pollypm/rules.py` | needs tests |
@@ -331,14 +355,18 @@ graph TD
 | Module | What it does | Path | Status |
 | --- | --- | --- | --- |
 | `pm` CLI | Unified command entry point | `src/pollypm/cli.py` | solid |
-| Cockpit TUI | Live control cockpit | `src/pollypm/cockpit.py` | solid |
-| Cockpit UI widgets | Textual widget tree | `src/pollypm/cockpit_ui.py` | solid |
-| Cockpit rail | Project / session navigation rail | `src/pollypm/cockpit_rail.py` | partial |
+| Cockpit compatibility facade | Back-compat exports + text detail builders | `src/pollypm/cockpit.py` | solid |
+| Cockpit UI widgets | Main Textual cockpit shell, dashboard, and settings panes | `src/pollypm/cockpit_ui.py` | solid |
+| Cockpit rail | Project/session navigation and cockpit-shell reload orchestration | `src/pollypm/cockpit_rail.py` | solid |
+| Cockpit tasks | Split-pane task board with review actions, timestamps, plan artifact, and live session peek | `src/pollypm/cockpit_tasks.py` | solid |
+| Cockpit workers | Worker roster pane | `src/pollypm/cockpit_workers.py` | solid |
+| Cockpit metrics | Metrics pane | `src/pollypm/cockpit_metrics.py` | solid |
+| Cockpit activity | Activity feed pane | `src/pollypm/cockpit_activity.py` | solid |
 | Dashboard data | Cockpit data provider | `src/pollypm/dashboard_data.py` | partial |
 | Onboarding | First-run setup flow | `src/pollypm/onboarding.py` | solid |
 | Onboarding TUI | Setup wizard | `src/pollypm/onboarding_tui.py` | solid |
 | Account TUI | Account management flow | `src/pollypm/account_tui.py` | solid |
-| Control TUI | Live control palette | `src/pollypm/control_tui.py` | needs tests |
+| Control TUI | Legacy live control palette | `src/pollypm/control_tui.py` | needs tests |
 | Config patches | TOML-patch helpers | `src/pollypm/config_patches.py` | solid |
 | Version check | Upgrade-available nudge | `src/pollypm/version_check.py` | solid |
 
@@ -359,9 +387,7 @@ Work that does real things but is not cleanly encapsulated in a module. These ar
 
 | Item | Path | Why it's orphaned | Tracking |
 | --- | --- | --- | --- |
-| Dashboard sections engine | `src/pollypm/cockpit.py` (15+ `_section_*` fns) | Entire sections subsystem (~600 LOC) lives inline in cockpit.py; blocks per-section tests and plugin sections. | [#403](https://github.com/samhotchkiss/pollypm/issues/403) |
-| CockpitRouter + rail logic | `src/pollypm/cockpit.py` (`CockpitRouter`, `CockpitItem`, ~1000 LOC) | Router lives in cockpit.py even though `cockpit_rail.py` already exists as its intended home. | [#404](https://github.com/samhotchkiss/pollypm/issues/404) |
-| Inbox rendering | `src/pollypm/cockpit.py` (`render_inbox_panel`, `_inbox_db_sources`, 5 fns) | Siblings `cockpit_activity.py` / `cockpit_alerts.py` / `cockpit_workers.py` exist — inbox should follow the same pattern. | [#405](https://github.com/samhotchkiss/pollypm/issues/405) |
+| Cockpit compatibility facade | `src/pollypm/cockpit.py` | Dashboard sections, rail routing, and inbox rendering have been split out, but this file still re-exports legacy names and owns the text-detail compatibility path. | — |
 | Claude-specific onboarding helpers | `src/pollypm/onboarding.py` (`_detected_claude_version`, `_prime_claude_home`, claude-login branches) | Post-#397 left provider-specific code behind; blocks third-party providers from integrating with onboarding. | [#406](https://github.com/samhotchkiss/pollypm/issues/406) |
 | `runtime_launcher.py` | `src/pollypm/runtime_launcher.py` | Loose executable shim (base64 payload decoder) with no package home; should wrap into `launchers/` or be folded into `runtimes/`. | — |
 | `atomic_io.py` | `src/pollypm/atomic_io.py` | Two utility functions used from 15+ sites; deserves a `utils/` package or promotion to `storage/`. | — |
@@ -444,8 +470,12 @@ pm send operator "Build a weather CLI with current conditions and 5-day forecast
 
 ```bash
 pm                  # Attach to the cockpit
-pm ui               # Open the cockpit TUI
+pm cockpit          # Open the main Textual cockpit
+pm ui               # Open the legacy control palette
 pm status           # System overview
 pm send operator …  # Send work to Polly
 pm down             # Shut everything down
 ```
+
+Usage is refreshed automatically in the background every 5 minutes. Run
+`pm refresh-usage` if you want to force an immediate cache refresh.

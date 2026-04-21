@@ -48,6 +48,10 @@ def test_claude_provider_exposes_transcript_sources_and_usage_snapshot(tmp_path:
     assert sources[0].pattern == "**/*.jsonl"
     assert snapshot.health == "near-limit"
     assert snapshot.summary == "20% left this week · resets Monday 1am"
+    assert snapshot.used_pct == 80
+    assert snapshot.remaining_pct == 20
+    assert snapshot.reset_at == "Monday 1am"
+    assert snapshot.period_label == "current week"
     assert adapter.build_resume_command(session, account) is not None
 
 
@@ -79,6 +83,9 @@ def test_codex_provider_exposes_transcript_sources_and_usage_snapshot(tmp_path: 
     assert sources[0].pattern == "**/rollout-*.jsonl"
     assert snapshot.health == "healthy"
     assert snapshot.summary == "100% left"
+    assert snapshot.used_pct == 0
+    assert snapshot.remaining_pct == 100
+    assert snapshot.period_label == "current period"
     assert adapter.build_resume_command(session, account) is not None
 
 

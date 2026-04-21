@@ -29,6 +29,7 @@ from __future__ import annotations
 from .errors import AccountNotFound, AcctError, ProviderNotFound
 from .manager import (
     choose_healthy_for_worker,
+    collect_usage_snapshot,
     detect_email,
     detect_logged_in,
     isolated_env,
@@ -50,6 +51,7 @@ __all__ = [
     "ProviderNotFound",
     "RuntimeStatus",
     "choose_healthy_for_worker",
+    "collect_usage_snapshot",
     "detect_email",
     "detect_logged_in",
     "get_provider",

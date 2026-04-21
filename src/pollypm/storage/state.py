@@ -140,6 +140,10 @@ CREATE TABLE IF NOT EXISTS account_usage (
     health TEXT NOT NULL,
     usage_summary TEXT NOT NULL,
     raw_text TEXT NOT NULL,
+    used_pct INTEGER,
+    remaining_pct INTEGER,
+    reset_at TEXT,
+    period_label TEXT,
     updated_at TEXT NOT NULL
 );
 
@@ -388,6 +392,10 @@ class AccountUsageRecord:
     usage_summary: str
     raw_text: str
     updated_at: str
+    used_pct: int | None = None
+    remaining_pct: int | None = None
+    reset_at: str | None = None
+    period_label: str | None = None
 
 
 @dataclass(slots=True)
@@ -832,6 +840,9 @@ class StateStore:
             "DROP INDEX IF EXISTS idx_inbox_owner",
             "DROP TABLE IF EXISTS inbox_messages",
         ]),
+        (14, "Structured account_usage fields for sampler snapshots", [
+            # Column additions handled in the dispatch block below.
+        ]),
     ]
 
     def _migrate(self) -> None:
@@ -928,6 +939,11 @@ class StateStore:
                     "session_name, task_id, execution_version, "
                     "notified_at DESC)"
                 )
+            elif version == 14:
+                self._safe_add_column("account_usage", "used_pct", "INTEGER")
+                self._safe_add_column("account_usage", "remaining_pct", "INTEGER")
+                self._safe_add_column("account_usage", "reset_at", "TEXT")
+                self._safe_add_column("account_usage", "period_label", "TEXT")
             self.execute(
                 "INSERT INTO schema_version (version, description, applied_at) VALUES (?, ?, ?)",
                 (version, description, datetime.now(UTC).isoformat()),
@@ -1488,29 +1504,51 @@ class StateStore:
         health: str,
         usage_summary: str,
         raw_text: str,
+        used_pct: int | None = None,
+        remaining_pct: int | None = None,
+        reset_at: str | None = None,
+        period_label: str | None = None,
     ) -> None:
         self.execute(
             """
             INSERT INTO account_usage (
-                account_name, provider, plan, health, usage_summary, raw_text, updated_at
+                account_name, provider, plan, health, usage_summary, raw_text,
+                used_pct, remaining_pct, reset_at, period_label, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account_name) DO UPDATE SET
                 provider = excluded.provider,
                 plan = excluded.plan,
                 health = excluded.health,
                 usage_summary = excluded.usage_summary,
                 raw_text = excluded.raw_text,
+                used_pct = excluded.used_pct,
+                remaining_pct = excluded.remaining_pct,
+                reset_at = excluded.reset_at,
+                period_label = excluded.period_label,
                 updated_at = excluded.updated_at
             """,
-            (account_name, provider, plan, health, usage_summary, raw_text, self._now()),
+            (
+                account_name,
+                provider,
+                plan,
+                health,
+                usage_summary,
+                raw_text,
+                used_pct,
+                remaining_pct,
+                reset_at,
+                period_label,
+                self._now(),
+            ),
         )
         self.commit()
 
     def get_account_usage(self, account_name: str) -> AccountUsageRecord | None:
         row = self.execute(
             """
-            SELECT account_name, provider, plan, health, usage_summary, raw_text, updated_at
+            SELECT account_name, provider, plan, health, usage_summary, raw_text,
+                   updated_at, used_pct, remaining_pct, reset_at, period_label
             FROM account_usage
             WHERE account_name = ?
             """,

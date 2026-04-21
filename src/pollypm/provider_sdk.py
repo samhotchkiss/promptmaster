@@ -25,6 +25,10 @@ class ProviderUsageSnapshot:
     summary: str = "usage unavailable"
     raw_text: str = ""
     plan: str = "unknown"
+    used_pct: int | None = None
+    remaining_pct: int | None = None
+    reset_at: str | None = None
+    period_label: str | None = None
     available_at: str | None = None
     access_expires_at: str | None = None
     updated_at: str | None = None

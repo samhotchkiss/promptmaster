@@ -42,6 +42,7 @@ class TestCoreRecurringPlugin:
         expected = {
             "session.health_sweep",
             "capacity.probe",
+            "account.usage_refresh",
             "transcript.ingest",
             "alerts.gc",
             # #249 — work-service-aware progress sweeper.
@@ -66,6 +67,7 @@ class TestCoreRecurringPlugin:
         assert set(entries.keys()) == {
             "session.health_sweep",
             "capacity.probe",
+            "account.usage_refresh",
             "transcript.ingest",
             "alerts.gc",
             # #249 — work-service-aware progress sweeper.
@@ -91,6 +93,7 @@ class TestCoreRecurringPlugin:
         # Cadences per issue #164 / #249.
         assert _interval_seconds(entries["session.health_sweep"]) == 10
         assert _interval_seconds(entries["capacity.probe"]) == 60
+        assert _interval_seconds(entries["account.usage_refresh"]) == 300
         # Transcript ingestion was widened to 5m after the 30s cadence
         # proved too expensive on large roots.
         assert _interval_seconds(entries["transcript.ingest"]) == 300
