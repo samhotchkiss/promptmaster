@@ -18,8 +18,12 @@ from pollypm.projects import project_transcripts_dir, session_scoped_dir
 
 POLL_INTERVAL_SECONDS = 1.0
 MAX_BACKOFF_SECONDS = 30.0
+FULL_RESCAN_SECONDS = 60.0
+HOT_SCAN_WINDOW_SECONDS = 60.0 * 60.0
+HOT_SCAN_FILE_LIMIT = 32
 _INGESTORS: dict[Path, "TranscriptIngestor"] = {}
 _INGESTORS_LOCK = threading.Lock()
+_SOURCE_SCAN_CACHE: dict[tuple[str, str], "TranscriptSourceScanCache"] = {}
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +43,13 @@ class TranscriptFileCursor:
 @dataclass(slots=True)
 class TranscriptCursorState:
     files: dict[str, TranscriptFileCursor] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TranscriptSourceScanCache:
+    known_files: tuple[str, ...] = ()
+    dir_mtimes: dict[str, float] = field(default_factory=dict)
+    last_full_scan_at: float = 0.0
 
 
 def _utc_now() -> str:
@@ -519,23 +530,92 @@ def _normalize_codex_line(
     return events
 
 
-def _scan_source(config, account_name: str, account: AccountConfig, source: TranscriptSource, state: TranscriptCursorState) -> None:
-    if not source.root.exists():
-        return
-    for path in sorted(source.root.rglob(source.pattern)):
-        file_key = str(path.resolve())
-        cursor = state.files.setdefault(file_key, TranscriptFileCursor())
-        stat = path.stat()
-        size = stat.st_size
-        mtime = stat.st_mtime
-        if size < cursor.offset:
-            cursor.offset = 0
-        # Skip the open/seek/readline cycle when the file hasn't changed
-        # since the last scan. Saves ~6000 opens per tick on transcript
-        # roots with thousands of archived jsonls. Mismatched offset (we
-        # never caught up) still forces a re-read.
-        if mtime == cursor.mtime and cursor.offset == size:
+def _source_scan_cache_key(source: TranscriptSource) -> tuple[str, str]:
+    return (str(source.root.resolve()), source.pattern)
+
+
+def _build_source_scan_cache(root: Path, files: list[Path], *, now: float) -> TranscriptSourceScanCache:
+    watched_dirs: set[str] = {str(root)}
+    for path in files:
+        current = path.parent
+        while current.is_relative_to(root):
+            watched_dirs.add(str(current))
+            if current == root:
+                break
+            current = current.parent
+    dir_mtimes: dict[str, float] = {}
+    for directory_key in sorted(watched_dirs):
+        try:
+            dir_mtimes[directory_key] = Path(directory_key).stat().st_mtime
+        except OSError:
             continue
+    return TranscriptSourceScanCache(
+        known_files=tuple(str(path) for path in files),
+        dir_mtimes=dir_mtimes,
+        last_full_scan_at=now,
+    )
+
+
+def _dir_snapshot_changed(cache: TranscriptSourceScanCache) -> bool:
+    for directory_key, previous_mtime in cache.dir_mtimes.items():
+        try:
+            current_mtime = Path(directory_key).stat().st_mtime
+        except OSError:
+            return True
+        if current_mtime != previous_mtime:
+            return True
+    return False
+
+
+def _full_scan_paths(source: TranscriptSource, *, now: float) -> list[Path]:
+    root = source.root.resolve()
+    files = [path.resolve() for path in sorted(root.rglob(source.pattern))]
+    _SOURCE_SCAN_CACHE[_source_scan_cache_key(source)] = _build_source_scan_cache(root, files, now=now)
+    return files
+
+
+def _incremental_scan_paths(cache: TranscriptSourceScanCache, state: TranscriptCursorState, *, now: float) -> list[Path]:
+    cutoff = now - HOT_SCAN_WINDOW_SECONDS
+    hot_files: list[tuple[float, str]] = []
+    for file_key in cache.known_files:
+        cursor = state.files.get(file_key)
+        if cursor is None or cursor.mtime < cutoff:
+            continue
+        hot_files.append((cursor.mtime, file_key))
+    hot_files.sort(reverse=True)
+    return [Path(file_key) for _mtime, file_key in hot_files[:HOT_SCAN_FILE_LIMIT]]
+
+
+def _scan_paths_for_source(source: TranscriptSource, state: TranscriptCursorState, *, now: float) -> list[Path]:
+    cache_key = _source_scan_cache_key(source)
+    cache = _SOURCE_SCAN_CACHE.get(cache_key)
+    if cache is None:
+        return _full_scan_paths(source, now=now)
+    if now - cache.last_full_scan_at >= FULL_RESCAN_SECONDS:
+        return _full_scan_paths(source, now=now)
+    if _dir_snapshot_changed(cache):
+        return _full_scan_paths(source, now=now)
+    return _incremental_scan_paths(cache, state, now=now)
+
+
+def _scan_file(config, account_name: str, account: AccountConfig, path: Path, state: TranscriptCursorState) -> None:
+    file_key = str(path)
+    cursor = state.files.setdefault(file_key, TranscriptFileCursor())
+    try:
+        stat = path.stat()
+    except OSError:
+        return
+    size = stat.st_size
+    mtime = stat.st_mtime
+    if size < cursor.offset:
+        cursor.offset = 0
+    # Skip the open/seek/readline cycle when the file hasn't changed
+    # since the last scan. Saves ~6000 opens per tick on transcript
+    # roots with thousands of archived jsonls. Mismatched offset (we
+    # never caught up) still forces a re-read.
+    if mtime == cursor.mtime and cursor.offset == size:
+        return
+    try:
         with path.open("r", encoding="utf-8", errors="ignore") as handle:
             handle.seek(cursor.offset)
             while True:
@@ -572,7 +652,16 @@ def _scan_source(config, account_name: str, account: AccountConfig, source: Tran
                     events = []
                 for event in events:
                     _append_event(config, event)
-        cursor.mtime = mtime
+    except OSError:
+        return
+    cursor.mtime = mtime
+
+
+def _scan_source(config, account_name: str, account: AccountConfig, source: TranscriptSource, state: TranscriptCursorState) -> None:
+    if not source.root.exists():
+        return
+    for path in _scan_paths_for_source(source, state, now=time.time()):
+        _scan_file(config, account_name, account, path, state)
 
 
 def _iter_sources_for_account(config, account_name: str, account: AccountConfig):
