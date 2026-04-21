@@ -39,6 +39,7 @@ from pollypm.work.models import (
     Artifact,
     ArtifactKind,
     OutputType,
+    Priority,
     WorkOutput,
     WorkStatus,
 )
@@ -83,6 +84,7 @@ class _FakeTask:
         task_number: int,
         title: str,
         status: str,
+        priority: str = "normal",
         updated_at: datetime | None = None,
         transitions: list | None = None,
         executions: list | None = None,
@@ -92,6 +94,7 @@ class _FakeTask:
         self.task_number = task_number
         self.title = title
         self.work_status = WorkStatus(status)
+        self.priority = Priority(priority)
         self.updated_at = updated_at
         self.transitions = transitions or []
         self.executions = executions or []
@@ -249,6 +252,26 @@ class TestSectionInFlight:
         assert "#2 Add favicon" in joined
         assert "[worker]" in joined
         assert "@ implement" in joined
+
+    def test_in_flight_surfaces_priority_glyphs_and_sorts_critical_first(self):
+        low = _FakeTask(
+            task_number=2,
+            title="Add favicon",
+            status="in_progress",
+            priority="low",
+            updated_at=datetime(2026, 4, 20, 16, 0, tzinfo=UTC),
+        )
+        critical = _FakeTask(
+            task_number=7,
+            title="Patch auth outage",
+            status="in_progress",
+            priority="critical",
+            updated_at=datetime(2026, 4, 20, 15, 0, tzinfo=UTC),
+        )
+        lines = _section_in_flight([low, critical])
+        task_lines = [line for line in lines if "#7" in line or "#2" in line]
+        assert task_lines[0].startswith("  ⟳ 🔴 #7 Patch auth outage")
+        assert task_lines[1].startswith("  ⟳ 🟢 #2 Add favicon")
 
 
 class TestSectionRecent:

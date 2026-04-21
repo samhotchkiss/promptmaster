@@ -10,6 +10,11 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Static, TabbedContent, TabPane
 
 from pollypm.approval_notifications import notify_task_approved
+from pollypm.cockpit_task_priority import (
+    priority_glyph,
+    priority_label,
+    priority_rank,
+)
 from pollypm.cockpit_task_review import (
     load_task_review_artifact,
     render_task_review_artifact,
@@ -58,14 +63,15 @@ def _timestamp_sort_value(value) -> float:
         return 0.0
 
 
-def _task_sort_key(task) -> tuple[int, float, int]:
-    """Sort tasks by status priority, then newest activity, then task number."""
+def _task_sort_key(task) -> tuple[int, int, float, int]:
+    """Sort tasks by status, then task priority, then newest activity."""
     status = getattr(getattr(task, "work_status", None), "value", None) or str(
         getattr(task, "work_status", "") or ""
     )
     updated = getattr(task, "updated_at", None) or getattr(task, "created_at", None)
     return (
         _TASK_STATUS_ORDER.get(status, 99),
+        priority_rank(task),
         -_timestamp_sort_value(updated),
         int(getattr(task, "task_number", 0) or 0),
     )
@@ -158,10 +164,10 @@ def _task_matches_query(task, owner: str | None, query: str) -> bool:
 def _render_overview(task, *, owner: str | None, flow, active_session) -> str:
     icon = PollyTasksApp._STATUS_ICONS.get(task.work_status.value, "·")
     lines = [
-        f"{icon} #{task.task_number} {task.title}",
+        f"{icon} #{task.task_number} {priority_glyph(task)} {task.title}",
         "",
         f"Status     {task.work_status.value}",
-        f"Priority   {task.priority.value}",
+        f"Priority   {priority_label(task)}",
         f"Flow       {task.flow_template_id}",
         f"Stage      {_format_stage_label(task, flow)}",
         f"Owner      {owner or '—'}",
@@ -604,7 +610,7 @@ class PollyTasksApp(App[None]):
             self.task_table.add_row(
                 f"#{task.task_number}",
                 task.work_status.value,
-                task.title,
+                f"{priority_glyph(task)} {task.title}",
                 owner,
                 task.current_node_id or "—",
                 updated or "—",
@@ -675,7 +681,7 @@ class PollyTasksApp(App[None]):
     def _render_selected_task(self, task, *, owner: str | None, flow, active_session) -> None:
         icon = self._STATUS_ICONS.get(task.work_status.value, "·")
         header_bits = [
-            f"{icon} #{task.task_number} {task.title}",
+            f"{icon} #{task.task_number} {priority_glyph(task)} {task.title}",
             f"{task.work_status.value} · {_format_relative_age(task.updated_at or task.created_at)}",
         ]
         self.detail_header.update("\n".join(header_bits))
