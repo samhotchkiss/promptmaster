@@ -183,7 +183,12 @@ def test_critique_flow_has_output_present_gate() -> None:
 
 def test_implement_module_review_enforces_user_level_tests() -> None:
     template = resolve_flow("implement_module")
+    handoff = template.nodes["review_handoff"]
     review = template.nodes["code_review"]
+    assert handoff.type == NodeType.WORK
+    assert handoff.actor_type == ActorType.ROLE
+    assert handoff.actor_role == "worker"
+    assert handoff.next_node_id == "code_review"
     assert review.type == NodeType.REVIEW
     assert "user_level_tests_pass" in review.gates
 
