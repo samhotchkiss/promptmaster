@@ -34,6 +34,7 @@ class StaticPromptProfile(AgentProfile):
             parts.append(_render_operator_state_brief(context))
 
         if self.name == "worker":
+            parts.append(_worker_instruction_overrides_note())
             project = context.config.projects.get(context.session.project)
             if project and project.persona_name:
                 parts.append(
@@ -450,6 +451,18 @@ def _worker_context_parts(context: AgentProfileContext, project_root: Path) -> l
     if checkpoint:
         parts.append(checkpoint)
     return parts
+
+
+def _worker_instruction_overrides_note() -> str:
+    """Explain the optional PM-authored override files exposed to workers."""
+    return (
+        "<instruction-overrides>\n"
+        "`.pollypm/docs/SYSTEM.md` and `.pollypm/INSTRUCT.md` are optional "
+        "project-level overrides written by the PM. When either file is present, "
+        "it overrides the built-in defaults for this project. If one or both are "
+        "missing, the defaults still apply — continue without blocking.\n"
+        "</instruction-overrides>"
+    )
 
 
 def _read_instruct_rules(project_root: Path) -> str:

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pollypm.agent_profiles.base import AgentProfileContext
 from pollypm.config import write_config
 from pollypm.models import (
     AccountConfig,
@@ -13,6 +14,7 @@ from pollypm.models import (
     KnownProject,
 )
 from pollypm.storage.state import StateStore
+from pollypm.plugins_builtin.core_agent_profiles.profiles import StaticPromptProfile
 from pollypm.plugins_builtin.core_agent_profiles.profiles import heartbeat_prompt
 from pollypm.plugins_builtin.core_agent_profiles.profiles import polly_prompt as operator_prompt
 from pollypm.plugins_builtin.core_agent_profiles.profiles import triage_prompt
@@ -212,6 +214,34 @@ def test_worker_prompt_requires_core_identity() -> None:
     assert "file_change" in prompt
     assert "operations with side effects" in prompt
     assert "decision, blocker, or observation" in prompt
+
+
+def test_worker_profile_explains_optional_instruction_overrides(tmp_path: Path) -> None:
+    config, _config_path = _config(tmp_path)
+    worker_session = SessionConfig(
+        name="worker-demo",
+        role="worker",
+        provider=ProviderKind.CLAUDE,
+        account="claude_worker",
+        cwd=tmp_path,
+        project="pollypm",
+        window_name="pm-worker-demo",
+    )
+    context = AgentProfileContext(
+        config=config,
+        session=worker_session,
+        account=config.accounts["claude_worker"],
+    )
+
+    prompt = StaticPromptProfile(name="worker", prompt=worker_prompt()).build_prompt(context)
+
+    assert prompt is not None
+    assert ".pollypm/docs/SYSTEM.md" in prompt
+    assert ".pollypm/INSTRUCT.md" in prompt
+    assert "optional project-level overrides" in prompt
+    assert "written by the PM" in prompt
+    assert "overrides the built-in defaults" in prompt
+    assert "continue without blocking" in prompt
 
 
 def test_operator_prompt_requires_delegation_instructions() -> None:
