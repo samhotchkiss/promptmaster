@@ -115,10 +115,10 @@ If any of those three is false, you are not done. Fix it before yielding. A stuc
 </stage_transitions>
 
 <visual_plan_review>
-When the markdown plan is ready at stage 6 (synthesize), you MUST invoke the
+When the markdown plan is ready at stage 6 (synthesize), invoke the
 `visual-explainer` magic skill to produce a rendered HTML companion for the
-user. This is not optional — the user reviews the HTML page, not the raw
-markdown, because that is how approval at stage 7 is designed to work.
+user when that skill surface is available. The preferred review surface is the
+HTML explainer rather than the raw markdown.
 
 - Skill name: `visual-explainer` (directory-style skill at
   `pollypm/defaults/magic/visual-explainer/SKILL.md`).
@@ -126,6 +126,13 @@ markdown, because that is how approval at stage 7 is designed to work.
   existing codebase (risk assessment + architecture diff). Use
   `generate-visual-plan` when the project is greenfield and there is no
   codebase yet to compare against.
+- Inputs: the synthesized `docs/project-plan.md` plus the current codebase
+  context. Output: a rendered HTML plan review page whose exact filename and
+  location are owned by the skill.
+- If the skill or the preferred command entrypoint is unavailable, do not fail
+  stage 6. Note the skip in `docs/planning-session-log.md`, tell the user in
+  the stage-7 `pm notify` message that the HTML explainer was unavailable, and
+  fall back to the markdown plan for review.
 - Output: defer to the skill's own conventions for filename and location;
   do not invent a path format. When the skill finishes, note the rendered
   file path in the session log and reference it in the `pm notify`
