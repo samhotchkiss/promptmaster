@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from pollypm.store import SQLAlchemyStore
 from pollypm.work.sqlite_service import SQLiteWorkService
 
 
@@ -70,6 +71,34 @@ def _seed_project(project_path: Path) -> list[str]:
         return ids
     finally:
         svc.close()
+
+
+def _seed_workspace_message(
+    workspace_root: Path,
+    *,
+    subject: str = "Workspace notify",
+    body: str = "Fresh notification from Store.",
+    scope: str = "demo",
+    recipient: str = "user",
+    sender: str = "polly",
+    type: str = "notify",
+    tier: str = "immediate",
+) -> int:
+    db_path = workspace_root / ".pollypm" / "state.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        return store.enqueue_message(
+            type=type,
+            tier=tier,
+            recipient=recipient,
+            sender=sender,
+            subject=subject,
+            body=body,
+            scope=scope,
+        )
+    finally:
+        store.close()
 
 
 def _seed_threaded_task(project_path: Path) -> str:
@@ -409,6 +438,75 @@ def test_archive_removes_row_and_flips_status(inbox_env, inbox_app) -> None:
             finally:
                 svc.close()
             assert task.work_status.value == "done"
+    _run(body())
+
+
+def test_workspace_store_notification_appears_in_inbox(inbox_env, inbox_app) -> None:
+    """Workspace-root Store rows are listed alongside task-backed inbox items."""
+    _seed_workspace_message(
+        inbox_env["project_path"].parent,
+        subject="Deploy blocked",
+        body="Needs verification email click.",
+    )
+
+    async def body() -> None:
+        async with inbox_app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            message_item = next(
+                (item for item in inbox_app._tasks if item.task_id.startswith("msg:")),
+                None,
+            )
+            assert message_item is not None
+            assert "Deploy blocked" in message_item.title
+            assert message_item.project == "demo"
+
+            inbox_app.list_view.index = inbox_app._tasks.index(message_item)
+            await pilot.press("enter")
+            await pilot.pause()
+
+            detail_text = str(inbox_app.detail.render())
+            assert "Deploy blocked" in detail_text
+            assert "Needs verification email click." in detail_text
+            assert inbox_app._selected_task_id == message_item.task_id
+            assert message_item.task_id not in inbox_app._unread_ids
+            assert inbox_app.reply_input.disabled is True
+    _run(body())
+
+
+def test_archive_closes_store_notification_and_removes_row(inbox_env, inbox_app) -> None:
+    """Archiving a Store-backed notification closes the message row."""
+    message_id = _seed_workspace_message(
+        inbox_env["project_path"].parent,
+        subject="Nightly report ready",
+        body="Open the run summary for details.",
+    )
+
+    async def body() -> None:
+        async with inbox_app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            message_item = next(
+                (item for item in inbox_app._tasks if item.message_id == message_id),
+                None,
+            )
+            assert message_item is not None
+
+            inbox_app.list_view.index = inbox_app._tasks.index(message_item)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("a")
+            await pilot.pause()
+
+            assert all(item.message_id != message_id for item in inbox_app._tasks)
+
+        db_path = inbox_env["project_path"].parent / ".pollypm" / "state.db"
+        store = SQLAlchemyStore(f"sqlite:///{db_path}")
+        try:
+            open_rows = store.query_messages(state="open", type="notify")
+            closed_rows = store.query_messages(state="closed", type="notify")
+        finally:
+            store.close()
+        assert all(row["id"] != message_id for row in open_rows)
+        assert any(row["id"] == message_id for row in closed_rows)
     _run(body())
 
 
