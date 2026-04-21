@@ -1,6 +1,8 @@
 # Downtime Management Plugin Specification
 
-**Status:** v1 shipped - implemented in `src/pollypm/plugins_builtin/downtime/plugin.py`. Depends on: planner plugin, work service, session service, roster/jobs APIs, capacity subsystem, inbox view.
+**Status:** v1 shipped. This spec describes the built-in downtime plugin that is already live in PollyPM.
+**Implementation:** Entry module: `src/pollypm/plugins_builtin/downtime/plugin.py`
+**Depends on:** planner plugin, work service, session service, roster/jobs APIs, capacity subsystem, inbox view.
 
 ## 1. Purpose
 
