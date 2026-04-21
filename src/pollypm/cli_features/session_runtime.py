@@ -18,17 +18,19 @@ from pathlib import Path
 
 import typer
 
+from pollypm.config import DEFAULT_CONFIG_PATH
+
 
 def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
     @app.command(help=helpers._UP_HELP)
     def launch(
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
         helpers.up(config_path=config_path)
 
     @app.command("rail-daemon")
     def rail_daemon(
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
         poll_interval: float = typer.Option(60.0, "--poll-interval", help="Seconds between idle-loop wakeups."),
     ) -> None:
         """Run the headless heartbeat/recovery rail in the foreground.
@@ -48,7 +50,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
 
     @app.command()
     def reset(
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
         force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt."),
     ) -> None:
         """Kill all PollyPM tmux sessions (cockpit + storage closet). Use `pm up` to restart."""
@@ -102,7 +104,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
     def status(
         session_name: str | None = typer.Argument(None, help="Optional session name from config."),
         json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
         if not helpers._config_option_was_explicit():
             config_path = helpers._discover_config_path(config_path)
@@ -132,7 +134,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
 
     @app.command()
     def plan(
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
         supervisor = helpers._load_supervisor(config_path)
         helpers._require_pollypm_session(supervisor)
@@ -146,7 +148,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
     @app.command()
     def alerts(
         json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
         from pollypm.service_api import PollyPMService
 
@@ -162,7 +164,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
 
     @app.command("failover")
     def failover(
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
         """Show failover configuration: controller account and failover order."""
         from pollypm.config import load_config
@@ -182,7 +184,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
     @app.command("debug")
     def debug_command(
         session: str | None = typer.Option(None, "--session", "-s", help="Filter to a specific session."),
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
         """Show diagnostic info: open alerts, session states, recent events. Works outside tmux."""
         supervisor = helpers._load_supervisor(config_path)
@@ -218,7 +220,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
 
     @app.command()
     def events(
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
         limit: int = typer.Option(20, "--limit", min=1, max=200, help="Maximum number of events to show."),
     ) -> None:
         supervisor = helpers._load_supervisor(config_path)
@@ -235,7 +237,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
         session_name: str = typer.Argument(..., help="Session name from config."),
         owner: str = typer.Option("human", "--owner", help="Lease owner label."),
         note: str = typer.Option("", "--note", help="Optional note for the lease."),
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
         supervisor = helpers._load_supervisor(config_path)
         helpers._require_pollypm_session(supervisor)
@@ -245,7 +247,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
     @app.command()
     def release(
         session_name: str = typer.Argument(..., help="Session name from config."),
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
         supervisor = helpers._load_supervisor(config_path)
         helpers._require_pollypm_session(supervisor)
@@ -260,7 +262,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
         force: bool = typer.Option(False, "--force", help="Bypass a conflicting lease."),
         no_enter: bool = typer.Option(False, "--no-enter", help="Do not send Enter after the text."),
         json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
-        config_path: Path = typer.Option("~/.pollypm/pollypm.toml", "--config", help="PollyPM config path."),
+        config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
         supervisor = helpers._load_supervisor(config_path)
         session_cfg = supervisor.config.sessions.get(session_name)

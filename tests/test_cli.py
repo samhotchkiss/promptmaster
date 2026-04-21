@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -74,6 +75,39 @@ def test_discover_config_path_returns_global_config(monkeypatch, tmp_path: Path)
     resolved = cli._discover_config_path(cli.DEFAULT_CONFIG_PATH)
 
     assert resolved == cli.DEFAULT_CONFIG_PATH.resolve()
+
+
+def test_status_default_config_uses_home_not_literal_tilde(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    script = """
+import json
+from typer.testing import CliRunner
+import pollypm.cli as cli
+
+result = CliRunner().invoke(cli.app, ["status"])
+print(json.dumps({
+    "exit_code": result.exit_code,
+    "output": result.output,
+    "exception": "" if result.exception is None else str(result.exception),
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project_root,
+        env={**os.environ, "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    payload = json.loads(result.stdout)
+    expected_path = (tmp_path / ".pollypm" / "pollypm.toml").resolve()
+    bad_path = (project_root / "~" / ".pollypm" / "pollypm.toml").resolve()
+    combined = f"{payload['output']}\n{payload['exception']}"
+
+    assert payload["exit_code"] != 0
+    assert str(expected_path) in combined
+    assert str(bad_path) not in combined
 
 
 def test_importing_cli_defers_heavy_runtime_modules() -> None:
