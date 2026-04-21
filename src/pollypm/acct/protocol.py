@@ -23,9 +23,15 @@ core.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from pollypm.provider_sdk import ProviderUsageSnapshot
 
 from .model import AccountConfig, AccountStatus
+
+if TYPE_CHECKING:
+    from pollypm.models import SessionConfig
+    from pollypm.tmux.client import TmuxClient
 
 
 @runtime_checkable
@@ -76,6 +82,22 @@ class ProviderAdapter(Protocol):
 
         This is the "pull me the latest" entry point; callers that want
         cached data should read from the state store directly.
+        """
+        ...
+
+    def collect_usage_snapshot(
+        self,
+        tmux: "TmuxClient",
+        target: str,
+        *,
+        account: AccountConfig,
+        session: "SessionConfig",
+    ) -> ProviderUsageSnapshot:
+        """Return a fresh provider-native usage snapshot for ``account``.
+
+        This is the low-level live probe surface used by the background
+        account-usage sampler. The caller owns the short-lived probe pane;
+        the provider owns the prompt-driving and text parsing.
         """
         ...
 

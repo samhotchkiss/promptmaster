@@ -128,6 +128,9 @@ class CodexAdapter(ProviderAdapterBase):
             health=health,
             summary=f"{left}% left",
             raw_text=text,
+            used_pct=max(0, 100 - left),
+            remaining_pct=left,
+            period_label="current period",
         )
 
 

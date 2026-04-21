@@ -5,7 +5,6 @@ import os
 import platform
 import re
 import shutil
-import time
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,7 +14,7 @@ import typer
 
 from pollypm.plugins_builtin.core_agent_profiles.profiles import heartbeat_prompt, polly_prompt
 from pollypm.config import load_config, write_config
-from pollypm.models import AccountConfig, PollyPMConfig, ProviderKind, SessionConfig
+from pollypm.models import AccountConfig, PollyPMConfig, ProviderKind
 from pollypm.onboarding import (
     _decode_jwt_payload,
     _detect_account_email,
@@ -25,11 +24,9 @@ from pollypm.onboarding import (
     _slugify_email,
     default_control_args,
 )
-from pollypm.providers import get_provider
-from pollypm.runtimes import get_runtime
 from pollypm.runtime_env import claude_config_dir, codex_home_dir, provider_profile_env
-from pollypm.storage.state import StateStore
 from pollypm.session_services import create_tmux_client
+from pollypm.storage.state import StateStore
 
 
 @dataclass(slots=True)
@@ -276,81 +273,21 @@ def inspect_account_isolation(account: AccountConfig) -> tuple[str, str, str, st
     return ("unknown", "Unknown provider isolation status.", "", "unknown", None)
 
 
-def _build_probe_command(config, account: AccountConfig) -> str:
-    session = SessionConfig(
-        name=f"probe_{account.name}",
-        role="usage-probe",
-        provider=account.provider,
-        account=account.name,
-        cwd=config.project.root_dir,
-        args=[],
-    )
-    provider = get_provider(account.provider, root_dir=config.project.root_dir)
-    launch = provider.build_launch_command(session, account)
-    runtime = get_runtime(account.runtime, root_dir=config.project.root_dir)
-    return runtime.wrap_command(launch, account, config.project)
-
-
-def _run_usage_probe(config_path: Path, account_name: str) -> tuple[str, str, str]:
-    config = load_config(config_path)
-    account = config.accounts[account_name]
-    tmux = create_tmux_client()
-    probe_session = f"pm-usage-{account_name}-{int(time.time())}"
-    try:
-        tmux.create_session(probe_session, "probe", _build_probe_command(config, account))
-        target = f"{probe_session}:0"
-        provider = get_provider(account.provider, root_dir=config.project.root_dir)
-        usage_snapshot = provider.collect_usage_snapshot(
-            tmux,
-            target,
-            account=account,
-            session=SessionConfig(
-                name=f"probe_{account.name}",
-                role="usage-probe",
-                provider=account.provider,
-                account=account.name,
-                cwd=config.project.root_dir,
-                args=[],
-            ),
-        )
-        health = usage_snapshot.health
-        summary = usage_snapshot.summary
-        text = usage_snapshot.raw_text
-        return (health, summary, text)
-    finally:
-        if tmux.has_session(probe_session):
-            tmux.kill_session(probe_session)
-
-
 def probe_account_usage(config_path: Path, identifier: str) -> AccountStatus:
+    from pollypm.account_usage_sampler import refresh_account_usage
+
     config = load_config(config_path)
     account_name, account = _resolve_account_identifier(config, identifier)
     if account.home is None:
         raise typer.BadParameter(f"Account {account_name} does not have an isolated home configured.")
 
-    plan, default_health, default_summary = _account_usage_summary(account)
-    try:
-        health, usage_summary, raw_text = _run_usage_probe(config_path, account_name)
-    except Exception as exc:  # noqa: BLE001
-        raw_text = str(exc)
-        lowered = raw_text.lower()
-        if account.provider is ProviderKind.CLAUDE and "not authenticated" in lowered:
-            health = "auth-broken"
-            usage_summary = "usage refresh failed · Claude still opens the login flow"
-        else:
-            health = default_health
-            usage_summary = f"usage refresh failed · {raw_text}"
+    refresh_account_usage(config_path, account_name)
     with StateStore(config.project.state_db) as store:
-        store.upsert_account_usage(
-            account_name=account_name,
-            provider=account.provider.value,
-            plan=plan,
-            health=health if health != "unknown" else default_health,
-            usage_summary=usage_summary if usage_summary != "usage unavailable" else default_summary,
-            raw_text=raw_text,
-        )
         cached = store.get_account_usage(account_name)
         runtime = store.get_account_runtime(account_name)
+    default_plan = cached.plan if cached is not None else "unknown"
+    default_health = cached.health if cached is not None else "unknown"
+    default_summary = cached.usage_summary if cached is not None else "usage unavailable"
     isolation_status, isolation_summary, isolation_recommendation, auth_storage, profile_root = inspect_account_isolation(
         account
     )
@@ -364,7 +301,7 @@ def probe_account_usage(config_path: Path, identifier: str) -> AccountStatus:
             cached_health=(cached.health if cached else None),
             runtime_status=(runtime.status if runtime else None),
         ),
-        plan=plan,
+        plan=default_plan,
         health=(runtime.status if runtime and runtime.status != "healthy" else (cached.health if cached else default_health)),
         usage_summary=(cached.usage_summary if cached else default_summary),
         reason=runtime.reason if runtime else "",

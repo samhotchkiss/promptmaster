@@ -109,7 +109,7 @@ def test_codex_provider_satisfies_protocol():
 
 
 def test_registered_adapters_have_required_method_names():
-    """All six Protocol methods are defined on every registered adapter."""
+    """Registered adapters expose the full ProviderAdapter contract."""
     for adapter_cls in (ClaudeProvider, CodexProvider):
         adapter = adapter_cls()
         for method in (
@@ -117,8 +117,15 @@ def test_registered_adapters_have_required_method_names():
             "detect_email",
             "run_login_flow",
             "probe_usage",
+            "collect_usage_snapshot",
             "worker_launch_cmd",
             "isolated_env",
+            "latest_session_id",
+            "resume_launch_cmd",
+            "prime_home",
+            "login_command",
+            "logout_command",
+            "login_completion_marker_seen",
         ):
             assert hasattr(adapter, method), f"{adapter_cls.__name__} missing {method}"
             assert callable(getattr(adapter, method))

@@ -31,6 +31,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
+from pollypm.provider_sdk import ProviderUsageSnapshot
+
 from .model import AccountConfig, AccountStatus
 from .registry import get_provider
 
@@ -73,6 +75,26 @@ def probe_usage(account: AccountConfig) -> AccountStatus:
     should read from the state store directly.
     """
     return _adapter_for(account).probe_usage(account)
+
+
+def collect_usage_snapshot(
+    account: AccountConfig,
+    *,
+    tmux: object,
+    target: str,
+    session: object,
+) -> ProviderUsageSnapshot:
+    """Return a live provider-native usage snapshot for ``account``.
+
+    The caller owns the short-lived probe session; the provider adapter owns
+    prompt-driving and parsing for its CLI.
+    """
+    return _adapter_for(account).collect_usage_snapshot(
+        tmux,
+        target,
+        account=account,
+        session=session,
+    )
 
 
 def worker_launch_cmd(account: AccountConfig, args: list[str]) -> list[str]:
@@ -197,6 +219,7 @@ def choose_healthy_for_worker(
 
 __all__ = [
     "choose_healthy_for_worker",
+    "collect_usage_snapshot",
     "detect_email",
     "detect_logged_in",
     "isolated_env",

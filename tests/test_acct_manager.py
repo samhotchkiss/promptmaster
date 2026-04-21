@@ -26,7 +26,8 @@ from pollypm.acct import (
 )
 from pollypm.acct import manager as acct_manager
 from pollypm.acct.model import RuntimeStatus  # noqa: F401 — imported to validate re-export
-from pollypm.models import ProviderKind, RuntimeKind
+from pollypm.models import ProviderKind, RuntimeKind, SessionConfig
+from pollypm.provider_sdk import ProviderUsageSnapshot
 
 
 class FakeProvider:
@@ -43,6 +44,7 @@ class FakeProvider:
         self.logged_in_map: dict[str, bool] = {}
         self.email_map: dict[str, str | None] = {}
         self.status: AccountStatus | None = None
+        self.usage_snapshot = ProviderUsageSnapshot(summary="80% left")
         self.login_invocations = 0
 
     def _record(self, method: str, args: tuple, kwargs: dict) -> None:
@@ -64,6 +66,21 @@ class FakeProvider:
         self._record("probe_usage", (account,), {})
         assert self.status is not None, "test must set FakeProvider.status"
         return self.status
+
+    def collect_usage_snapshot(
+        self,
+        tmux,
+        target: str,
+        *,
+        account: AccountConfig,
+        session: SessionConfig,
+    ) -> ProviderUsageSnapshot:
+        self._record(
+            "collect_usage_snapshot",
+            (tmux, target, account, session),
+            {},
+        )
+        return self.usage_snapshot
 
     def worker_launch_cmd(self, account: AccountConfig, args: list[str]) -> list[str]:
         self._record("worker_launch_cmd", (account, args), {})
@@ -187,6 +204,34 @@ def test_worker_launch_cmd_dispatches_with_args(fake_claude: FakeProvider) -> No
     recorded = fake_claude.calls[-1]
     assert recorded[0] == "worker_launch_cmd"
     assert recorded[1][1] == ["--foo", "--bar"]
+
+
+def test_collect_usage_snapshot_dispatches_to_registered_provider(
+    fake_claude: FakeProvider,
+) -> None:
+    account = _account("primary")
+    session = SessionConfig(
+        name="probe_primary",
+        role="usage-probe",
+        provider=account.provider,
+        account=account.name,
+        cwd=Path("/tmp"),
+        args=[],
+    )
+    tmux = object()
+
+    result = acct_manager.collect_usage_snapshot(
+        account,
+        tmux=tmux,
+        target="pm-usage-primary:0",
+        session=session,
+    )
+
+    assert result is fake_claude.usage_snapshot
+    recorded = fake_claude.calls[-1]
+    assert recorded[0] == "collect_usage_snapshot"
+    assert recorded[1][0] is tmux
+    assert recorded[1][1] == "pm-usage-primary:0"
 
 
 def test_isolated_env_returns_adapter_contribution(

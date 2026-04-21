@@ -79,6 +79,10 @@ def parse_claude_usage_snapshot(text: str) -> ProviderUsageSnapshot:
         health=health,
         summary=f"{left}% left this week · resets {reset}",
         raw_text=text,
+        used_pct=used,
+        remaining_pct=left,
+        reset_at=reset,
+        period_label="current week",
     )
 
 

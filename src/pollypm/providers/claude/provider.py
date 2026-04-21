@@ -22,6 +22,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from pollypm.acct.model import AccountConfig, AccountStatus
+from pollypm.models import SessionConfig
+from pollypm.provider_sdk import ProviderUsageSnapshot
 
 from . import detect as _detect
 from . import env as _env
@@ -86,6 +88,22 @@ class ClaudeProvider:
                 entry point that carries the state-DB path.
         """
         return _probe.probe_usage(account)
+
+    def collect_usage_snapshot(
+        self,
+        tmux,
+        target: str,
+        *,
+        account: AccountConfig,
+        session: SessionConfig,
+    ) -> ProviderUsageSnapshot:
+        """Drive Claude's live usage probe for ``account`` in ``target``."""
+        return _probe.collect_usage_snapshot(
+            tmux,
+            target,
+            account=account,
+            session=session,
+        )
 
     def worker_launch_cmd(
         self,

@@ -325,6 +325,7 @@ def test_corerail_start_boots_heartbeat_rail(tmp_path: Path) -> None:
     handler_names = [
         "session.health_sweep",
         "capacity.probe",
+        "account.usage_refresh",
         "transcript.ingest",
         "alerts.gc",
         "itsalive.deploy_sweep",

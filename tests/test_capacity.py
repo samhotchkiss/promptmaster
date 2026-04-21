@@ -465,3 +465,5 @@ class TestPersistCapacityProbe:
         assert usage is not None
         assert usage.health == "healthy"
         assert usage.usage_summary == "75% left"
+        assert usage.remaining_pct == 75
+        assert usage.used_pct == 25

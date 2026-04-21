@@ -44,15 +44,21 @@ def _load_config(payload: dict[str, Any]):
     avoids opening a SQLite file descriptor that would then leak on the
     recurring schedule (the heartbeat fires some handlers every ~10s).
     """
-    from pollypm.config import DEFAULT_CONFIG_PATH, load_config, resolve_config_path
+    from pollypm.config import load_config
 
-    override = payload.get("config_path") if isinstance(payload, dict) else None
-    config_path = Path(override) if override else resolve_config_path(DEFAULT_CONFIG_PATH)
+    config_path = _resolve_config_path(payload)
     if not config_path.exists():
         raise RuntimeError(
             f"PollyPM config not found at {config_path}; cannot run recurring handler"
         )
     return load_config(config_path)
+
+
+def _resolve_config_path(payload: dict[str, Any]) -> Path:
+    from pollypm.config import DEFAULT_CONFIG_PATH, resolve_config_path
+
+    override = payload.get("config_path") if isinstance(payload, dict) else None
+    return Path(override) if override else resolve_config_path(DEFAULT_CONFIG_PATH)
 
 
 @contextmanager
@@ -385,6 +391,30 @@ def capacity_probe_handler(payload: dict[str, Any]) -> dict[str, Any]:
         probes = probe_all_accounts(config, store)
         summary = {probe.account_name: probe.state.value for probe in probes}
         return {"probes": summary}
+
+
+def account_usage_refresh_handler(payload: dict[str, Any]) -> dict[str, Any]:
+    """Refresh cached usage snapshots for configured accounts."""
+    from pollypm.account_usage_sampler import refresh_all_account_usage
+
+    account_names = payload.get("accounts")
+    if not isinstance(account_names, list):
+        account_names = None
+    samples = refresh_all_account_usage(
+        _resolve_config_path(payload),
+        account_names=account_names,
+    )
+    return {
+        "sampled": len(samples),
+        "accounts": {
+            sample.account_name: {
+                "health": sample.health,
+                "remaining_pct": sample.remaining_pct,
+                "reset_at": sample.reset_at,
+            }
+            for sample in samples
+        },
+    }
 
 
 def transcript_ingest_handler(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2126,6 +2156,10 @@ def _register_handlers(api: JobHandlerAPI) -> None:
         max_attempts=2, timeout_seconds=30.0,
     )
     api.register_handler(
+        "account.usage_refresh", account_usage_refresh_handler,
+        max_attempts=1, timeout_seconds=300.0,
+    )
+    api.register_handler(
         "transcript.ingest", transcript_ingest_handler,
         # 30s was killing the first scan before it could persist cursor
         # state: with ~7k jsonls under ~/.claude/projects, one cold
@@ -2194,6 +2228,7 @@ def _register_roster(api: RosterAPI) -> None:
     # removed with the legacy inbox subsystem (see iv04).
     api.register_recurring("@every 10s", "session.health_sweep", {})
     api.register_recurring("@every 60s", "capacity.probe", {})
+    api.register_recurring("@every 5m", "account.usage_refresh", {})
     # Every 5 min (was 30s). The scan rglob+stats every .jsonl under
     # ~/.claude/projects and ~/.codex/sessions; at a grown transcript
     # root (~7k files) the 30s cadence pinned rail CPU at ~170% in
@@ -2261,13 +2296,15 @@ plugin = PollyPMPlugin(
     description=(
         "Built-in recurring handlers — migrated from the old heartbeat loop. "
         "Registers inbox sweep, session health sweep, capacity probe, "
-        "transcript ingest, alerts GC, and work-service progress sweep on "
+        "account usage refresh, transcript ingest, alerts GC, and "
+        "work-service progress sweep on "
         "the roster + job queue."
     ),
     capabilities=(
         Capability(kind="job_handler", name="inbox.sweep"),
         Capability(kind="job_handler", name="session.health_sweep"),
         Capability(kind="job_handler", name="capacity.probe"),
+        Capability(kind="job_handler", name="account.usage_refresh"),
         Capability(kind="job_handler", name="transcript.ingest"),
         Capability(kind="job_handler", name="alerts.gc"),
         Capability(kind="job_handler", name="work.progress_sweep"),
