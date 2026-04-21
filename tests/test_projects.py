@@ -325,3 +325,17 @@ def test_session_lock_stale_unlink_race_surfaces_new_owner(
 
     with pytest.raises(RuntimeError, match="owned by fresh-owner"):
         ensure_session_lock(lock_root, "worker")
+
+
+def test_session_lock_surfaces_infrastructure_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    lock_root = tmp_path / "locks" / "worker"
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("pollypm.projects.os.open", boom)
+
+    with pytest.raises(RuntimeError, match="Could not create session lock"):
+        ensure_session_lock(lock_root, "worker")
