@@ -40,7 +40,7 @@ Emit structured JSON via `pm task done --output`:
           "hidden_coupling": ["modules X and Y share config key foo.bar"],
           "rot_risks": ["Playwright test asserts on CSS class names — will break on styling churn"],
           "six_month_concerns": "The Baz plugin contract has no versioning strategy",
-          "verdict": "approve_with_changes"
+          "verdict": "approved"
         }
       ],
       "preferred_candidate": "A",
@@ -51,5 +51,5 @@ Emit structured JSON via `pm task done --output`:
   }]
 }
 ```
-Scores are 1–10 (higher = more maintainable). Verdict is `approve`, `approve_with_changes`, or `reject`.
+Scores are 1–10 (higher = more maintainable). Verdict uses the work-service decision strings: `approved` or `rejected`. Put non-blocking follow-ups in the issue lists and `objections_for_risk_ledger`, not a third verdict value.
 </output_contract>

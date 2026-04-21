@@ -42,7 +42,7 @@ Emit structured JSON via `pm task done --output`:
           "imagined_personas": ["'power users' in Module X — user is a single indie dev"],
           "invisible_magic": ["Auto-retry logic the user will never see trigger"],
           "first_run_gaps": "No zero-config path — user must set three env vars before first run",
-          "verdict": "approve_with_changes"
+          "verdict": "approved"
         }
       ],
       "preferred_candidate": "A",
@@ -53,5 +53,5 @@ Emit structured JSON via `pm task done --output`:
   }]
 }
 ```
-Scores 1–10 (higher = better user alignment). Verdict: `approve`, `approve_with_changes`, `reject`.
+Scores 1–10 (higher = better user alignment). Verdict uses the work-service decision strings: `approved` or `rejected`. Put non-blocking follow-ups in the issue lists and `objections_for_risk_ledger`, not a third verdict value.
 </output_contract>
