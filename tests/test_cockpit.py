@@ -844,6 +844,63 @@ def test_cockpit_router_routes_idle_project_to_detail_pane(monkeypatch, tmp_path
     assert "cockpit-pane project demo" in calls["respawn"][1]
 
 
+def test_cockpit_router_reload_shell_respawns_rail_and_settings(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    calls: dict[str, object] = {}
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n"
+    )
+
+    class FakeSupervisor:
+        class Config:
+            class Project:
+                tmux_session = "pollypm"
+
+            project = Project()
+
+        config = Config()
+
+        def ensure_layout(self) -> None:
+            return None
+
+        def console_command(self) -> str:
+            return "bash -l"
+
+        def start_cockpit_tui(self, session_name: str) -> None:
+            calls["start"] = session_name
+
+    class FakeTmux:
+        def respawn_pane(self, target: str, command: str) -> None:
+            calls.setdefault("respawns", []).append((target, command))
+
+    def _ensure_layout() -> None:
+        calls["ensure"] = int(calls.get("ensure", 0)) + 1
+
+    router = CockpitRouter(config_path)
+    router.tmux = FakeTmux()  # type: ignore[assignment]
+    monkeypatch.setattr(router, "_load_supervisor", lambda fresh=False: FakeSupervisor())
+    monkeypatch.setattr(router, "ensure_cockpit_layout", _ensure_layout)
+    monkeypatch.setattr(router, "_park_mounted_session", lambda supervisor, target: calls.setdefault("parked", []).append((supervisor, target)))
+    monkeypatch.setattr(router, "_cleanup_extra_panes", lambda target: calls.setdefault("cleaned", []).append(target))
+    monkeypatch.setattr(router, "_left_pane_id", lambda target: "%1")
+    monkeypatch.setattr(router, "_right_pane_id", lambda target: "%2")
+
+    router.reload_cockpit_shell(kind="settings", selected_key="settings")
+
+    assert calls["ensure"] == 1
+    assert calls["start"] == "pollypm"
+    assert calls["cleaned"] == ["pollypm:PollyPM"]
+    assert len(calls["parked"]) == 1
+    assert calls["respawns"][0] == ("%1", "bash -l")
+    assert calls["respawns"][1][0] == "%2"
+    assert "cockpit-pane settings" in calls["respawns"][1][1]
+    state = router._load_state()
+    assert state["selected"] == "settings"
+    assert state["right_pane_id"] == "%2"
+
+
 def test_cockpit_router_joins_session_from_storage(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, object] = {}
     (tmp_path / "pollypm.toml").write_text(f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n")

@@ -379,6 +379,33 @@ def test_r_refresh_reloads_account_data(settings_env) -> None:
     _run(body())
 
 
+def test_settings_reload_button_uses_cockpit_shell_reload(settings_env) -> None:
+    app = settings_env["app"]
+    calls: list[tuple[str, str | None, str | None]] = []
+
+    class FakeRouter:
+        def reload_cockpit_shell(
+            self,
+            *,
+            kind: str = "settings",
+            project_key: str | None = None,
+            selected_key: str | None = None,
+        ) -> None:
+            calls.append((kind, project_key, selected_key))
+
+    app._router = FakeRouter()  # type: ignore[assignment]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#settings-reload-cockpit") is not None
+            app.action_reload_cockpit()
+            await pilot.pause()
+            assert calls == [("settings", None, "settings")]
+
+    _run(body())
+
+
 # ---------------------------------------------------------------------------
 # 7. Disabled projects (tracked=False) render dimmed
 # ---------------------------------------------------------------------------

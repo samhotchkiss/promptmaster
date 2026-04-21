@@ -1,12 +1,4 @@
-"""Focused UI tests for :class:`pollypm.cockpit_ui.PollyTasksApp`.
-
-These cover the task-detail visibility upgrade:
-
-* execution timeline rows surface timestamps
-* the current stage is rendered with flow-node metadata
-* the active session + live pane peek are visible for in-flight tasks
-* an open detail view refreshes when the task list refreshes
-"""
+"""Focused UI tests for :class:`pollypm.cockpit_tasks.PollyTasksApp`."""
 
 from __future__ import annotations
 
@@ -16,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from textual.widgets import Static
+from textual.widgets import DataTable, Static
 
 from pollypm.work.models import (
     ActorType,
@@ -76,17 +68,19 @@ def _run(coro) -> None:
 
 def _task(
     *,
+    task_number: int = 1,
     node_id: str,
     title: str = "Ship Notesy visibility",
+    status: WorkStatus = WorkStatus.IN_PROGRESS,
     updated_at: datetime | None = None,
     executions: list[FlowNodeExecution] | None = None,
 ) -> Task:
     return Task(
         project="demo",
-        task_number=1,
+        task_number=task_number,
         title=title,
         type=TaskType.TASK,
-        work_status=WorkStatus.IN_PROGRESS,
+        work_status=status,
         flow_template_id="plan_project",
         flow_template_version=1,
         current_node_id=node_id,
@@ -150,34 +144,36 @@ class _FakeSvc:
     def __init__(
         self,
         *,
-        task_factory,
+        tasks_factory,
         flow: FlowTemplate,
-        worker_session: WorkerSessionRecord | None,
+        worker_sessions: dict[str, WorkerSessionRecord | None] | None = None,
+        owner_by_id: dict[str, str] | None = None,
     ) -> None:
-        self._task_factory = task_factory
+        self._tasks_factory = tasks_factory
         self._flow = flow
-        self._worker_session = worker_session
+        self._worker_sessions = worker_sessions or {}
+        self._owner_by_id = owner_by_id or {}
 
     def list_tasks(self, *, project: str):
         assert project == "demo"
-        return [deepcopy(self._task_factory())]
+        return deepcopy(self._tasks_factory())
 
     def get(self, task_id: str) -> Task:
-        assert task_id == "demo/1"
-        return deepcopy(self._task_factory())
+        for task in self._tasks_factory():
+            if task.task_id == task_id:
+                return deepcopy(task)
+        raise AssertionError(task_id)
 
-    def get_context(self, task_id: str, limit: int = 10):
-        assert task_id == "demo/1"
-        assert limit == 10
+    def get_context(self, task_id: str, limit: int = 15):
+        assert task_id.startswith("demo/")
+        assert limit == 15
         return []
 
     def get_execution(self, task_id: str):
-        assert task_id == "demo/1"
-        return list(self._task_factory().executions)
+        return list(self.get(task_id).executions)
 
     def derive_owner(self, task: Task) -> str:
-        assert task.task_id == "demo/1"
-        return "architect_demo"
+        return self._owner_by_id.get(task.task_id, "architect_demo")
 
     def get_flow(self, name: str, *, project: str | None = None) -> FlowTemplate:
         assert name == "plan_project"
@@ -192,18 +188,24 @@ class _FakeSvc:
         active_only: bool = False,
     ) -> WorkerSessionRecord | None:
         assert task_project == "demo"
-        assert task_number == 1
         assert active_only is True
-        return self._worker_session
+        return self._worker_sessions.get(f"{task_project}/{task_number}")
 
     def close(self) -> None:
         return None
 
 
-def test_task_detail_surfaces_stage_timestamps_and_live_session(env, monkeypatch) -> None:
+def _table_rows(table: DataTable) -> list[list[str]]:
+    return [
+        [str(cell) for cell in table.get_row_at(row_index)]
+        for row_index in range(table.row_count)
+    ]
+
+
+def test_task_app_surfaces_stage_timestamps_and_live_session_tabs(env, monkeypatch) -> None:
     if not _load_config_compatible(env["config_path"]):
         pytest.skip("minimal pollypm.toml fixture not supported by loader")
-    from pollypm.cockpit_ui import PollyTasksApp
+    from pollypm.cockpit_tasks import PollyTasksApp
 
     executions = [
         FlowNodeExecution(
@@ -232,15 +234,22 @@ def test_task_detail_surfaces_stage_timestamps_and_live_session(env, monkeypatch
         branch_name="demo-architect",
         started_at="2026-04-20T17:14:00+00:00",
     )
-    fake_svc = _FakeSvc(task_factory=lambda: task, flow=_flow(), worker_session=worker_session)
+    fake_svc = _FakeSvc(
+        tasks_factory=lambda: [task],
+        flow=_flow(),
+        worker_sessions={"demo/1": worker_session},
+    )
 
-    monkeypatch.setattr("pollypm.cockpit_ui.create_tmux_client", lambda: _FakeTmux([
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([
         "Claude Code",
         "Working through the synthesize stage",
         "Drafting the rollout plan now",
     ]))
-    monkeypatch.setattr("pollypm.cockpit_ui._fmt_time", lambda iso: f"TS[{iso[11:16]}]")
-    monkeypatch.setattr("pollypm.cockpit_ui._format_relative_age", lambda value: "moments ago")
+    monkeypatch.setattr("pollypm.cockpit_tasks._fmt_time", lambda iso: f"TS[{iso[11:16]}]")
+    monkeypatch.setattr(
+        "pollypm.cockpit_tasks._format_relative_age",
+        lambda value: "moments ago",
+    )
 
     app = PollyTasksApp(env["config_path"], "demo")
     app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
@@ -248,25 +257,30 @@ def test_task_detail_surfaces_stage_timestamps_and_live_session(env, monkeypatch
     async def body() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
-            app._selected_task_id = "demo/1"
-            app._show_detail("demo/1")
-            await pilot.pause()
-            rendered = str(app.query_one("#task-detail", Static).render())
-            assert "Stage     synthesize · work · architect" in rendered
-            assert "Session   architect_polly_remote" in rendered
-            assert "⟳ synthesize — started TS[17:14] · moments ago" in rendered
-            assert "● research — TS[16:57] · moments ago" in rendered
-            assert "Branch    demo-architect" in rendered
-            assert "Peek" in rendered
-            assert "Working through the synthesize stage" in rendered
+            table = app.query_one("#tasks-table", DataTable)
+            assert table.row_count == 1
+
+            overview = str(app.query_one("#task-detail", Static).render())
+            live = str(app.query_one("#task-live", Static).render())
+            timeline_rows = _table_rows(app.query_one("#task-timeline", DataTable))
+
+            assert "Stage      synthesize · work · architect" in overview
+            assert "Session    architect_polly_remote" in overview
+            assert "Branch     demo-architect" in live
+            assert "Peek" in live
+            assert "Working through the synthesize stage" in live
+            assert timeline_rows[0][0] == "● research"
+            assert timeline_rows[0][3] == "TS[16:57]"
+            assert timeline_rows[1][0] == "⟳ synthesize"
+            assert timeline_rows[1][2] == "TS[17:14]"
 
     _run(body())
 
 
-def test_selected_task_detail_refreshes_when_list_refreshes(env, monkeypatch) -> None:
+def test_task_app_refresh_preserves_selected_task_and_updates_tabs(env, monkeypatch) -> None:
     if not _load_config_compatible(env["config_path"]):
         pytest.skip("minimal pollypm.toml fixture not supported by loader")
-    from pollypm.cockpit_ui import PollyTasksApp
+    from pollypm.cockpit_tasks import PollyTasksApp
 
     state = {
         "task": _task(
@@ -295,11 +309,18 @@ def test_selected_task_detail_refreshes_when_list_refreshes(env, monkeypatch) ->
         branch_name="demo-architect",
         started_at="2026-04-20T17:14:00+00:00",
     )
-    fake_svc = _FakeSvc(task_factory=lambda: state["task"], flow=_flow(), worker_session=worker_session)
+    fake_svc = _FakeSvc(
+        tasks_factory=lambda: [state["task"]],
+        flow=_flow(),
+        worker_sessions={"demo/1": worker_session},
+    )
 
-    monkeypatch.setattr("pollypm.cockpit_ui.create_tmux_client", lambda: _FakeTmux(state["peek"]))
-    monkeypatch.setattr("pollypm.cockpit_ui._fmt_time", lambda iso: f"TS[{iso[11:16]}]")
-    monkeypatch.setattr("pollypm.cockpit_ui._format_relative_age", lambda value: "moments ago")
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux(state["peek"]))
+    monkeypatch.setattr("pollypm.cockpit_tasks._fmt_time", lambda iso: f"TS[{iso[11:16]}]")
+    monkeypatch.setattr(
+        "pollypm.cockpit_tasks._format_relative_age",
+        lambda value: "moments ago",
+    )
 
     app = PollyTasksApp(env["config_path"], "demo")
     app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
@@ -307,16 +328,15 @@ def test_selected_task_detail_refreshes_when_list_refreshes(env, monkeypatch) ->
     async def body() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
-            app._selected_task_id = "demo/1"
-            app._show_detail("demo/1")
-            await pilot.pause()
             first = str(app.query_one("#task-detail", Static).render())
+            first_live = str(app.query_one("#task-live", Static).render())
             assert "synthesize · work · architect" in first
-            assert "Still synthesizing" in first
+            assert "Still synthesizing" in first_live
 
             state["task"] = _task(
                 node_id="critic_panel",
                 updated_at=datetime(2026, 4, 20, 17, 20, tzinfo=UTC),
+                status=WorkStatus.REVIEW,
                 executions=[
                     FlowNodeExecution(
                         task_id="demo/1",
@@ -343,7 +363,57 @@ def test_selected_task_detail_refreshes_when_list_refreshes(env, monkeypatch) ->
             app._refresh_list()
             await pilot.pause()
             second = str(app.query_one("#task-detail", Static).render())
+            second_live = str(app.query_one("#task-live", Static).render())
+            timeline_rows = _table_rows(app.query_one("#task-timeline", DataTable))
+
             assert "critic_panel · review · reviewer" in second
-            assert "Waiting on critic feedback" in second
+            assert "Waiting on critic feedback" in second_live
+            assert timeline_rows[-1][0] == "⟳ critic_panel"
+            assert timeline_rows[-1][2] == "TS[17:20]"
+
+    _run(body())
+
+
+def test_task_app_filters_drive_table_contents(env, monkeypatch) -> None:
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    review_task = _task(node_id="critic_panel", title="Review me", status=WorkStatus.REVIEW)
+    done_task = _task(
+        task_number=2,
+        node_id="research",
+        title="Done already",
+        status=WorkStatus.DONE,
+    )
+    fake_svc = _FakeSvc(
+        tasks_factory=lambda: [review_task, done_task],
+        flow=_flow(),
+        owner_by_id={"demo/1": "architect_demo", "demo/2": "closer_demo"},
+    )
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#tasks-table", DataTable)
+            assert table.row_count == 1  # default active filter hides done rows
+
+            app._status_filter = "all"
+            app._sync_filter_buttons()
+            app._render_table(select_first=True)
+            await pilot.pause()
+            assert table.row_count == 2
+
+            app._search_query = "done already"
+            app._render_table(select_first=True)
+            await pilot.pause()
+            rows = _table_rows(table)
+            assert table.row_count == 1
+            assert rows[0][2] == "Done already"
 
     _run(body())

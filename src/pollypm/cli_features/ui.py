@@ -105,7 +105,7 @@ def register_ui_commands(app: typer.Typer) -> None:
             PollyMetricsApp(config_path).run(mouse=True)
             return
         if kind == "issues" and target:
-            from pollypm.cockpit_ui import PollyTasksApp
+            from pollypm.cockpit_tasks import PollyTasksApp
 
             PollyTasksApp(config_path, target).run(mouse=True)
             return
@@ -123,4 +123,3 @@ def register_ui_commands(app: typer.Typer) -> None:
         from pollypm.cockpit_ui import PollyCockpitPaneApp
 
         PollyCockpitPaneApp(config_path, kind, target).run(mouse=True)
-
