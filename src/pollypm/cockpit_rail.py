@@ -315,6 +315,17 @@ class CockpitRouter:
         data["selected"] = key
         self._write_state(data)
 
+    def should_show_palette_tip(self) -> bool:
+        data = self._load_state()
+        return not bool(data.get("palette_tip_seen"))
+
+    def mark_palette_tip_seen(self) -> None:
+        data = self._load_state()
+        if data.get("palette_tip_seen") is True:
+            return
+        data["palette_tip_seen"] = True
+        self._write_state(data)
+
     def _load_state(self) -> dict[str, object]:
         path = self._state_path()
         if not path.exists():

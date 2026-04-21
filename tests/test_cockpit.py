@@ -171,6 +171,21 @@ def test_cockpit_router_selected_key_clears_missing_right_pane_state(monkeypatch
     assert "mounted_session" not in state
 
 
+def test_cockpit_router_marks_palette_tip_seen(tmp_path: Path) -> None:
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n"
+    )
+    router = CockpitRouter(config_path)
+
+    assert router.should_show_palette_tip() is True
+
+    router.mark_palette_tip_seen()
+
+    assert router.should_show_palette_tip() is False
+    assert router._load_state()["palette_tip_seen"] is True
+
+
 def test_cockpit_router_selected_key_clears_dead_right_pane_state(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "pollypm.toml"
     config_path.write_text(
@@ -1462,3 +1477,53 @@ def test_cockpit_app_tick_scheduler_is_noop(tmp_path: Path) -> None:
     """The scheduler tick is a no-op — heartbeat runs via cron, not the cockpit."""
     app = PollyCockpitApp(tmp_path / "pollypm.toml")
     app._tick_scheduler()  # should not raise or do anything
+
+
+def test_cockpit_app_shows_palette_tip_on_first_launch(monkeypatch, tmp_path: Path) -> None:
+    class FakeRouter:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.marked = 0
+
+        def selected_key(self) -> str:
+            return "polly"
+
+        def build_items(self, *, spinner_index: int = 0):
+            from pollypm.cockpit_rail import CockpitItem
+
+            return [
+                CockpitItem("polly", "Polly", "ready"),
+                CockpitItem("inbox", "Inbox (0)", "clear"),
+                CockpitItem("settings", "Settings", "config"),
+            ]
+
+        def route_selected(self, key: str) -> None:
+            self.calls.append(key)
+
+        def create_worker_and_route(self, project_key: str) -> None:
+            self.calls.append(f"new:{project_key}")
+
+        def should_show_palette_tip(self) -> bool:
+            return self.marked == 0
+
+        def mark_palette_tip_seen(self) -> None:
+            self.marked += 1
+
+    app = PollyCockpitApp(tmp_path / "pollypm.toml")
+    app.router = FakeRouter()  # type: ignore[assignment]
+    notices: list[tuple[str, float | None]] = []
+    monkeypatch.setattr(
+        app,
+        "notify",
+        lambda message, **kwargs: notices.append((message, kwargs.get("timeout"))),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+
+    asyncio.run(exercise())
+
+    assert notices == [("Tip: press `:` to open the command palette.", 10.0)]
+    assert app.router.marked == 1
