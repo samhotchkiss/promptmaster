@@ -548,6 +548,16 @@ class TestTransitions:
         assert final.transitions[-1].reason == "done"
 
 
+class TestBlock:
+    def test_block_rejects_malformed_blocker_id(self, svc):
+        task = _create_standard_task(svc, description="Blocking target")
+        svc.queue(task.task_id, "pm")
+        svc.claim(task.task_id, "agent-1")
+
+        with pytest.raises(ValidationError, match="project/number"):
+            svc.block(task.task_id, "pm", "bad-blocker-id")
+
+
 # ---------------------------------------------------------------------------
 # Owner derivation
 # ---------------------------------------------------------------------------
@@ -783,37 +793,65 @@ class TestFlowImmutability:
         t2 = self._make_task(svc)
         assert svc.get(t2.task_id).flow_template_version == 1
 
-    def test_load_flow_from_db_uses_cached_template_on_repeat_load(self, tmp_path, monkeypatch):
-        self._write_custom_standard(tmp_path, description="cached-body")
-        db = tmp_path / "work.db"
-        svc = SQLiteWorkService(db_path=db, project_path=tmp_path)
 
-        task = self._make_task(svc)
-        flow = svc._load_flow_from_db(
-            task.flow_template_id,
-            task.flow_template_version,
-        )
+def test_load_flow_from_db_uses_cached_template_on_repeat_load(tmp_path, monkeypatch):
+    flows_dir = tmp_path / ".pollypm" / "flows"
+    flows_dir.mkdir(parents=True, exist_ok=True)
+    (flows_dir / "standard.yaml").write_text(
+        """name: standard
+description: cached-body
+roles:
+  worker: worker
+  reviewer: reviewer
+nodes:
+  implement:
+    name: Implement
+    type: work
+    actor_type: role
+    actor_role: worker
+    next_node: review
+  review:
+    name: Review
+    type: review
+    actor_type: role
+    actor_role: reviewer
+    next_node: done
+    reject_node: implement
+  done:
+    name: Done
+    type: terminal
+    actor_type: project_manager
+start_node: implement
+"""
+    )
+    db = tmp_path / "work.db"
+    svc = SQLiteWorkService(db_path=db, project_path=tmp_path)
+    task = _create_standard_task(svc)
+    flow = svc._load_flow_from_db(
+        task.flow_template_id,
+        task.flow_template_version,
+    )
 
-        class GuardConn:
-            def __init__(self, conn):
-                self._conn = conn
+    class GuardConn:
+        def __init__(self, conn):
+            self._conn = conn
 
-            def execute(self, sql, params=()):
-                if "work_flow_templates" in sql or "work_flow_nodes" in sql:
-                    raise AssertionError("flow template DB lookup should be served from cache")
-                return self._conn.execute(sql, params)
+        def execute(self, sql, params=()):
+            if "work_flow_templates" in sql or "work_flow_nodes" in sql:
+                raise AssertionError("flow template DB lookup should be served from cache")
+            return self._conn.execute(sql, params)
 
-            def __getattr__(self, name):
-                return getattr(self._conn, name)
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
 
-        monkeypatch.setattr(svc, "_conn", GuardConn(svc._conn))
+    monkeypatch.setattr(svc, "_conn", GuardConn(svc._conn))
 
-        cached = svc._load_flow_from_db(
-            task.flow_template_id,
-            task.flow_template_version,
-        )
+    cached = svc._load_flow_from_db(
+        task.flow_template_id,
+        task.flow_template_version,
+    )
 
-        assert cached is flow
+    assert cached is flow
 
 
 def test_load_relationships_uses_one_dependency_query(svc, monkeypatch):
