@@ -129,3 +129,4 @@ def test_architect_profile_references_visual_explainer_by_name() -> None:
         "architect profile does not reference a visual-explainer command (plan-review or "
         "generate-visual-plan)"
     )
+    assert "If the skill or the preferred command entrypoint is unavailable" in text
