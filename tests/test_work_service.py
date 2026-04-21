@@ -46,6 +46,30 @@ def _create_standard_task(svc, project="proj", title="My task", description="Do 
     return svc.create(**defaults)
 
 
+def _create_critique_task(
+    svc,
+    *,
+    project="proj",
+    title="Critique",
+    critic="critic_simplicity",
+    description="Review the candidate plan",
+    **kwargs,
+):
+    """Helper to create a planner critic task on the ``critique_flow``."""
+    defaults = dict(
+        title=title,
+        description=description,
+        type="task",
+        project=project,
+        flow_template="critique_flow",
+        roles={"critic": critic, "requester": "architect"},
+        priority="high",
+        created_by="architect",
+    )
+    defaults.update(kwargs)
+    return svc.create(**defaults)
+
+
 # ---------------------------------------------------------------------------
 # Task creation
 # ---------------------------------------------------------------------------
@@ -381,6 +405,61 @@ class TestCancel:
         svc.cancel(task.task_id, "pm", "bye")
         with pytest.raises(InvalidTransitionError, match="terminal"):
             svc.cancel(task.task_id, "pm", "double cancel")
+
+    def test_cancel_prunes_critique_child_tasks_and_reuses_numbering(self, svc):
+        plan = svc.create(
+            title="Plan project demo",
+            description="Run the planner.",
+            type="task",
+            project="demo",
+            flow_template="plan_project",
+            roles={"architect": "architect"},
+            priority="high",
+            created_by="tester",
+        )
+        critic_names = (
+            "critic_simplicity",
+            "critic_maintainability",
+            "critic_user",
+            "critic_operational",
+            "critic_security",
+        )
+        critic_ids: list[str] = []
+        for critic in critic_names:
+            task = _create_critique_task(
+                svc,
+                project="demo",
+                title=f"{critic} panel review",
+                critic=critic,
+            )
+            svc.link(plan.task_id, task.task_id, "parent")
+            critic_ids.append(task.task_id)
+
+        for task_id in critic_ids:
+            cancelled = svc.cancel(task_id, "architect", "critic output collected")
+            assert cancelled.work_status == WorkStatus.CANCELLED
+            with pytest.raises(TaskNotFoundError):
+                svc.get(task_id)
+
+        remaining = [task.task_id for task in svc.list_tasks(project="demo")]
+        assert remaining == [plan.task_id]
+        assert svc.get(plan.task_id).children == []
+
+        implementation = _create_standard_task(
+            svc,
+            project="demo",
+            title="Implement module",
+            description="Build the first module.",
+        )
+        assert implementation.task_id == "demo/2"
+
+    def test_cancel_keeps_standalone_critique_flow_tasks(self, svc):
+        critic = _create_critique_task(svc)
+
+        cancelled = svc.cancel(critic.task_id, "architect", "no longer needed")
+
+        assert cancelled.work_status == WorkStatus.CANCELLED
+        assert svc.get(critic.task_id).work_status == WorkStatus.CANCELLED
 
 
 # ---------------------------------------------------------------------------
