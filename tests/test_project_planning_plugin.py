@@ -32,6 +32,10 @@ EXPECTED_PROFILES = (
     "critic_security",
 )
 
+CRITIC_PROFILES = tuple(
+    name for name in EXPECTED_PROFILES if name.startswith("critic_")
+)
+
 
 def test_project_planning_plugin_loads(tmp_path: Path) -> None:
     host = ExtensionHost(tmp_path)
@@ -86,6 +90,26 @@ def test_profile_file_exists_at_shipped_path(profile_name: str) -> None:
     # Frontmatter is YAML-ish and starts with ---
     assert text.startswith("---\n"), f"{profile_name} missing frontmatter"
     assert "preferred_providers" in text
+
+
+@pytest.mark.parametrize("profile_name", CRITIC_PROFILES)
+def test_critic_profile_verdict_contract_matches_work_service(profile_name: str) -> None:
+    from pollypm.work.models import Decision
+
+    root = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "pollypm"
+        / "plugins_builtin"
+        / "project_planning"
+        / "profiles"
+    )
+    text = (root / f"{profile_name}.md").read_text(encoding="utf-8")
+    accepted = tuple(decision.value for decision in Decision)
+
+    assert '"approve_with_changes"' not in text
+    for value in accepted:
+        assert f"`{value}`" in text
 
 
 # ---------------------------------------------------------------------------
@@ -525,8 +549,8 @@ def test_critic_verdict_from_payload() -> None:
     )
     payload = {
         "candidates": [
-            {"id": "A", "score": 8, "verdict": "approve"},
-            {"id": "B", "score": 6, "verdict": "approve_with_changes"},
+            {"id": "A", "score": 8, "verdict": "approved"},
+            {"id": "B", "score": 6, "verdict": "rejected"},
         ],
         "preferred_candidate": "A",
         "objections_for_risk_ledger": [
