@@ -532,6 +532,23 @@ class TestProvisionWorker:
         assert "tmux" in msg
         assert "pm task release" in msg or "retry" in msg
 
+    def test_provision_worker_raises_when_tmux_reports_no_windows(
+        self, manager, mock_tmux, tmp_project,
+    ):
+        from pollypm.work.session_manager import ProvisionError
+
+        mock_tmux.has_session.return_value = False
+        mock_tmux.list_windows.return_value = []
+
+        with patch("pollypm.work.session_manager.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            with pytest.raises(ProvisionError) as excinfo:
+                manager.provision_worker("proj/1", "agent-1")
+
+        msg = str(excinfo.value)
+        assert "did not report a worker pane" in msg
+        assert "pm task claim" in msg
+
     def test_provision_worker_reprovision_after_teardown(
         self, manager, mock_tmux, tmp_project,
     ):
