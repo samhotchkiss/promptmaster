@@ -247,6 +247,8 @@ POLLY_SLOGANS = [
     "Guide the chaos.\nShip the value.",
 ]
 
+_PALETTE_TIP_MESSAGE = "Tip: press `:` to open the command palette."
+
 
 def _wrap_alert_reason(reason: str, *, width: int = 28, max_lines: int = 4) -> list[str]:
     """Break ``reason`` into ≤``max_lines`` display lines of ≤``width`` chars.
@@ -603,9 +605,19 @@ class PollyCockpitApp(App[None]):
         self._start_core_rail()
         # Live alert toasts — non-intrusive bottom-right overlay.
         _setup_alert_notifier(self, bind_a=True)
+        self.call_after_refresh(self._show_palette_tip_once)
 
     def action_view_alerts(self) -> None:
         _action_view_alerts(self)
+
+    def _show_palette_tip_once(self) -> None:
+        try:
+            if not self.router.should_show_palette_tip():
+                return
+            self.router.mark_palette_tip_seen()
+            self.notify(_PALETTE_TIP_MESSAGE, timeout=10.0)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _start_core_rail(self) -> None:
         """Start the process-wide HeartbeatRail via the supervisor, best-effort.
