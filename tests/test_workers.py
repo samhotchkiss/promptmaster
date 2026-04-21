@@ -230,6 +230,10 @@ def test_operator_prompt_requires_delegation_instructions() -> None:
     assert "background probe" in prompt.lower()
     assert "non-blocking" in prompt.lower()
     assert "not a task for you" in prompt.lower()
+    assert "<current_state_contract>" in prompt
+    assert "<worker_management>" not in prompt
+    assert "polly-operator-guide.md" in prompt
+    assert prompt.count("\n") < 40
 
 def test_heartbeat_prompt_describes_recovery_protocol() -> None:
     prompt = heartbeat_prompt()
