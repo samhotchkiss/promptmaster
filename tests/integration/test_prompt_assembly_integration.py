@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 
 from pollypm.config import write_config
 from pollypm.models import AccountConfig, KnownProject, ProjectKind, ProjectSettings, PollyPMConfig, PollyPMSettings, ProviderKind, SessionConfig
 from pollypm.service_api import PollyPMService
 from pollypm.storage.state import StateStore
+from pollypm.work.sqlite_service import SQLiteWorkService
 
 
 def test_worker_prompt_assembles_overview_manifest_issue_and_checkpoint(tmp_path: Path) -> None:
@@ -194,3 +196,95 @@ agent_profile = "worker"
     assert "Source: `#42`" in prompt
     assert "# 42 Wire the backend" in prompt
     assert "Implement the gh-backed tracker." in prompt
+
+
+def test_operator_prompt_assembles_compact_state_json(tmp_path: Path) -> None:
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    db_path = project_root / ".pollypm" / "state.db"
+    db_path.parent.mkdir(parents=True)
+
+    config = PollyPMConfig(
+        project=ProjectSettings(
+            name="pollypm",
+            root_dir=control_root,
+            base_dir=control_root / ".pollypm",
+            logs_dir=control_root / ".pollypm/logs",
+            snapshots_dir=control_root / ".pollypm/snapshots",
+            state_db=control_root / ".pollypm/state.db",
+        ),
+        pollypm=PollyPMSettings(controller_account="claude_main"),
+        accounts={
+            "claude_main": AccountConfig(
+                name="claude_main",
+                provider=ProviderKind.CLAUDE,
+                home=control_root / ".pollypm" / "homes" / "claude_main",
+            )
+        },
+        sessions={
+            "operator": SessionConfig(
+                name="operator",
+                role="operator-pm",
+                provider=ProviderKind.CLAUDE,
+                account="claude_main",
+                cwd=control_root,
+                project="pollypm",
+                agent_profile="polly",
+            )
+        },
+        projects={
+            "demo": KnownProject(
+                key="demo",
+                path=project_root,
+                name="Demo",
+                kind=ProjectKind.GIT,
+            )
+        },
+    )
+    config_path = control_root / "pollypm.toml"
+    write_config(config, config_path, force=True)
+
+    with SQLiteWorkService(db_path=db_path, project_path=project_root) as project_store:
+        task = project_store.create(
+            title="Review the plan",
+            description="Needs operator attention.",
+            type="task",
+            project="demo",
+            flow_template="standard",
+            roles={"worker": "worker", "reviewer": "russell", "user": "sam"},
+            created_by="test",
+        )
+
+    control_store = StateStore(config.project.state_db)
+    control_store.upsert_session(
+        name="task-demo-1",
+        role="worker",
+        project="demo",
+        provider=ProviderKind.CLAUDE.value,
+        account="claude_main",
+        cwd=str(project_root),
+        window_name="task-demo-1",
+    )
+    control_store.upsert_session_runtime(
+        session_name="task-demo-1",
+        status="healthy",
+        effective_account="claude_main",
+        effective_provider=ProviderKind.CLAUDE.value,
+    )
+
+    supervisor = PollyPMService(config_path).load_supervisor()
+    launches = {launch.session.name: launch for launch in supervisor.plan_launches()}
+    prompt = launches["operator"].session.prompt or ""
+
+    start = prompt.rindex("<operator-state>") + len("<operator-state>")
+    end = prompt.rindex("</operator-state>")
+    state = json.loads(prompt[start:end].strip())
+
+    assert "polly-operator-guide.md" in prompt
+    assert state["totals"]["inbox_count"] == 1
+    assert state["totals"]["worker_count"] == 1
+    assert state["projects"][0]["project"] == "demo"
+    assert state["projects"][0]["top_inbox"][0]["task_id"] == "demo/1"
+    assert state["projects"][0]["workers"][0]["session"] == "task-demo-1"
