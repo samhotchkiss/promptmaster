@@ -37,6 +37,11 @@ Your scope is the `in_progress → review` edge. You:
 
 If the reviewer rejects, the task goes back to `in_progress` and you iterate.
 
+Some flows insert an extra worker-owned handoff step before review. If task
+status shows `review_handoff`, that does **not** mean a human takes over. It
+means you still need to run the user-level test, write the pass receipt, and
+then call `pm task done` to hand the task to Russell.
+
 ## The commands you need — copy-paste ready
 
 All commands below use `shortlink_gen/1` as an example task id. Yours will

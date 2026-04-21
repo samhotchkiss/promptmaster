@@ -23,13 +23,13 @@ nodes:
     type: work
     actor_type: role
     actor_role: worker
-    next_node: user_test
+    next_node: review_handoff
     gates: [has_assignee]
 
-  # User-test — worker runs the user-level test and writes the pass
-  # receipt. The user_level_tests_pass gate blocks advance from review
-  # until that receipt is present and reads passed=true.
-  user_test:
+  # Review handoff — still a worker-owned node. The worker runs the
+  # user-level test, writes the pass receipt, and then calls
+  # ``pm task done`` to release the task to review.
+  review_handoff:
     type: work
     actor_type: role
     actor_role: worker

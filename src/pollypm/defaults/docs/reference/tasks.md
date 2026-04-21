@@ -60,6 +60,7 @@ pm flow list                       # show available flows
 - **bug**: reproduce → fix → code_review → done
 - **spike**: research → done (no review)
 - **user-review**: implement → human_review → done (user must approve)
+- **implement_module**: build → review_handoff → code_review → done
 
 ## File Projection
 

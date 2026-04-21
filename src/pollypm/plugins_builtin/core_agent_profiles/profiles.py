@@ -204,7 +204,10 @@ def worker_prompt() -> str:
         "1. `pm task claim <id>` — claim the task (starts the flow)\n"
         '2. `pm task context <id> "progress note"` — log what you\'re doing as you go\n'
         "3. Do the actual work: read code, write code, run tests, commit\n"
-        "4. When done: `pm task done <id> --output '<work-output-json>'`\n\n"
+        "4. When done: `pm task done <id> --output '<work-output-json>'`\n"
+        "   If the flow shows a worker-owned handoff node like `review_handoff`, "
+        "that is still your turn: run the user-level test, write the receipt, "
+        "and call `pm task done` again to release review.\n\n"
         "## Work output format (required when signaling done)\n"
         "Use the spelled `--output` form in prompts and docs. It takes a "
         "JSON string describing what you did:\n"
