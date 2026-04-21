@@ -1,6 +1,8 @@
 # Project Planning Plugin Specification
 
-**Status:** v1 shipped - implemented in `src/pollypm/plugins_builtin/project_planning/plugin.py`. Depends on: plugin-discovery spec (`docs/plugin-discovery-spec.md`), work service, session service, roster/jobs APIs.
+**Status:** v1 shipped. This spec describes the built-in project planning plugin that is already live in PollyPM.
+**Implementation:** Entry module: `src/pollypm/plugins_builtin/project_planning/plugin.py`
+**Depends on:** plugin-discovery spec (`docs/plugin-discovery-spec.md`), work service, session service, roster/jobs APIs.
 
 ## 1. Purpose
 

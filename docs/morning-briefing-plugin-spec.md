@@ -1,6 +1,8 @@
 # Morning Briefing Plugin Specification
 
-**Status:** v1 shipped - implemented in `src/pollypm/plugins_builtin/morning_briefing/plugin.py`. Depends on: work service, inbox view, roster/jobs APIs, advisor plugin (optional — briefing can include advisor insights if present).
+**Status:** v1 shipped. This spec describes the built-in morning briefing plugin that is already live in PollyPM.
+**Implementation:** Entry module: `src/pollypm/plugins_builtin/morning_briefing/plugin.py`
+**Depends on:** work service, inbox view, roster/jobs APIs, advisor plugin (optional - briefing can include advisor insights if present).
 
 ## 1. Purpose
 
