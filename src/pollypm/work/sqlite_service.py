@@ -1103,6 +1103,7 @@ class SQLiteWorkService:
                 )
         result = self.get(task_id)
         self._sync_transition(result, task.work_status.value, WorkStatus.CANCELLED.value)
+        self._prune_cancelled_critique_child(result)
         return result
 
     def hold(self, task_id: str, actor: str, reason: str | None = None) -> Task:
@@ -2100,6 +2101,85 @@ class SQLiteWorkService:
     def _check_auto_unblock(self, task_id: str) -> None:
         """After a task moves to done, auto-unblock any tasks it was blocking."""
         check_auto_unblock(self, task_id)
+
+    def _has_incoming_parent_link(self, task: Task) -> bool:
+        """Return True when ``task`` is linked as a child of another task."""
+        row = self._conn.execute(
+            "SELECT 1 FROM work_task_dependencies "
+            "WHERE to_project = ? AND to_task_number = ? AND kind = ? "
+            "LIMIT 1",
+            (
+                task.project,
+                task.task_number,
+                LinkKind.PARENT.value,
+            ),
+        ).fetchone()
+        return row is not None
+
+    def _prune_cancelled_critique_child(self, task: Task) -> None:
+        """Delete cancelled planner critic subtasks after side effects land.
+
+        Project-planning critic reviews are short-lived helper tasks that
+        exist only to fan work out to critic sessions during the planner's
+        stage-5 panel. Keeping their cancelled rows around pollutes
+        ``pm task list`` and shifts the visible numbering of the first real
+        implementation task. Only prune ``critique_flow`` tasks that are
+        linked as a parent/child subtask so standalone uses of the flow keep
+        normal cancelled-task semantics.
+        """
+        if task.flow_template_id != "critique_flow":
+            return
+        if not self._has_incoming_parent_link(task):
+            return
+
+        params = (task.project, task.task_number)
+        dep_params = (
+            task.project,
+            task.task_number,
+            task.project,
+            task.task_number,
+        )
+        try:
+            self._conn.execute(
+                "DELETE FROM work_sync_state "
+                "WHERE task_project = ? AND task_number = ?",
+                params,
+            )
+            self._conn.execute(
+                "DELETE FROM work_sessions "
+                "WHERE task_project = ? AND task_number = ?",
+                params,
+            )
+            self._conn.execute(
+                "DELETE FROM work_context_entries "
+                "WHERE task_project = ? AND task_number = ?",
+                params,
+            )
+            self._conn.execute(
+                "DELETE FROM work_transitions "
+                "WHERE task_project = ? AND task_number = ?",
+                params,
+            )
+            self._conn.execute(
+                "DELETE FROM work_node_executions "
+                "WHERE task_project = ? AND task_number = ?",
+                params,
+            )
+            self._conn.execute(
+                "DELETE FROM work_task_dependencies "
+                "WHERE (from_project = ? AND from_task_number = ?) "
+                "OR (to_project = ? AND to_task_number = ?)",
+                dep_params,
+            )
+            self._conn.execute(
+                "DELETE FROM work_tasks "
+                "WHERE project = ? AND task_number = ?",
+                params,
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def _on_cancelled(self, task_id: str) -> None:
         """After a task is cancelled, add context entries on blocked dependents."""
