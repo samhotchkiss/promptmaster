@@ -73,6 +73,10 @@ from pollypm.cockpit_inbox import (
     inbox_thread_left_action,
     inbox_thread_right_action,
 )
+from pollypm.cockpit_inbox_items import (
+    is_task_inbox_entry,
+    load_inbox_entries,
+)
 from pollypm.cockpit_metrics import (
     PollyMetricsApp,
     _MetricsDrillDownModal,
@@ -3428,6 +3432,9 @@ def _format_sender(task) -> str:
     from a worker's notify use ``operator`` too. When nothing resolves,
     fall back to ``created_by``.
     """
+    sender = getattr(task, "sender", None)
+    if sender and sender != "user":
+        return sender
     roles = getattr(task, "roles", {}) or {}
     op = roles.get("operator")
     if op and op != "user":
@@ -4316,6 +4323,7 @@ class PollyInboxApp(App[None]):
         self._selected_task_id: str | None = None
         self._selected_row_key: str | None = None
         self._unread_ids: set[str] = set()
+        self._session_read_ids: set[str] = set()
         self._replies_by_task: dict[str, list] = {}
         self._visible_rows: list[InboxThreadRow] = []
         self._thread_expanded_task_ids: set[str] = set()
@@ -4390,55 +4398,17 @@ class PollyInboxApp(App[None]):
     # ------------------------------------------------------------------
 
     def _load_inbox(self) -> tuple[list, set[str], dict[str, list]]:
-        """Open each project's work-service DB plus reply threads.
+        """Open each inbox DB source and merge messages with task threads.
 
         All services are closed before return — callers don't need to
         manage lifecycle. Per-task operations open a fresh svc via
         :meth:`_svc_for_task` so we never hold connections across ticks.
         """
-        from pollypm.work.inbox_view import inbox_tasks
-        from pollypm.work.sqlite_service import SQLiteWorkService
-
         config = load_config(self.config_path)
-        tasks: list = []
-        unread: set[str] = set()
-        replies_by_task: dict[str, list] = {}
-        for project_key, project in getattr(config, "projects", {}).items():
-            db_path = project.path / ".pollypm" / "state.db"
-            if not db_path.exists():
-                continue
-            try:
-                svc = SQLiteWorkService(
-                    db_path=db_path, project_path=project.path,
-                )
-            except Exception:  # noqa: BLE001
-                continue
-            try:
-                try:
-                    project_tasks = inbox_tasks(svc, project=project_key)
-                except Exception:  # noqa: BLE001
-                    project_tasks = []
-                for t in project_tasks:
-                    tasks.append(t)
-                    try:
-                        rows = svc.get_context(
-                            t.task_id, entry_type="read", limit=1,
-                        )
-                    except Exception:  # noqa: BLE001
-                        rows = []
-                    if not rows:
-                        unread.add(t.task_id)
-                    try:
-                        replies = svc.list_replies(t.task_id)
-                    except Exception:  # noqa: BLE001
-                        replies = []
-                    if replies:
-                        replies_by_task[t.task_id] = replies
-            finally:
-                try:
-                    svc.close()
-                except Exception:  # noqa: BLE001
-                    pass
+        tasks, unread, replies_by_task = load_inbox_entries(
+            config,
+            session_read_ids=self._session_read_ids,
+        )
         tasks.sort(key=_inbox_sort_key)
         return tasks, unread, replies_by_task
 
@@ -4650,8 +4620,10 @@ class PollyInboxApp(App[None]):
         return " ".join(
             [
                 task.title or "",
+                task.description or "",
                 task.project or "",
                 _format_sender(task),
+                " ".join(list(getattr(task, "labels", []) or [])),
             ]
         )
 
@@ -4794,7 +4766,91 @@ class PollyInboxApp(App[None]):
     # Detail rendering
     # ------------------------------------------------------------------
 
+    def _item_for_id(self, item_id: str | None):
+        if item_id is None:
+            return None
+        for item in self._tasks:
+            if item.task_id == item_id:
+                return item
+        return None
+
+    def _set_reply_mode_for_task(self) -> None:
+        self.reply_input.disabled = False
+        if self.reply_input.placeholder != "Why reject? (Enter to confirm, Esc to cancel)":
+            self.reply_input.placeholder = "Reply … (Enter to send, Esc back to list)"
+
+    def _set_reply_mode_for_message(self) -> None:
+        self._awaiting_rejection_task_id = None
+        self.reply_input.value = ""
+        self.reply_input.disabled = True
+        self.reply_input.placeholder = (
+            "Notifications are read-only — press d to discuss or a to archive"
+        )
+        if self.reply_input.has_focus:
+            self.list_view.focus()
+
+    def _render_message_detail(self, item) -> None:
+        from pollypm.tz import format_relative
+
+        updated_iso = (
+            item.updated_at.isoformat()
+            if hasattr(item.updated_at, "isoformat") else str(item.updated_at or "")
+        )
+        created_iso = (
+            item.created_at.isoformat()
+            if hasattr(item.created_at, "isoformat") else str(item.created_at or "")
+        )
+        when = _fmt_time(updated_iso or created_iso)
+        rel = format_relative(updated_iso or created_iso)
+
+        sender = _format_sender(item)
+        _session, pm_label = _resolve_pm_target(self.config_path, item.project)
+        sections: list[str] = []
+        sections.append(f"[b #eef2f4]{_escape(item.title or '(no subject)')}[/b #eef2f4]")
+        meta_bits = [f"[#5b8aff]{_escape(sender)}[/#5b8aff]"]
+        if when:
+            meta_bits.append(f"[#97a6b2]{_escape(when)}[/#97a6b2]")
+        if rel:
+            meta_bits.append(f"[dim]{_escape(rel)}[/dim]")
+        if item.project and item.project != "inbox":
+            meta_bits.append(f"[dim]· {_escape(item.project)}[/dim]")
+        prio = getattr(item.priority, "value", str(item.priority))
+        if prio and prio != "normal":
+            meta_bits.append(f"[#f0c45a]◆ {_escape(prio)}[/#f0c45a]")
+        meta_bits.append(f"[dim #6b7a88]PM: {_escape(pm_label)}[/dim #6b7a88]")
+        sections.append("  ·  ".join(meta_bits))
+        tags = [item.message_type or "notify", item.tier or "immediate"]
+        labels = list(getattr(item, "labels", []) or [])
+        tags.extend(labels)
+        sections.append(f"[dim]{_escape(' · '.join([tag for tag in tags if tag]))}[/dim]")
+        sections.append("")
+        sections.append(_md_to_rich(_escape_body(item.description or "(no body)")))
+        self.detail.update("\n".join(sections))
+        self._proposal_specs.pop(item.task_id, None)
+        self._plan_review_meta.pop(item.task_id, None)
+        self._plan_review_round_trip.pop(item.task_id, None)
+        self._blocking_question_meta.pop(item.task_id, None)
+        self._clear_rollup_items()
+        self._update_hint_for_message()
+        self._set_reply_mode_for_message()
+        try:
+            self.query_one("#inbox-detail-scroll", VerticalScroll).scroll_home(
+                animate=False,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     def _render_detail(self, task_id: str) -> None:
+        item = self._item_for_id(task_id)
+        if item is None:
+            self.detail.update("[red]Inbox item is no longer available.[/red]")
+            self._clear_rollup_items()
+            self._set_reply_mode_for_task()
+            return
+        if not is_task_inbox_entry(item):
+            self._render_message_detail(item)
+            return
+        self._set_reply_mode_for_task()
         svc = self._svc_for_task(task_id)
         if svc is None:
             self.detail.update("[red]Could not open project database for this task.[/red]")
@@ -5190,6 +5246,24 @@ class PollyInboxApp(App[None]):
     def _mark_open_read(self, task_id: str) -> None:
         if task_id not in self._unread_ids:
             return
+        item = self._item_for_id(task_id)
+        if item is None:
+            return
+        if not is_task_inbox_entry(item):
+            self._session_read_ids.add(task_id)
+            self._unread_ids.discard(task_id)
+            try:
+                for row in self.list_view.children:
+                    if (
+                        isinstance(row, _InboxListItem)
+                        and row.row_ref.is_task
+                        and row.task_id == task_id
+                    ):
+                        row.mark_read()
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+            return
         svc = self._svc_for_task(task_id)
         if svc is None:
             return
@@ -5225,6 +5299,32 @@ class PollyInboxApp(App[None]):
     def action_archive_selected(self) -> None:
         task_id = self._selected_task_id
         if task_id is None:
+            return
+        item = self._item_for_id(task_id)
+        if item is None:
+            return
+        if not is_task_inbox_entry(item):
+            try:
+                from pollypm.store import SQLAlchemyStore
+
+                store = SQLAlchemyStore(f"sqlite:///{item.db_path}")
+                try:
+                    store.close_message(int(item.message_id))
+                finally:
+                    store.close()
+            except Exception as exc:  # noqa: BLE001
+                self.notify(f"Archive failed: {exc}", severity="error")
+                return
+            self.notify(f"Archived {task_id}", severity="information", timeout=2.0)
+            self._tasks = [task for task in self._tasks if task.task_id != task_id]
+            self._unread_ids.discard(task_id)
+            self._session_read_ids.discard(task_id)
+            self._replies_by_task.pop(task_id, None)
+            self._thread_expanded_task_ids.discard(task_id)
+            if self._selected_task_id == task_id:
+                self._selected_task_id = None
+                self._selected_row_key = None
+            self._render_list(select_first=bool(self._tasks))
             return
         # Improvement proposals force an explicit Accept (A) or Reject
         # (X). Plain ``a`` must not silently archive them — the user
@@ -5271,6 +5371,15 @@ class PollyInboxApp(App[None]):
         task_id = self._selected_task_id
         if task_id is None:
             return
+        item = self._item_for_id(task_id)
+        if item is not None and not is_task_inbox_entry(item):
+            self.notify(
+                "Notifications are read-only — press d to discuss or a to archive.",
+                severity="warning",
+                timeout=2.5,
+            )
+            self.list_view.focus()
+            return
         self.reply_input.focus()
 
     # ------------------------------------------------------------------
@@ -5295,21 +5404,27 @@ class PollyInboxApp(App[None]):
         task_id = self._selected_task_id
         if task_id is None:
             return
-        svc = self._svc_for_task(task_id)
-        if svc is None:
-            self.notify("Could not open project database.", severity="error")
+        item = self._item_for_id(task_id)
+        if item is None:
             return
-        try:
-            task = svc.get(task_id)
-        except Exception as exc:  # noqa: BLE001
-            self.notify(f"Could not load task: {exc}", severity="error")
-            svc.close()
-            return
-        finally:
+        if is_task_inbox_entry(item):
+            svc = self._svc_for_task(task_id)
+            if svc is None:
+                self.notify("Could not open project database.", severity="error")
+                return
             try:
+                task = svc.get(task_id)
+            except Exception as exc:  # noqa: BLE001
+                self.notify(f"Could not load task: {exc}", severity="error")
                 svc.close()
-            except Exception:  # noqa: BLE001
-                pass
+                return
+            finally:
+                try:
+                    svc.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            task = item
 
         # Determine which item (rollup sub-item vs the rollup itself)
         # we're discussing, and derive the project the PM serves.
@@ -5529,6 +5644,7 @@ class PollyInboxApp(App[None]):
     def _on_reply_submitted(self, event: Input.Submitted) -> None:
         body = (event.value or "").strip()
         task_id = self._selected_task_id
+        item = self._item_for_id(task_id)
         # Rejection path: when the user pressed ``X`` on a proposal, the
         # shared reply input was repurposed to collect a rationale. Route
         # submission through the rejection flow instead of add_reply so
@@ -5549,6 +5665,15 @@ class PollyInboxApp(App[None]):
             return
         if not body or not task_id:
             # Empty submit — just hand focus back to the list.
+            self.reply_input.value = ""
+            self.list_view.focus()
+            return
+        if item is None or not is_task_inbox_entry(item):
+            self.notify(
+                "Notifications are read-only — press d to discuss or a to archive.",
+                severity="warning",
+                timeout=2.5,
+            )
             self.reply_input.value = ""
             self.list_view.focus()
             return
@@ -5597,6 +5722,10 @@ class PollyInboxApp(App[None]):
         "j/k move \u00b7 \u21b5 open \u00b7 r reply \u00b7 a archive "
         "\u00b7 d discuss \u00b7 / filter \u00b7 c clear \u00b7 q back"
     )
+    _MESSAGE_HINT = (
+        "j/k move \u00b7 \u21b5 open \u00b7 a archive "
+        "\u00b7 d discuss \u00b7 / filter \u00b7 c clear \u00b7 q back"
+    )
     _PROPOSAL_HINT = (
         "A accept \u00b7 X reject \u00b7 r reply \u00b7 q back"
     )
@@ -5623,6 +5752,12 @@ class PollyInboxApp(App[None]):
     def _update_hint_for_blocking_question(self) -> None:
         try:
             self.hint.update(self._BLOCKING_QUESTION_HINT)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _update_hint_for_message(self) -> None:
+        try:
+            self.hint.update(self._MESSAGE_HINT)
         except Exception:  # noqa: BLE001
             pass
 
@@ -5662,6 +5797,9 @@ class PollyInboxApp(App[None]):
         """Return (task, labels) for the current selection if it's a proposal."""
         task_id = self._selected_task_id
         if task_id is None:
+            return None, []
+        item = self._item_for_id(task_id)
+        if item is None or not is_task_inbox_entry(item):
             return None, []
         svc = self._svc_for_task(task_id)
         if svc is None:
@@ -5854,6 +5992,9 @@ class PollyInboxApp(App[None]):
         """
         task_id = self._selected_task_id
         if task_id is None:
+            return None, []
+        item = self._item_for_id(task_id)
+        if item is None or not is_task_inbox_entry(item):
             return None, []
         svc = self._svc_for_task(task_id)
         if svc is None:
