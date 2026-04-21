@@ -998,6 +998,53 @@ class CockpitRouter:
         if right_pane is not None:
             self.tmux.select_pane(right_pane)
 
+    def reload_cockpit_shell(
+        self,
+        *,
+        kind: str = "settings",
+        project_key: str | None = None,
+        selected_key: str | None = None,
+    ) -> None:
+        """Reload the cockpit shell without shutting down any sessions.
+
+        Inputs: the right-pane ``kind`` to relaunch, optional
+        ``project_key`` for project-scoped panes, and an optional
+        ``selected_key`` to persist in cockpit state.
+        Outputs: ``None``.
+        Side effects: re-parks any mounted session, respawns the left
+        rail pane into its shell bootstrap, re-injects the cockpit TUI
+        loop, and respawns the right pane back into the requested static
+        view.
+        Invariant: agent sessions remain alive in the storage closet;
+        this path never tears down the tmux session.
+        """
+        supervisor = self._load_supervisor()
+        tmux_session = supervisor.config.project.tmux_session
+        window_target = f"{tmux_session}:{self._COCKPIT_WINDOW}"
+        self.ensure_cockpit_layout()
+        resolved_selected = selected_key or self._selection_key_for_static_view(
+            kind, project_key,
+        )
+        self.set_selected_key(resolved_selected)
+        self._park_mounted_session(supervisor, window_target)
+        self._cleanup_extra_panes(window_target)
+        left_pane_id = self._left_pane_id(window_target)
+        right_pane_id = self._right_pane_id(window_target)
+        if left_pane_id is None or right_pane_id is None:
+            raise RuntimeError("Cockpit panes are not available for reload.")
+        state = self._load_state()
+        state["selected"] = resolved_selected
+        state["right_pane_id"] = right_pane_id
+        state.pop("mounted_session", None)
+        self._write_state(state)
+        self.tmux.respawn_pane(left_pane_id, supervisor.console_command())
+        supervisor.start_cockpit_tui(tmux_session)
+        # Respawn the current right pane last because this may replace
+        # the process that is currently executing the reload request.
+        self.tmux.respawn_pane(
+            right_pane_id, self._right_pane_command(kind, project_key),
+        )
+
     def create_worker_and_route(
         self,
         project_key: str,
@@ -1317,6 +1364,19 @@ class CockpitRouter:
                     self.tmux.kill_pane(pane.pane_id)
                 except Exception:  # noqa: BLE001
                     pass
+
+    def _selection_key_for_static_view(
+        self, kind: str, project_key: str | None = None,
+    ) -> str:
+        if kind == "project" and project_key:
+            return f"project:{project_key}:dashboard"
+        if kind == "settings" and project_key:
+            return f"project:{project_key}:settings"
+        if kind == "issues" and project_key:
+            return f"project:{project_key}:issues"
+        if kind == "activity" and project_key:
+            return f"activity:{project_key}"
+        return kind
 
     def _right_pane_command(self, kind: str, project_key: str | None = None) -> str:
         root = shlex.quote(str(self.config_path.parent.resolve()))

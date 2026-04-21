@@ -39,7 +39,16 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, ListItem, ListView, Static
+from textual.widgets import (
+    Button,
+    DataTable,
+    Input,
+    ListItem,
+    ListView,
+    Static,
+    TabbedContent,
+    TabPane,
+)
 
 from pollypm.models import ProviderKind
 from pollypm.tz import format_time as _fmt_time
@@ -274,6 +283,17 @@ def _wrap_alert_reason(reason: str, *, width: int = 28, max_lines: int = 4) -> l
     return lines
 
 
+def _rail_alert_subtitle_width(*, rail_width: int = 30, indent: int = 4) -> int:
+    """Visible text budget for wrapped rail alert subtitles.
+
+    The rail pane is 30 columns by default. Subtitle lines are rendered on
+    their own line with a 4-space indent, so the actual payload width must fit
+    inside ``rail_width - indent``. The previous hard-coded ``28`` overflowed
+    the real rail budget and still clipped in production.
+    """
+    return max(12, rail_width - indent)
+
+
 class RailItem(ListItem):
     def __init__(
         self,
@@ -341,7 +361,11 @@ class RailItem(ListItem):
         if self.item.state.startswith("!"):
             reason = self.item.state[2:].strip()  # strip "! " prefix
             if reason:
-                for chunk in _wrap_alert_reason(reason, width=28, max_lines=4):
+                for chunk in _wrap_alert_reason(
+                    reason,
+                    width=_rail_alert_subtitle_width(),
+                    max_lines=4,
+                ):
                     text.append(f"\n    {chunk}", style="#ff5f6d dim")
         self.body.update(text)
 
@@ -1810,6 +1834,10 @@ class PollyTasksApp(App[None]):
             svc.close()
 
 
+# Re-export the extracted task screen so existing import paths keep working.
+from pollypm.cockpit_tasks import PollyTasksApp as PollyTasksApp  # noqa: E402,F401
+
+
 # ---------------------------------------------------------------------------
 # Settings — interactive Textual screen (rebuild)
 # ---------------------------------------------------------------------------
@@ -2173,6 +2201,18 @@ class PollySettingsPaneApp(App[None]):
     #settings-body {
         height: 1fr;
     }
+    #settings-actions {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #settings-reload-cockpit {
+        min-width: 18;
+    }
+    #settings-actions-note {
+        color: #97a6b2;
+        padding-left: 1;
+        content-align: left middle;
+    }
     #settings-nav {
         width: 28;
         min-width: 22;
@@ -2296,6 +2336,7 @@ class PollySettingsPaneApp(App[None]):
         self.hint = Static(self._DEFAULT_HINT, id="settings-hint", markup=True)
         # State
         self.data: SettingsData | None = None
+        self._router: CockpitRouter | None = None
         self._active_section: str = _SETTINGS_SECTIONS[0][0]
         self._search_query: str = ""
         self._nav_widgets: dict[str, Static] = {}
@@ -2314,6 +2355,16 @@ class PollySettingsPaneApp(App[None]):
             with Horizontal(id="settings-body"):
                 yield self.nav
                 with Vertical(id="settings-right"):
+                    with Horizontal(id="settings-actions"):
+                        yield Button(
+                            "Reload Cockpit",
+                            id="settings-reload-cockpit",
+                            variant="primary",
+                        )
+                        yield Static(
+                            "Reload the shell only. Sessions stay running.",
+                            id="settings-actions-note",
+                        )
                     yield self.section_title
                     with Vertical(id="settings-table-wrap"):
                         yield self.accounts
@@ -2846,6 +2897,17 @@ class PollySettingsPaneApp(App[None]):
         except Exception:  # noqa: BLE001
             pass
 
+    def action_reload_cockpit(self) -> None:
+        try:
+            self.router.reload_cockpit_shell(
+                kind="settings", selected_key="settings",
+            )
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self.notify(f"Reload failed: {exc}", severity="error")
+            except Exception:  # noqa: BLE001
+                pass
+
     def action_toggle_permissions(self) -> None:
         try:
             config = load_config(self.config_path)
@@ -2992,6 +3054,12 @@ class PollySettingsPaneApp(App[None]):
             return self.plugins_table
         return None
 
+    @property
+    def router(self) -> CockpitRouter:
+        if self._router is None:
+            self._router = CockpitRouter(self.config_path)
+        return self._router
+
     def _sync_selection(self) -> None:
         data = self.data
         if data is None:
@@ -3022,6 +3090,10 @@ class PollySettingsPaneApp(App[None]):
         self, _event: DataTable.RowHighlighted,
     ) -> None:
         self._sync_selection()
+
+    @on(Button.Pressed, "#settings-reload-cockpit")
+    def on_reload_cockpit_pressed(self, _event: Button.Pressed) -> None:
+        self.action_reload_cockpit()
 
     @on(DataTable.RowSelected, "#accounts")
     def on_account_selected(self, _event: DataTable.RowSelected) -> None:
