@@ -29,7 +29,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from pollypm.rejection_feedback import emit_rejection_feedback
 from pollypm.work.flow_engine import resolve_flow
 from pollypm.work.gates import GateRegistry, evaluate_gates, has_hard_failure
 from pollypm.work.models import (
@@ -102,11 +101,11 @@ from pollypm.work.service_sync import (
 from pollypm.work.service_transitions import (
     advance_to_node,
     current_node_visit as read_current_node_visit,
-    mark_done as mark_task_done,
     next_visit as read_next_visit,
     on_task_done,
     on_task_transition,
 )
+from pollypm.work.service_transition_manager import WorkTransitionManager
 from pollypm.work.service_worker_sessions import (
     WORK_SESSIONS_DDL,
     end_worker_session as finish_worker_session,
@@ -149,7 +148,7 @@ class SQLiteWorkService:
         self._conn.execute("PRAGMA busy_timeout=30000")
         create_work_tables(self._conn)
         self._gate_registry = GateRegistry(project_path=project_path)
-        self._flow_cache: dict[tuple[str, int], FlowTemplate] = {}
+        self._transition_mgr = WorkTransitionManager(self)
         # Last-provision-error breadcrumb — set by ``claim()`` when
         # ``provision_worker`` fails so the CLI can surface it instead
         # of reporting a silent success (#243).
@@ -166,7 +165,6 @@ class SQLiteWorkService:
 
     def close(self) -> None:
         """Close the database connection."""
-        self._flow_cache.clear()
         self._conn.close()
 
     def __enter__(self):
@@ -284,7 +282,6 @@ class SQLiteWorkService:
         self, template: FlowTemplate, version: int,
     ) -> None:
         """Persist ``template`` at ``version`` in work_flow_templates/nodes."""
-        self._invalidate_flow_cache(name=template.name, version=version)
         now = _now()
         self._conn.execute(
             "INSERT INTO work_flow_templates "
@@ -320,22 +317,6 @@ class SQLiteWorkService:
                     json.dumps(node.gates),
                 ),
             )
-
-    def _invalidate_flow_cache(
-        self,
-        *,
-        name: str | None = None,
-        version: int | None = None,
-    ) -> None:
-        if name is None:
-            self._flow_cache.clear()
-            return
-        if version is not None:
-            self._flow_cache.pop((name, version), None)
-            return
-        stale = [key for key in self._flow_cache if key[0] == name]
-        for key in stale:
-            self._flow_cache.pop(key, None)
 
     def _ensure_flow_in_db(self, name: str) -> FlowTemplate:
         """Load a flow via the engine and persist it, bumping version on change.
@@ -406,19 +387,13 @@ class SQLiteWorkService:
 
     def _load_flow_from_db(self, name: str, version: int) -> FlowTemplate:
         """Load a flow template from the database."""
-        cache_key = (name, version)
-        cached = self._flow_cache.get(cache_key)
-        if cached is not None:
-            return cached
         row = self._conn.execute(
             "SELECT * FROM work_flow_templates WHERE name = ? AND version = ?",
             (name, version),
         ).fetchone()
         if row is None:
             # Fall back to engine resolution
-            flow = resolve_flow(name, self._project_path)
-            self._flow_cache[cache_key] = flow
-            return flow
+            return resolve_flow(name, self._project_path)
 
         roles = json.loads(row["roles"])
         nodes: dict[str, FlowNode] = {}
@@ -445,7 +420,7 @@ class SQLiteWorkService:
                 gates=json.loads(nr["gates"]),
             )
 
-        flow = FlowTemplate(
+        return FlowTemplate(
             name=row["name"],
             description=row["description"],
             roles=roles,
@@ -454,8 +429,6 @@ class SQLiteWorkService:
             version=row["version"],
             is_current=bool(row["is_current"]),
         )
-        self._flow_cache[cache_key] = flow
-        return flow
 
     # ------------------------------------------------------------------
     # Internal: task reconstruction
@@ -598,15 +571,17 @@ class SQLiteWorkService:
         self, project: str, task_number: int
     ) -> dict:
         """Load dependency relationships for a task from work_task_dependencies."""
-        rows = self._conn.execute(
-            "SELECT "
-            "from_project, from_task_number, "
-            "to_project, to_task_number, "
-            "kind "
-            "FROM work_task_dependencies "
-            "WHERE (from_project = ? AND from_task_number = ?) "
-            "   OR (to_project = ? AND to_task_number = ?)",
-            (project, task_number, project, task_number),
+        # Outgoing edges: this task is from_id
+        out_rows = self._conn.execute(
+            "SELECT to_project, to_task_number, kind FROM work_task_dependencies "
+            "WHERE from_project = ? AND from_task_number = ?",
+            (project, task_number),
+        ).fetchall()
+        # Incoming edges: this task is to_id
+        in_rows = self._conn.execute(
+            "SELECT from_project, from_task_number, kind FROM work_task_dependencies "
+            "WHERE to_project = ? AND to_task_number = ?",
+            (project, task_number),
         ).fetchall()
 
         rels: dict = {
@@ -618,41 +593,36 @@ class SQLiteWorkService:
             "superseded_by_task_number": None,
         }
 
-        for r in rows:
+        for r in out_rows:
             kind = r["kind"]
-            is_outgoing = (
-                r["from_project"] == project and r["from_task_number"] == task_number
-            )
-            is_incoming = (
-                r["to_project"] == project and r["to_task_number"] == task_number
-            )
-            if is_outgoing:
-                target = (r["to_project"], r["to_task_number"])
-                if kind == LinkKind.BLOCKS.value:
-                    rels["blocks"].append(target)
-                elif kind == LinkKind.RELATES_TO.value:
-                    rels["relates_to"].append(target)
-                elif kind == LinkKind.PARENT.value:
-                    rels["children"].append(target)
-                elif kind == LinkKind.SUPERSEDES.value:
-                    # outgoing supersedes: this task supersedes target
-                    pass  # stored in supersedes_project/supersedes_task_number columns
-            if is_incoming:
-                source = (r["from_project"], r["from_task_number"])
-                if kind == LinkKind.BLOCKS.value:
-                    rels["blocked_by"].append(source)
-                elif kind == LinkKind.RELATES_TO.value:
-                    # relates_to is bidirectional
-                    if source not in rels["relates_to"]:
-                        rels["relates_to"].append(source)
-                elif kind == LinkKind.PARENT.value:
-                    # incoming parent: source is parent of this task
-                    # update parent fields (override column-based values)
-                    pass  # parent is set via from_id=parent, to_id=child
-                elif kind == LinkKind.SUPERSEDES.value:
-                    # incoming supersedes: source supersedes this task
-                    rels["superseded_by_project"] = r["from_project"]
-                    rels["superseded_by_task_number"] = r["from_task_number"]
+            target = (r["to_project"], r["to_task_number"])
+            if kind == LinkKind.BLOCKS.value:
+                rels["blocks"].append(target)
+            elif kind == LinkKind.RELATES_TO.value:
+                rels["relates_to"].append(target)
+            elif kind == LinkKind.PARENT.value:
+                rels["children"].append(target)
+            elif kind == LinkKind.SUPERSEDES.value:
+                # outgoing supersedes: this task supersedes target
+                pass  # stored in supersedes_project/supersedes_task_number columns
+
+        for r in in_rows:
+            kind = r["kind"]
+            source = (r["from_project"], r["from_task_number"])
+            if kind == LinkKind.BLOCKS.value:
+                rels["blocked_by"].append(source)
+            elif kind == LinkKind.RELATES_TO.value:
+                # relates_to is bidirectional
+                if source not in rels["relates_to"]:
+                    rels["relates_to"].append(source)
+            elif kind == LinkKind.PARENT.value:
+                # incoming parent: source is parent of this task
+                # update parent fields (override column-based values)
+                pass  # parent is set via from_id=parent, to_id=child
+            elif kind == LinkKind.SUPERSEDES.value:
+                # incoming supersedes: source supersedes this task
+                rels["superseded_by_project"] = r["from_project"]
+                rels["superseded_by_task_number"] = r["from_task_number"]
 
         return rels
 
@@ -762,25 +732,6 @@ class SQLiteWorkService:
     # Owner derivation
     # ------------------------------------------------------------------
 
-    def _resolve_node_assignee(
-        self, task: Task, node: FlowNode | None
-    ) -> str | None:
-        """Return the effective owner for ``node`` using ``task`` roles."""
-        if node is None:
-            return task.assignee
-
-        if node.actor_type == ActorType.ROLE:
-            return task.roles.get(node.actor_role or "", task.assignee)
-        if node.actor_type == ActorType.HUMAN:
-            return "human"
-        if node.actor_type == ActorType.PROJECT_MANAGER:
-            return "project_manager"
-        if node.actor_type == ActorType.AGENT:
-            # Fall back to the prior assignee only for legacy rows that
-            # predate stricter flow validation.
-            return node.agent_name or task.assignee
-        return task.assignee
-
     def derive_owner(self, task: Task) -> str | None:
         """Derive the current owner from the flow node's actor configuration."""
         if task.current_node_id is None:
@@ -800,7 +751,30 @@ class SQLiteWorkService:
         if node is None:
             return task.assignee
 
-        return self._resolve_node_assignee(task, node)
+        if node.actor_type == ActorType.ROLE:
+            return task.roles.get(node.actor_role or "", task.assignee)
+        elif node.actor_type == ActorType.HUMAN:
+            return "human"
+        elif node.actor_type == ActorType.PROJECT_MANAGER:
+            return "project_manager"
+        elif node.actor_type == ActorType.AGENT:
+            # Return the specific named agent from the flow YAML. Fall back
+            # to the assignee only if no agent_name was configured (which
+            # validate_flow now rejects, but guard anyway for legacy DBs).
+            return node.agent_name or task.assignee
+        return task.assignee
+
+    def _resolve_node_assignee(self, task: Task, node: FlowNode) -> str | None:
+        """Resolve the assignee to store when transitioning into ``node``."""
+        if node.actor_type == ActorType.ROLE:
+            return task.roles.get(node.actor_role or "", task.assignee)
+        if node.actor_type == ActorType.HUMAN:
+            return "human"
+        if node.actor_type == ActorType.PROJECT_MANAGER:
+            return "project_manager"
+        if node.actor_type == ActorType.AGENT:
+            return node.agent_name or task.assignee
+        return task.assignee
 
     # ------------------------------------------------------------------
     # Task CRUD
@@ -900,283 +874,23 @@ class SQLiteWorkService:
 
     def queue(self, task_id: str, actor: str, skip_gates: bool = False) -> Task:
         """Move from draft to queued."""
-        task = self.get(task_id)
-
-        if task.work_status != WorkStatus.DRAFT:
-            raise InvalidTransitionError(
-                f"Cannot queue task in '{task.work_status.value}' state. "
-                f"Task must be in 'draft' state."
-            )
-
-        if task.requires_human_review and not skip_gates:
-            # Full inbox-backed approval is a follow-up; for now, callers
-            # with an out-of-band approval signal must opt in explicitly
-            # via skip_gates=True so the feature is at least usable.
-            raise InvalidTransitionError(
-                "Task requires human review before queueing. "
-                "Pass skip_gates=True to bypass this check once approval "
-                "has been obtained out-of-band (inbox integration pending)."
-            )
-
-        # Gate: has_description
-        gate_results = evaluate_gates(
-            task, ["has_description"], self._gate_registry,
-            **self._gate_kwargs(),
-        )
-        if not skip_gates and has_hard_failure(gate_results):
-            failing = [r for r in gate_results if not r.passed]
-            raise ValidationError(
-                f"Cannot queue task: gate failed — {failing[0].reason}"
-            )
-
-        now = _now()
-        gate_reason = self._gate_skip_reason(gate_results) if skip_gates else None
-        self._record_transition(
-            task.project,
-            task.task_number,
-            WorkStatus.DRAFT.value,
-            WorkStatus.QUEUED.value,
-            actor,
-            reason=gate_reason,
-        )
-        self._conn.execute(
-            "UPDATE work_tasks SET work_status = ?, updated_at = ? "
-            "WHERE project = ? AND task_number = ?",
-            (WorkStatus.QUEUED.value, now, task.project, task.task_number),
-        )
-        self._conn.commit()
-        # Auto-block if there are unresolved blockers
-        self._maybe_block(task_id)
-        task = self.get(task_id)
-        self._sync_transition(task, WorkStatus.DRAFT.value, task.work_status.value)
-        return task
+        return self._transition_mgr.queue(task_id, actor, skip_gates=skip_gates)
 
     def claim(self, task_id: str, actor: str, skip_gates: bool = False) -> Task:
         """Atomically claim a queued task."""
-        task = self.get(task_id)
-
-        if task.work_status != WorkStatus.QUEUED:
-            # Already-claimed is a distinct, common case — surface the
-            # current claimant and how to proceed.
-            if task.work_status == WorkStatus.IN_PROGRESS:
-                claimant = task.assignee or "another actor"
-                raise InvalidTransitionError(
-                    f"Task {task_id} is already claimed by '{claimant}'.\n"
-                    f"\n"
-                    f"Why: the task is in 'in_progress' and assigned. A "
-                    f"second claim would orphan the first worker's "
-                    f"session.\n"
-                    f"\n"
-                    f"Fix: use `pm task get {task_id}` to see the current "
-                    f"state. If the existing claim is stale (worker "
-                    f"session dead), hold and resume:\n"
-                    f"    pm task hold {task_id} --reason 'stale claim'\n"
-                    f"    pm task resume {task_id}\n"
-                    f"Otherwise, find an unclaimed task with `pm task next`."
-                )
-            raise InvalidTransitionError(
-                f"Cannot claim task in '{task.work_status.value}' state.\n"
-                f"\n"
-                f"Why: only tasks in 'queued' state can be claimed.\n"
-                f"\n"
-                f"Fix: if the task is 'draft', run "
-                f"`pm task queue {task_id}` first. If it's 'done' or "
-                f"'cancelled', find another task with `pm task next`."
-            )
-
-        # blocked check (for now always False)
-        if task.blocked:
-            raise InvalidTransitionError(
-                f"Cannot claim task {task_id}: it is blocked by another "
-                f"task.\n"
-                f"\n"
-                f"Why: blocking tasks must reach a terminal state before "
-                f"dependents can start.\n"
-                f"\n"
-                f"Fix: run `pm task get {task_id}` to see the blockers, "
-                f"then work on those first (or unblock with "
-                f"`pm task unlink`)."
-            )
-
-        flow = self._load_flow_from_db(
-            task.flow_template_id, task.flow_template_version,
-        )
-        start_node = flow.start_node
-        start_node_cfg = flow.nodes.get(start_node)
-        assignee = self._resolve_node_assignee(task, start_node_cfg) or actor
-        now = _now()
-
-        try:
-            # Atomic: update status, assignee, current_node, and create execution
-            self._conn.execute(
-                "UPDATE work_tasks SET work_status = ?, assignee = ?, "
-                "current_node_id = ?, updated_at = ? "
-                "WHERE project = ? AND task_number = ?",
-                (
-                    WorkStatus.IN_PROGRESS.value,
-                    assignee,
-                    start_node,
-                    now,
-                    task.project,
-                    task.task_number,
-                ),
-            )
-            self._conn.execute(
-                "INSERT INTO work_node_executions "
-                "(task_project, task_number, node_id, visit, status, started_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    task.project,
-                    task.task_number,
-                    start_node,
-                    1,
-                    ExecutionStatus.ACTIVE.value,
-                    now,
-                ),
-            )
-            self._record_transition(
-                task.project,
-                task.task_number,
-                WorkStatus.QUEUED.value,
-                WorkStatus.IN_PROGRESS.value,
-                actor,
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-
-        result = self.get(task_id)
-        self._sync_transition(result, WorkStatus.QUEUED.value, result.work_status.value)
-        # Reset any stale provision-error breadcrumb before attempting
-        # provisioning for this claim.
-        self.last_provision_error = None
-        # Provision a per-task worker session with worktree
-        if self._session_mgr is not None:
-            try:
-                self._session_mgr.provision_worker(task_id, actor)
-            except Exception as exc:  # noqa: BLE001
-                # Best-effort — task is claimed regardless. Record the
-                # reason on the service so ``pm task claim`` can surface
-                # it (instead of a silent success, which was the #243
-                # E2E blocker).
-                self.last_provision_error = str(exc)
-                logger.warning(
-                    "provision_worker failed for %s (actor=%s): %s",
-                    task_id, actor, exc,
-                )
-        return result
+        return self._transition_mgr.claim(task_id, actor, skip_gates=skip_gates)
 
     def cancel(self, task_id: str, actor: str, reason: str) -> Task:
         """Move any non-terminal task to cancelled."""
-        task = self.get(task_id)
-
-        if task.work_status in TERMINAL_STATUSES:
-            raise InvalidTransitionError(
-                f"Cannot cancel task in terminal state '{task.work_status.value}'."
-            )
-
-        now = _now()
-        self._record_transition(
-            task.project,
-            task.task_number,
-            task.work_status.value,
-            WorkStatus.CANCELLED.value,
-            actor,
-            reason,
-        )
-        self._conn.execute(
-            "UPDATE work_tasks SET work_status = ?, updated_at = ? "
-            "WHERE project = ? AND task_number = ?",
-            (WorkStatus.CANCELLED.value, now, task.project, task.task_number),
-        )
-        self._conn.commit()
-        self._on_cancelled(task_id)
-        # Tear down the per-task worker session
-        if self._session_mgr is not None:
-            try:
-                self._session_mgr.teardown_worker(task_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "teardown_worker on cancel failed for %s: %s",
-                    task_id, exc,
-                )
-        result = self.get(task_id)
-        self._sync_transition(result, task.work_status.value, WorkStatus.CANCELLED.value)
-        self._prune_cancelled_critique_child(result)
-        return result
+        return self._transition_mgr.cancel(task_id, actor, reason)
 
     def hold(self, task_id: str, actor: str, reason: str | None = None) -> Task:
         """Move in_progress or queued to on_hold."""
-        task = self.get(task_id)
-
-        if task.work_status not in (WorkStatus.IN_PROGRESS, WorkStatus.QUEUED):
-            raise InvalidTransitionError(
-                f"Cannot hold task in '{task.work_status.value}' state. "
-                f"Task must be in 'in_progress' or 'queued' state."
-            )
-
-        now = _now()
-        self._record_transition(
-            task.project,
-            task.task_number,
-            task.work_status.value,
-            WorkStatus.ON_HOLD.value,
-            actor,
-            reason,
-        )
-        self._conn.execute(
-            "UPDATE work_tasks SET work_status = ?, updated_at = ? "
-            "WHERE project = ? AND task_number = ?",
-            (WorkStatus.ON_HOLD.value, now, task.project, task.task_number),
-        )
-        self._conn.commit()
-        result = self.get(task_id)
-        self._sync_transition(result, task.work_status.value, WorkStatus.ON_HOLD.value)
-        return result
+        return self._transition_mgr.hold(task_id, actor, reason)
 
     def resume(self, task_id: str, actor: str) -> Task:
         """Move on_hold back to queued (or in_progress if a flow node is active)."""
-        task = self.get(task_id)
-
-        if task.work_status != WorkStatus.ON_HOLD:
-            raise InvalidTransitionError(
-                f"Cannot resume task in '{task.work_status.value}' state. "
-                f"Task must be in 'on_hold' state."
-            )
-
-        # If there's an active flow execution, resume to in_progress
-        # (the task was held mid-work). Otherwise resume to queued.
-        has_active_execution = False
-        if task.current_node_id:
-            row = self._conn.execute(
-                "SELECT 1 FROM work_node_executions "
-                "WHERE task_project = ? AND task_number = ? "
-                "AND node_id = ? AND status = ?",
-                (task.project, task.task_number, task.current_node_id,
-                 ExecutionStatus.ACTIVE.value),
-            ).fetchone()
-            has_active_execution = row is not None
-
-        target_status = WorkStatus.IN_PROGRESS if has_active_execution else WorkStatus.QUEUED
-
-        now = _now()
-        self._record_transition(
-            task.project,
-            task.task_number,
-            WorkStatus.ON_HOLD.value,
-            target_status.value,
-            actor,
-        )
-        self._conn.execute(
-            "UPDATE work_tasks SET work_status = ?, updated_at = ? "
-            "WHERE project = ? AND task_number = ?",
-            (target_status.value, now, task.project, task.task_number),
-        )
-        self._conn.commit()
-        result = self.get(task_id)
-        self._sync_transition(result, WorkStatus.ON_HOLD.value, target_status.value)
-        return result
+        return self._transition_mgr.resume(task_id, actor)
 
     # ------------------------------------------------------------------
     # Flow progression
@@ -1448,106 +1162,12 @@ class SQLiteWorkService:
         skip_gates: bool = False,
     ) -> Task:
         """Signal that the current work node is complete."""
-        task = self.get(task_id)
-
-        if task.work_status != WorkStatus.IN_PROGRESS:
-            raise InvalidTransitionError(
-                f"Cannot complete node on task in "
-                f"'{task.work_status.value}' state. "
-                f"Task must be in 'in_progress' state."
-            )
-
-        flow, node = self._get_current_flow_node(task)
-
-        if node.type != NodeType.WORK:
-            raise InvalidTransitionError(
-                f"Current node '{task.current_node_id}' is not a work node "
-                f"(type: {node.type.value})."
-            )
-
-        self._validate_actor_role(task, node, actor)
-
-        # Evaluate gates on the current node
-        if node.gates:
-            gate_results = evaluate_gates(
-                task, node.gates, self._gate_registry,
-                **self._gate_kwargs(),
-            )
-            if not skip_gates and has_hard_failure(gate_results):
-                failing = [r for r in gate_results if not r.passed and r.gate_type == "hard"]
-                reasons = "; ".join(r.reason for r in failing)
-                raise ValidationError(
-                    f"Gate check failed on node '{node.name}': {reasons}"
-                )
-
-        # Coerce and validate work output
-        work_output = self._coerce_work_output(work_output)
-        if work_output is None:
-            raise ValidationError(
-                "pm task done requires a --output payload describing "
-                "what you built.\n"
-                "\n"
-                "Why: the reviewer cannot evaluate the handoff without "
-                "a summary and at least one artifact.\n"
-                "\n"
-                "Fix: pass --output with a JSON object, e.g.:\n"
-                "    pm task done <id> --output '{\n"
-                "      \"type\": \"code_change\",\n"
-                "      \"summary\": \"<what you built>\",\n"
-                "      \"artifacts\": [{\"kind\": \"commit\", \"description\": "
-                "\"impl\", \"ref\": \"HEAD\"}]\n"
-                "    }'"
-            )
-        self._validate_work_output(work_output)
-
-        now = _now()
-        wo_json = self._serialize_work_output(work_output)
-
-        try:
-            # Complete current execution
-            self._conn.execute(
-                "UPDATE work_node_executions SET status = ?, "
-                "work_output = ?, completed_at = ? "
-                "WHERE task_project = ? AND task_number = ? "
-                "AND node_id = ? AND status = ?",
-                (
-                    ExecutionStatus.COMPLETED.value,
-                    wo_json,
-                    now,
-                    task.project,
-                    task.task_number,
-                    task.current_node_id,
-                    ExecutionStatus.ACTIVE.value,
-                ),
-            )
-
-            # Advance to next node
-            self._advance_to_node(
-                task,
-                flow,
-                node.next_node_id,
-                actor,
-                WorkStatus.IN_PROGRESS,
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-
-        result = self.get(task_id)
-        if result.work_status == WorkStatus.DONE:
-            self._check_auto_unblock(task_id)
-            if self._session_mgr is not None:
-                try:
-                    self._session_mgr.teardown_worker(task_id)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "teardown_worker on done failed for %s: %s",
-                        task_id, exc,
-                    )
-            self._on_task_done(task_id, actor)
-        self._sync_transition(result, task.work_status.value, result.work_status.value)
-        return result
+        return self._transition_mgr.node_done(
+            task_id,
+            actor,
+            work_output=work_output,
+            skip_gates=skip_gates,
+        )
 
     def approve(
         self,
@@ -1557,150 +1177,12 @@ class SQLiteWorkService:
         skip_gates: bool = False,
     ) -> Task:
         """Approve at a review node."""
-        task = self.get(task_id)
-
-        if task.work_status != WorkStatus.REVIEW:
-            current = task.work_status.value
-            # Tailor the fix hint to the specific state so workers who
-            # accidentally try to approve their own draft get routed to
-            # the right command.
-            if current == "draft":
-                hint = (
-                    f"Fix: drafts move through the queue, not straight "
-                    f"to review. Run `pm task queue {task_id}` to queue "
-                    f"it, then have a worker claim + build it."
-                )
-            elif current == "in_progress":
-                hint = (
-                    f"Fix: the worker hasn't handed this off yet. Wait "
-                    f"for `pm task done {task_id}` to run (which moves "
-                    f"the task to 'review'), or check in with the "
-                    f"claimant '{task.assignee or 'unknown'}'."
-                )
-            elif current == "queued":
-                hint = (
-                    f"Fix: this task is waiting for a worker. Approval "
-                    f"comes after a worker marks it done. Claim + build "
-                    f"first, or wait for a worker to pick it up."
-                )
-            else:
-                hint = (
-                    f"Fix: only tasks in 'review' can be approved. Run "
-                    f"`pm task get {task_id}` to inspect the current "
-                    f"state, or find a reviewable task with "
-                    f"`pm task list --status review`."
-                )
-            raise InvalidTransitionError(
-                f"Cannot approve task in '{current}' state.\n"
-                f"\n"
-                f"Why: only tasks whose current node is a review node "
-                f"(work_status = 'review') can be approved. Approving a "
-                f"non-review task would bypass the worker-build step.\n"
-                f"\n"
-                f"{hint}"
-            )
-
-        flow, node = self._get_current_flow_node(task)
-
-        if node.type != NodeType.REVIEW:
-            raise InvalidTransitionError(
-                f"Current node '{task.current_node_id}' is not a review "
-                f"node (type: {node.type.value})."
-            )
-
-        self._validate_actor_role(task, node, actor)
-
-        # Evaluate gates on the current node
-        if node.gates:
-            gate_results = evaluate_gates(
-                task, node.gates, self._gate_registry,
-                **self._gate_kwargs(),
-            )
-            if not skip_gates and has_hard_failure(gate_results):
-                failing = [r for r in gate_results if not r.passed and r.gate_type == "hard"]
-                reasons = "; ".join(r.reason for r in failing)
-                raise ValidationError(
-                    f"Gate check failed on node '{node.name}': {reasons}"
-                )
-
-        if task.current_node_id == "code_review" and node.next_node_id == "done":
-            self._auto_merge_approved_task_branch(task)
-
-        now = _now()
-
-        try:
-            # Complete current execution with approval
-            self._conn.execute(
-                "UPDATE work_node_executions SET status = ?, "
-                "decision = ?, decision_reason = ?, completed_at = ? "
-                "WHERE task_project = ? AND task_number = ? "
-                "AND node_id = ? AND status = ?",
-                (
-                    ExecutionStatus.COMPLETED.value,
-                    Decision.APPROVED.value,
-                    reason,
-                    now,
-                    task.project,
-                    task.task_number,
-                    task.current_node_id,
-                    ExecutionStatus.ACTIVE.value,
-                ),
-            )
-
-            # Plan-presence gate (#281): when the architect's user_approval
-            # node on a plan_project task is approved, stamp a dedicated
-            # ``plan_approved'' context entry. The gate in
-            # ``plan_presence.has_acceptable_plan`` reads this timestamp
-            # instead of relying on ``plan.md``'s mtime — file mtimes are
-            # perturbed by git checkouts, editor saves, and the planner's
-            # own stage-8 emit, so they make the gate unstable.
-            if (
-                task.flow_template_id == "plan_project"
-                and task.current_node_id == "user_approval"
-            ):
-                self._conn.execute(
-                    "INSERT INTO work_context_entries "
-                    "(task_project, task_number, actor, text, "
-                    "created_at, entry_type) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        task.project,
-                        task.task_number,
-                        actor,
-                        "plan approved",
-                        now,
-                        "plan_approved",
-                    ),
-                )
-
-            # Advance to next node
-            self._advance_to_node(
-                task,
-                flow,
-                node.next_node_id,
-                actor,
-                WorkStatus.REVIEW,
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-
-        result = self.get(task_id)
-        if result.work_status == WorkStatus.DONE:
-            self._check_auto_unblock(task_id)
-            # Tear down the per-task worker session
-            if self._session_mgr is not None:
-                try:
-                    self._session_mgr.teardown_worker(task_id)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "teardown_worker on approve failed for %s: %s",
-                        task_id, exc,
-                    )
-            self._on_task_done(task_id, actor)
-        self._sync_transition(result, task.work_status.value, result.work_status.value)
-        return result
+        return self._transition_mgr.approve(
+            task_id,
+            actor,
+            reason=reason,
+            skip_gates=skip_gates,
+        )
 
     def reject(
         self,
@@ -1709,220 +1191,11 @@ class SQLiteWorkService:
         reason: str,
     ) -> Task:
         """Reject at a review node."""
-        task = self.get(task_id)
-
-        if task.work_status != WorkStatus.REVIEW:
-            raise InvalidTransitionError(
-                f"Cannot reject task in '{task.work_status.value}' state. "
-                f"Task must be in 'review' state."
-            )
-
-        flow, node = self._get_current_flow_node(task)
-
-        if node.type != NodeType.REVIEW:
-            raise InvalidTransitionError(
-                f"Current node '{task.current_node_id}' is not a review "
-                f"node."
-            )
-
-        self._validate_actor_role(task, node, actor)
-
-        if not reason or not reason.strip():
-            raise ValidationError("Reason is required for rejection.")
-
-        if node.reject_node_id is None:
-            raise InvalidTransitionError(
-                f"Review node '{task.current_node_id}' has no reject_node "
-                f"defined."
-            )
-
-        reject_target = flow.nodes.get(node.reject_node_id)
-        if reject_target is None:
-            raise InvalidTransitionError(
-                f"Reject node '{node.reject_node_id}' not found in flow."
-            )
-
-        now = _now()
-
-        try:
-            # Complete current execution with rejection
-            self._conn.execute(
-                "UPDATE work_node_executions SET status = ?, "
-                "decision = ?, decision_reason = ?, completed_at = ? "
-                "WHERE task_project = ? AND task_number = ? "
-                "AND node_id = ? AND status = ?",
-                (
-                    ExecutionStatus.COMPLETED.value,
-                    Decision.REJECTED.value,
-                    reason,
-                    now,
-                    task.project,
-                    task.task_number,
-                    task.current_node_id,
-                    ExecutionStatus.ACTIVE.value,
-                ),
-            )
-
-            # Determine visit number for the reject target
-            max_visit_row = self._conn.execute(
-                "SELECT COALESCE(MAX(visit), 0) AS max_v "
-                "FROM work_node_executions "
-                "WHERE task_project = ? AND task_number = ? "
-                "AND node_id = ?",
-                (task.project, task.task_number, node.reject_node_id),
-            ).fetchone()
-            next_visit = max_visit_row["max_v"] + 1
-
-            # Set status back to in_progress at the reject target
-            reject_assignee = self._resolve_node_assignee(task, reject_target)
-            self._conn.execute(
-                "UPDATE work_tasks SET work_status = ?, assignee = ?, "
-                "current_node_id = ?, updated_at = ? "
-                "WHERE project = ? AND task_number = ?",
-                (
-                    WorkStatus.IN_PROGRESS.value,
-                    reject_assignee,
-                    node.reject_node_id,
-                    now,
-                    task.project,
-                    task.task_number,
-                ),
-            )
-
-            # Create new execution at the reject target
-            self._conn.execute(
-                "INSERT INTO work_node_executions "
-                "(task_project, task_number, node_id, visit, status, "
-                "started_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    task.project,
-                    task.task_number,
-                    node.reject_node_id,
-                    next_visit,
-                    ExecutionStatus.ACTIVE.value,
-                    now,
-                ),
-            )
-
-            self._record_transition(
-                task.project,
-                task.task_number,
-                WorkStatus.REVIEW.value,
-                WorkStatus.IN_PROGRESS.value,
-                actor,
-                reason,
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-
-        result = self.get(task_id)
-        self._sync_transition(result, WorkStatus.REVIEW.value, WorkStatus.IN_PROGRESS.value)
-        try:
-            emit_rejection_feedback(self, task=result, reviewer=actor, reason=reason)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "emit_rejection_feedback failed for %s: %s", task_id, exc,
-            )
-        # Notify the per-task worker session about the rejection
-        if self._session_mgr is not None:
-            try:
-                self._session_mgr.notify_rejection(task_id, reason)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "notify_rejection failed for %s: %s", task_id, exc,
-                )
-        return result
+        return self._transition_mgr.reject(task_id, actor, reason)
 
     def block(self, task_id: str, actor: str, blocker_task_id: str) -> Task:
         """Mark a task as blocked by another task."""
-        task = self.get(task_id)
-
-        if task.work_status not in (
-            WorkStatus.IN_PROGRESS,
-            WorkStatus.REVIEW,
-        ):
-            raise InvalidTransitionError(
-                f"Cannot block task in '{task.work_status.value}' state. "
-                f"Task must be in 'in_progress' or 'review' state."
-            )
-
-        # Validate the blocker exists
-        self.get(blocker_task_id)
-
-        # Parse the blocker id for the dependency INSERT below.
-        blocker_project, blocker_number = _parse_task_id(blocker_task_id)
-
-        # Cycle-check: would this blocks edge create a cycle?
-        if self._would_create_cycle(
-            blocker_project, blocker_number, task.project, task.task_number,
-        ):
-            raise ValidationError("circular dependency detected")
-
-        now = _now()
-        old_status = task.work_status
-
-        try:
-            # Persist the blocks dependency row so auto-unblock /
-            # blocked_tasks() / dependents() can find it. Use INSERT OR
-            # IGNORE so a pre-existing link is a no-op.
-            self._conn.execute(
-                "INSERT OR IGNORE INTO work_task_dependencies "
-                "(from_project, from_task_number, to_project, to_task_number, "
-                "kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    blocker_project,
-                    blocker_number,
-                    task.project,
-                    task.task_number,
-                    LinkKind.BLOCKS.value,
-                    now,
-                ),
-            )
-
-            self._conn.execute(
-                "UPDATE work_tasks SET work_status = ?, updated_at = ? "
-                "WHERE project = ? AND task_number = ?",
-                (
-                    WorkStatus.BLOCKED.value,
-                    now,
-                    task.project,
-                    task.task_number,
-                ),
-            )
-
-            # Set current execution to blocked
-            if task.current_node_id:
-                self._conn.execute(
-                    "UPDATE work_node_executions SET status = ? "
-                    "WHERE task_project = ? AND task_number = ? "
-                    "AND node_id = ? AND status = ?",
-                    (
-                        ExecutionStatus.BLOCKED.value,
-                        task.project,
-                        task.task_number,
-                        task.current_node_id,
-                        ExecutionStatus.ACTIVE.value,
-                    ),
-                )
-
-            self._record_transition(
-                task.project,
-                task.task_number,
-                old_status.value,
-                WorkStatus.BLOCKED.value,
-                actor,
-                f"Blocked by {blocker_task_id}",
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-
-        result = self.get(task_id)
-        self._sync_transition(result, old_status.value, WorkStatus.BLOCKED.value)
-        return result
+        return self._transition_mgr.block(task_id, actor, blocker_task_id)
 
     def get_execution(
         self,
@@ -2102,6 +1375,10 @@ class SQLiteWorkService:
         """After a task moves to done, auto-unblock any tasks it was blocking."""
         check_auto_unblock(self, task_id)
 
+    def _on_cancelled(self, task_id: str) -> None:
+        """After a task is cancelled, add context entries on blocked dependents."""
+        on_cancelled(self, task_id)
+
     def _has_incoming_parent_link(self, task: Task) -> bool:
         """Return True when ``task`` is linked as a child of another task."""
         row = self._conn.execute(
@@ -2181,10 +1458,6 @@ class SQLiteWorkService:
             self._conn.rollback()
             raise
 
-    def _on_cancelled(self, task_id: str) -> None:
-        """After a task is cancelled, add context entries on blocked dependents."""
-        on_cancelled(self, task_id)
-
     def _on_task_done(self, task_id: str, actor: str) -> None:
         """Post-commit hook — fire milestone/digest flush on done transitions.
 
@@ -2215,7 +1488,7 @@ class SQLiteWorkService:
         This is a helper for completing tasks. Full flow-based completion
         (approve/node_done) will call ``_check_auto_unblock`` as well.
         """
-        return mark_task_done(self, task_id, actor)
+        return self._transition_mgr.mark_done(task_id, actor)
 
     # ------------------------------------------------------------------
     # Context log
@@ -2559,11 +1832,7 @@ class SQLiteWorkService:
         return self._project_path
 
     def _auto_merge_approved_task_branch(self, task: Task) -> None:
-        """Merge an approved task branch into the repo's current branch.
-
-        Runs before the task flips to ``done`` so merge failures leave the task
-        parked at review and preserve the worker worktree for intervention.
-        """
+        """Merge an approved task branch into the repo's current branch."""
         project_path = self._resolve_project_path(task.project)
         if project_path is None or not (project_path / ".git").exists():
             return
@@ -2617,7 +1886,6 @@ class SQLiteWorkService:
         if merge.returncode == 0:
             return
 
-        # Best-effort cleanup so retrying approve starts from a clean repo.
         self._git_run(project_path, "merge", "--abort")
         detail = (
             merge.stderr.strip()
@@ -2646,7 +1914,7 @@ class SQLiteWorkService:
     ) -> str:
         result = self._git_run(project_path, *args)
         if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "git command failed"
+            detail = result.stderr.strip() or result.stdout.strip() or "command failed"
             raise ValidationError(f"{error_prefix} {detail}")
         return result.stdout.strip()
 

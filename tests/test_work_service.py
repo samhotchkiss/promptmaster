@@ -548,6 +548,16 @@ class TestTransitions:
         assert final.transitions[-1].reason == "done"
 
 
+class TestBlock:
+    def test_block_rejects_malformed_blocker_id(self, svc):
+        task = _create_standard_task(svc, description="Blocking target")
+        svc.queue(task.task_id, "pm")
+        svc.claim(task.task_id, "agent-1")
+
+        with pytest.raises(ValidationError, match="project/number"):
+            svc.block(task.task_id, "pm", "bad-blocker-id")
+
+
 # ---------------------------------------------------------------------------
 # Owner derivation
 # ---------------------------------------------------------------------------
@@ -782,70 +792,6 @@ class TestFlowImmutability:
         svc = SQLiteWorkService(db_path=db, project_path=tmp_path)
         t2 = self._make_task(svc)
         assert svc.get(t2.task_id).flow_template_version == 1
-
-    def test_load_flow_from_db_uses_cached_template_on_repeat_load(self, tmp_path, monkeypatch):
-        self._write_custom_standard(tmp_path, description="cached-body")
-        db = tmp_path / "work.db"
-        svc = SQLiteWorkService(db_path=db, project_path=tmp_path)
-
-        task = self._make_task(svc)
-        flow = svc._load_flow_from_db(
-            task.flow_template_id,
-            task.flow_template_version,
-        )
-
-        class GuardConn:
-            def __init__(self, conn):
-                self._conn = conn
-
-            def execute(self, sql, params=()):
-                if "work_flow_templates" in sql or "work_flow_nodes" in sql:
-                    raise AssertionError("flow template DB lookup should be served from cache")
-                return self._conn.execute(sql, params)
-
-            def __getattr__(self, name):
-                return getattr(self._conn, name)
-
-        monkeypatch.setattr(svc, "_conn", GuardConn(svc._conn))
-
-        cached = svc._load_flow_from_db(
-            task.flow_template_id,
-            task.flow_template_version,
-        )
-
-        assert cached is flow
-
-
-def test_load_relationships_uses_one_dependency_query(svc, monkeypatch):
-    blocker = _create_standard_task(svc, title="Blocker")
-    target = _create_standard_task(svc, title="Target")
-    related = _create_standard_task(svc, title="Related")
-
-    svc.link(blocker.task_id, target.task_id, "blocks")
-    svc.link(target.task_id, related.task_id, "relates_to")
-
-    dependency_queries = 0
-
-    class GuardConn:
-        def __init__(self, conn):
-            self._conn = conn
-
-        def execute(self, sql, params=()):
-            nonlocal dependency_queries
-            if "FROM work_task_dependencies" in sql:
-                dependency_queries += 1
-            return self._conn.execute(sql, params)
-
-        def __getattr__(self, name):
-            return getattr(self._conn, name)
-
-    monkeypatch.setattr(svc, "_conn", GuardConn(svc._conn))
-
-    rels = svc._load_relationships(target.project, target.task_number)
-
-    assert dependency_queries == 1
-    assert rels["blocked_by"] == [(blocker.project, blocker.task_number)]
-    assert rels["relates_to"] == [(related.project, related.task_number)]
 
 
 # ---------------------------------------------------------------------------
