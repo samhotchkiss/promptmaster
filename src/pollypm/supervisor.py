@@ -81,6 +81,7 @@ from pollypm.providers.claude.resume import session_ids as _claude_session_ids
 from pollypm.schedulers import ScheduledJob, get_scheduler_backend
 from pollypm.store.registry import get_store
 from pollypm.transcript_ledger import sync_token_ledger_for_config
+from pollypm import supervisor_alerts as _supervisor_alerts
 from pollypm.supervision import ControllerProbeService, ControlHomeManager, ProbeRunner
 from pollypm.storage.state import AlertRecord, LeaseRecord, StateStore
 from pollypm.tmux.client import TmuxWindow
@@ -126,41 +127,7 @@ def _prefix_for_owner(owner: str, text: str) -> str:
 # ``Supervisor._build_review_nudge``). Unchanged projects skip SQLite entirely
 # — mirrors ``_DASHBOARD_PROJECT_CACHE`` in cockpit.py and keeps the heartbeat
 # tick from scaling linearly with project count (see #174).
-_REVIEW_NUDGE_CACHE: dict[str, tuple[float, list[str]]] = {}
-
-
-def _review_tasks_for_project(project_key: str, db_path: Path) -> list[str]:
-    """Return nudge lines for a project's review-queue tasks.
-
-    Opens SQLite only when ``state.db`` mtime differs from the cached entry;
-    otherwise returns the cached lines. Mirrors ``_dashboard_project_tasks``.
-    """
-    try:
-        db_mtime = db_path.stat().st_mtime
-    except OSError:
-        _REVIEW_NUDGE_CACHE.pop(project_key, None)
-        return []
-    cached = _REVIEW_NUDGE_CACHE.get(project_key)
-    if cached is not None and cached[0] == db_mtime:
-        return cached[1]
-
-    from pollypm.work.sqlite_service import SQLiteWorkService
-
-    entries: list[str] = []
-    try:
-        with SQLiteWorkService(db_path=db_path) as svc:
-            tasks = svc.list_tasks(work_status="review", project=project_key)
-            for task in tasks:
-                # Skip human-review tasks — those need user approval.
-                if task.current_node_id and "human" in task.current_node_id:
-                    continue
-                entries.append(f"  - {task.task_id}: {task.title}")
-    except Exception:  # noqa: BLE001
-        # Don't poison the cache on transient errors; just return empty.
-        return []
-
-    _REVIEW_NUDGE_CACHE[project_key] = (db_mtime, entries)
-    return entries
+_REVIEW_NUDGE_CACHE = _supervisor_alerts._REVIEW_NUDGE_CACHE
 
 
 class Supervisor:
@@ -1396,240 +1363,28 @@ class Supervisor:
         current_log_bytes: int,
         current_snapshot_hash: str,
     ) -> list[str]:
-        session_name = launch.session.name
-        shell_commands = {"bash", "zsh", "sh", "fish"}
-        active_alerts: list[str] = []
-
-        if window.pane_dead:
-            self._msg_store.upsert_alert(
-                session_name,
-                "pane_dead",
-                "error",
-                f"Pane {window.pane_id} in window {window.name} has exited",
-            )
-            active_alerts.append("pane_dead")
-        else:
-            self._msg_store.clear_alert(session_name, "pane_dead")
-
-        if window.pane_current_command in shell_commands:
-            self._msg_store.upsert_alert(
-                session_name,
-                "shell_returned",
-                "warn",
-                f"Window {window.name} appears to be back at the shell prompt ({window.pane_current_command})",
-            )
-            active_alerts.append("shell_returned")
-        else:
-            self._msg_store.clear_alert(session_name, "shell_returned")
-
-        if previous_log_bytes is not None and current_log_bytes <= previous_log_bytes:
-            self._msg_store.upsert_alert(
-                session_name,
-                "idle_output",
-                "warn",
-                f"No new pane output since the previous heartbeat for window {window.name}",
-            )
-            active_alerts.append("idle_output")
-        else:
-            self._msg_store.clear_alert(session_name, "idle_output")
-
-        if previous_snapshot_hash and previous_snapshot_hash == current_snapshot_hash:
-            history = self.store.recent_heartbeats(session_name, limit=3)
-            recent_hashes = [item.snapshot_hash for item in history[:3]]
-            if len(recent_hashes) == 3 and len(set(recent_hashes)) == 1:
-                # Skip the ``suspected_loop`` alert for control-plane
-                # sessions that legitimately idle (operator / reviewer /
-                # worker_pollypm). Their pane reaches a steady state
-                # whenever the user isn't actively chatting, and
-                # re-alerting on every heartbeat (~30s) floods the
-                # cockpit with false positives that never signal real
-                # work stalls. Project-scoped workers / architects
-                # still fire the alert so the nudge path catches
-                # genuinely-stuck agents.
-                role = launch.session.role
-                if role in {"heartbeat-supervisor", "operator-pm", "reviewer"} or \
-                        launch.session.name in {"worker_pollypm"}:
-                    self._msg_store.clear_alert(session_name, "suspected_loop")
-                else:
-                    self._msg_store.upsert_alert(
-                        session_name,
-                        "suspected_loop",
-                        "warn",
-                        f"Window {window.name} has produced effectively the same snapshot for 3 heartbeats",
-                    )
-                    active_alerts.append("suspected_loop")
-                    longer_history = self.store.recent_heartbeats(session_name, limit=5)
-                    longer_hashes = [item.snapshot_hash for item in longer_history[:5]]
-                    if len(longer_hashes) == 5 and len(set(longer_hashes)) == 1:
-                        self._maybe_nudge_stalled_session(launch)
-            else:
-                self._msg_store.clear_alert(session_name, "suspected_loop")
-        else:
-            self._msg_store.clear_alert(session_name, "suspected_loop")
-
-        lower_pane = pane_text.lower()
-        if self._pane_has_auth_failure(lower_pane):
-            self._msg_store.upsert_alert(
-                session_name,
-                "auth_broken",
-                "error",
-                f"Window {window.name} reported authentication failure",
-            )
-            self.store.upsert_account_runtime(
-                account_name=launch.account.name,
-                provider=launch.account.provider.value,
-                status="auth_broken",
-                reason="live session reported authentication failure",
-            )
-            active_alerts.append("auth_broken")
-        else:
-            self._msg_store.clear_alert(session_name, "auth_broken")
-
-        if self._pane_has_capacity_failure(lower_pane):
-            self._msg_store.upsert_alert(
-                session_name,
-                "capacity_exhausted",
-                "error",
-                f"Window {window.name} reported a usage or quota limit",
-            )
-            self.store.upsert_account_runtime(
-                account_name=launch.account.name,
-                provider=launch.account.provider.value,
-                status="exhausted",
-                reason="live session reported capacity exhaustion",
-            )
-            active_alerts.append("capacity_exhausted")
-        else:
-            self._msg_store.clear_alert(session_name, "capacity_exhausted")
-
-        if self._pane_has_provider_outage(lower_pane):
-            self._msg_store.upsert_alert(
-                session_name,
-                "provider_outage",
-                "warn",
-                f"Window {window.name} appears to be hitting a provider outage",
-            )
-            self.store.upsert_account_runtime(
-                account_name=launch.account.name,
-                provider=launch.account.provider.value,
-                status="provider_outage",
-                reason="live session reported upstream provider instability",
-                available_at=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
-            )
-            active_alerts.append("provider_outage")
-        else:
-            self._msg_store.clear_alert(session_name, "provider_outage")
-
-        return active_alerts
-
-    def _maybe_nudge_stalled_session(self, launch: SessionLaunchSpec) -> None:
-        if launch.session.role == "reviewer":
-            self._maybe_nudge_reviewer_review(launch)
-            return
-        if launch.session.role == "operator-pm":
-            return  # Polly no longer reviews — Russell handles it
-        if launch.session.role != "worker":
-            return
-        lease = self.store.get_lease(launch.session.name)
-        if lease is not None and lease.owner == "human":
-            # Sync path — operator-visible audit event tied to the
-            # nudge-skip decision (tested synchronously below).
-            self._msg_store.record_event(
-                scope=launch.session.name,
-                sender=launch.session.name,
-                subject="heartbeat_nudge_skipped",
-                payload={
-                    "message": (
-                        "Skipped stalled-worker nudge because session is "
-                        "leased to human"
-                    ),
-                },
-            )
-            return
-        # Check if there's a queued task the worker could pick up
-        nudge = self._build_task_nudge(launch)
-        self.send_input(
-            launch.session.name,
-            nudge or self._STALL_NUDGE_MESSAGE,
-            owner="heartbeat",
-            force=lease is not None and lease.owner != "human",
+        return _supervisor_alerts._update_alerts(
+            self,
+            launch,
+            window,
+            pane_text=pane_text,
+            previous_log_bytes=previous_log_bytes,
+            previous_snapshot_hash=previous_snapshot_hash,
+            current_log_bytes=current_log_bytes,
+            current_snapshot_hash=current_snapshot_hash,
         )
 
+    def _maybe_nudge_stalled_session(self, launch: SessionLaunchSpec) -> None:
+        _supervisor_alerts._maybe_nudge_stalled_session(self, launch)
+
     def _maybe_nudge_reviewer_review(self, launch: SessionLaunchSpec) -> None:
-        """Nudge the reviewer (Russell) if tasks are waiting for review."""
-        lease = self.store.get_lease(launch.session.name)
-        if lease is not None and lease.owner == "human":
-            return
-        nudge = self._build_review_nudge()
-        if nudge is None:
-            return
-        try:
-            self.send_input(
-                launch.session.name,
-                nudge,
-                owner="heartbeat",
-                force=lease is not None and lease.owner != "human",
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        _supervisor_alerts._maybe_nudge_reviewer_review(self, launch)
 
     def _build_review_nudge(self) -> str | None:
-        """Check all projects for tasks in review state.
-
-        Per-project review-task lists are cached in ``_REVIEW_NUDGE_CACHE``
-        keyed by ``state.db`` mtime — unchanged projects skip SQLite entirely.
-        Mirrors the pattern used by ``_dashboard_project_tasks`` (cockpit.py)
-        so the heartbeat cost scales with changed projects, not total projects.
-        """
-        try:
-            from pollypm.work.cli import _resolve_db_path
-
-            review_tasks: list[str] = []
-            live_keys: set[str] = set()
-            for project_key in self.config.projects:
-                live_keys.add(project_key)
-                db_path = _resolve_db_path(".pollypm/state.db", project=project_key)
-                if not db_path.exists():
-                    _REVIEW_NUDGE_CACHE.pop(project_key, None)
-                    continue
-                entries = _review_tasks_for_project(project_key, db_path)
-                review_tasks.extend(entries)
-            # Evict cache entries for projects no longer in config.
-            for stale in set(_REVIEW_NUDGE_CACHE) - live_keys:
-                _REVIEW_NUDGE_CACHE.pop(stale, None)
-            if not review_tasks:
-                return None
-            lines = [
-                f"You have {len(review_tasks)} task(s) waiting for your review:",
-                *review_tasks,
-                "",
-                "Review with: pm task status <id>, then pm task approve <id> --actor russell or pm task reject <id> --actor russell --reason \"...\"",
-            ]
-            return "\n".join(lines)
-        except Exception:  # noqa: BLE001
-            return None
+        return _supervisor_alerts._build_review_nudge(self)
 
     def _build_task_nudge(self, launch: SessionLaunchSpec) -> str | None:
-        """Check for queued tasks assigned to this worker and build a nudge message."""
-        try:
-            from pollypm.work.cli import _resolve_db_path
-            from pollypm.work.sqlite_service import SQLiteWorkService
-
-            project = launch.session.project
-            db_path = _resolve_db_path(".pollypm/state.db", project=project)
-            if not db_path.exists():
-                return None
-            with SQLiteWorkService(db_path=db_path) as svc:
-                task = svc.next(project=project)
-                if task is None:
-                    return None
-                return (
-                    f"You have work waiting. Task {task.task_id} — \"{task.title}\" "
-                    f"is queued for your project. "
-                    f"Claim it: pm task claim {task.task_id}"
-                )
-        except Exception:
-            return None
+        return _supervisor_alerts._build_task_nudge(self, launch)
 
     def _lease_timeout(self) -> timedelta:
         return timedelta(minutes=self.config.pollypm.lease_timeout_minutes)
