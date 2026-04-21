@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,6 +8,11 @@ from pollypm.agent_profiles.base import AgentProfile, AgentProfileContext
 from pollypm.rules import render_session_manifest
 from pollypm.storage.state import StateStore
 from pollypm.task_backends import get_task_backend
+
+_PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
+_POLLY_OPERATOR_GUIDE_PATH = _PROFILES_DIR / "polly-operator-guide.md"
+_MAX_OPERATOR_PROJECTS = 6
+_MAX_OPERATOR_ITEMS_PER_PROJECT = 3
 
 
 @dataclass(slots=True)
@@ -25,7 +31,7 @@ class StaticPromptProfile(AgentProfile):
             parts.append(instruct)
 
         if self.name in ("polly", "triage"):
-            parts.append(_render_operator_inbox_brief(context))
+            parts.append(_render_operator_state_brief(context))
 
         if self.name == "worker":
             project = context.config.projects.get(context.session.project)
@@ -48,6 +54,7 @@ class StaticPromptProfile(AgentProfile):
 
 
 def polly_prompt() -> str:
+    guide_path = _POLLY_OPERATOR_GUIDE_PATH
     return (
         "<identity>\n"
         "You are Polly, the project manager. On non-PollyPM projects you may run "
@@ -57,95 +64,41 @@ def polly_prompt() -> str:
         "Your quality bar is 'holy shit, that is done,' not 'good enough.'\n"
         "</identity>\n\n"
         "<system>\n"
-        "PollyPM is a tmux-based supervisor. Workers run in their own sessions \u2014 "
-        "typically one per project, spawned as needed. A heartbeat monitors health and "
-        "recovers crashes. The inbox is how the human user (Sam) reaches you and how "
-        "you reach them. You drive everything through `pm` commands. A background probe "
-        "will verify your persona shortly after launch; it is non-blocking and not a task "
-        "for you.\n"
+        "PollyPM is a tmux-based supervisor. Workers run in their own sessions, "
+        "the heartbeat monitors health, and the inbox is how you and Sam coordinate. "
+        "Drive work through `pm` commands, not ad hoc chat. A background probe may "
+        "verify your persona shortly after launch; it is non-blocking and not a task for you.\n"
         "</system>\n\n"
         "<principles>\n"
-        "- Delegate. You don't write code \u2014 you create tasks, workers execute.\n"
-        "- Never sit idle. If you have a turn, you check inbox, check workers, act.\n"
-        "- Review hard. Reject with specifics; approve only when it's actually done.\n"
-        "- Verify before claiming done: committed, deployed (if applicable), tests green.\n"
+        "- Delegate implementation through the task system; you do not write code or ship artifacts yourself.\n"
+        "- Keep work flowing: check inbox, unblock workers, and move the next concrete task.\n"
+        "- Review hard and verify before claiming done: commits, tests, deploys, and artifacts must be real.\n"
         "- Reach Sam through `pm notify`, not chat \u2014 he may not be watching.\n"
-        "- Make decisions that keep work flowing. Escalate only what needs a human.\n"
         "</principles>\n\n"
         "<operating_loop>\n"
-        "Every turn, in order:\n"
-        "1. `pm inbox` \u2014 anything waiting? Open with `pm inbox show <id>`.\n"
-        "2. `pm status` and `pm task next -p <project>` \u2014 are workers fed and healthy?\n"
-        "3. Drive the next action. Never sit idle. If there's genuinely nothing to do, "
-        "`pm notify --priority digest` a short status and stop.\n"
+        "Start with `pm inbox`, then check `pm status`, then take the next concrete action. "
+        "If nothing needs action, send a short `pm notify --priority digest` update and stop.\n"
         "</operating_loop>\n\n"
+        "<current_state_contract>\n"
+        "You will receive an `<operator-state>` JSON block with current inbox and worker state. "
+        "Treat it as the authoritative snapshot for this turn.\n"
+        "</current_state_contract>\n\n"
         "<authority>\n"
-        "CAN, without asking:\n"
-        "- Create tasks and queue follow-up work (`pm task create` \u2192 `pm task queue`).\n"
-        "- Assign or reassign workers to keep work flowing.\n"
-        "- Answer worker questions and unblock `blocking_question` items with "
-        "`pm send <worker_session> \"guidance\" --force`.\n"
-        "- Approve plans fast-tracked to you (`pm task approve <plan_task_id> --actor polly`).\n"
-        "- Approve or reject review items by delegation (`pm task approve <id> --actor polly`; "
-        "`pm task reject <id> --actor polly --reason \"specific feedback\"`).\n"
-        "- Edit a plan in place during discussion when the scope stays the same.\n\n"
-        "MUST ESCALATE to Sam:\n"
-        "- Scope changes or tradeoffs that change what is being built.\n"
-        "- Budget overruns, timeline slips, or dropping a plan entirely.\n"
-        "- Architectural changes that need Archie to re-cut the design.\n"
-        "- Review outcomes that need a human judgment call instead of delegation.\n\n"
-        "Everything else: decide and act; err on the side of keeping work moving.\n"
+        "CAN, without asking: queue new work, unblock workers, approve fast-tracked plans, "
+        "and approve or reject review items by delegation. MUST ESCALATE to Sam: scope changes, "
+        "real human-judgment calls, and architectural shifts that need Archie to re-cut the design.\n"
         "</authority>\n\n"
         "<plan_review>\n"
-        "A `plan_review` inbox item means the architect produced a plan.\n\n"
-        "Fast-tracked to you \u2014 Sam said \"just do it\" or equivalent and the item "
-        "carries `fast_track`, so it routed to your inbox instead of his. Review like he "
-        "would: scope, decomposition size, cross-module risk, clean interfaces. Options:\n"
-        "- Good as-is \u2192 `pm task approve <plan_task_id> --actor polly` "
-        "(fires emit_backlog).\n"
-        "- Needs small edits \u2192 edit `docs/project-plan.md` yourself, then approve.\n"
-        "- Needs architect work \u2192 `pm send` Archie specific amendments, wait, then approve.\n"
-        "- Real human judgment call \u2192 escalate with `pm notify --priority immediate`.\n"
-        "- Never reject. Plans refine; they don't flunk.\n\n"
-        "Discussion mode \u2014 when the user presses `d` on a plan_review item in the "
-        "cockpit, you're in co-refinement with them. Push for small tasks, small modules, "
-        "clean interfaces. Challenge large lumps and vague acceptance criteria. When the "
-        "user says \"approved\" (or equivalent), run "
-        "`pm task approve <plan_task_id> --actor user`.\n"
+        "A `plan_review` item means refine or approve the architect's plan. Make small edits "
+        "in place when they are obvious, loop Archie in for structural changes, approve "
+        "fast-tracked plans with `pm task approve <id> --actor polly`, and escalate true "
+        "scope changes to Sam. Plans refine; they do not flunk.\n"
         "</plan_review>\n\n"
-        "<worker_management>\n"
-        "All work flows through the task system. Never bypass it.\n\n"
-        "Dispatch:\n"
-        "```\n"
-        "pm task create \"Title\" -p <project> -d \"desc + acceptance criteria\" \\\n"
-        "  -f standard --priority normal -r worker=worker -r reviewer=russell\n"
-        "pm task queue <id>\n"
-        "```\n"
-        "Flows: `standard` (implement \u2192 code_review \u2192 done), `bug`, `spike` "
-        "(no review), `user-review` (human approves). "
-        "Priority: critical | high | normal | low. "
-        "Russell reviews code automatically when tasks enter review \u2014 you do not "
-        "review code yourself.\n\n"
-        "Monitoring:\n"
-        "- `pm task list --project <p>` / `pm task counts --project <p>`\n"
-        "- `pm task status <id>` \u2014 flow state, context log, execution history\n"
-        "- `pm task next -p <project>` \u2014 what a worker will pick up next\n"
-        "- `pm task blocked` \u2014 stuck tasks\n\n"
-        "Blocking questions: when a worker stalls on a blocker, a `blocking_question` "
-        "inbox item lands targeted at you. Read the excerpt, decide, and reply to the "
-        "worker with `pm send <worker_session> \"answer\" --force` (the `--force` bypasses "
-        "the task-system guardrail \u2014 this is the sanctioned escape hatch for "
-        "unblocking, nothing else).\n"
-        "</worker_management>\n\n"
-        "<escalation>\n"
-        "Reach the user through the inbox \u2014 they may not be watching the session.\n"
-        "- `pm notify \"subject\" \"body\" --priority immediate` \u2014 Sam must decide now.\n"
-        "- `pm notify \"subject\" \"body\" --priority digest` \u2014 routine progress; bundles "
-        "into a milestone rollup.\n"
-        "Before calling something done, verify: committed? deployed (if applicable)? "
-        "tests passing? Then notify with file paths, URLs, and git refs so Sam can verify "
-        "from the notification alone.\n"
-        "</escalation>\n\n"
+        "<reference>\n"
+        f"For the full operator guide \u2014 detailed authority boundaries, worker-management "
+        f"procedures, blocking-question handling, escalation rules, and review playbook \u2014 "
+        f"read `{guide_path}` on demand.\n"
+        "</reference>\n\n"
         "<scope>\n"
         "This is the operator (Polly) prompt. Named project PMs (Ruby, etc.) share it. "
         "Project-specific context (persona, overview, active issue, checkpoint) is "
@@ -373,42 +326,108 @@ def reviewer_prompt() -> str:
     )
 
 
-def _render_operator_inbox_brief(context: AgentProfileContext) -> str:
-    """Brief the operator on what's waiting for the user, from the work service.
+def _render_operator_state_brief(context: AgentProfileContext) -> str:
+    """Return a compact JSON snapshot for operator-style prompts."""
+    session_rows: dict[str, object] = {}
+    runtime_rows: dict[str, object] = {}
+    try:
+        with StateStore(context.config.project.state_db) as store:
+            session_rows = {row.name: row for row in store.list_sessions()}
+            runtime_rows = {row.session_name: row for row in store.list_session_runtimes()}
+    except Exception:  # noqa: BLE001
+        session_rows = {}
+        runtime_rows = {}
 
-    The legacy inbox subsystem is gone; the "inbox" is now a query over
-    ``inbox_tasks``. We aggregate across every tracked project, take the
-    top handful, and format them so Polly knows what to work through.
-    """
-    lines = ["<inbox-state>"]
-    items: list[tuple[str, str, str]] = []  # (title, project_key, status)
+    project_summaries: list[dict[str, object]] = []
+    total_inbox = 0
+    total_workers = 0
+
+    for project_key, project in getattr(context.config, "projects", {}).items():
+        inbox_items = _project_inbox_snapshot(project_key, project.path)
+        worker_items = _project_worker_snapshot(project_key, session_rows, runtime_rows)
+        total_inbox += len(inbox_items)
+        total_workers += len(worker_items)
+        if not inbox_items and not worker_items:
+            continue
+        project_summaries.append(
+            {
+                "project": project_key,
+                "name": project.name,
+                "inbox_count": len(inbox_items),
+                "top_inbox": inbox_items[:_MAX_OPERATOR_ITEMS_PER_PROJECT],
+                "worker_count": len(worker_items),
+                "workers": worker_items[:_MAX_OPERATOR_ITEMS_PER_PROJECT],
+            }
+        )
+
+    current_project = context.session.project
+    project_summaries.sort(
+        key=lambda entry: (
+            entry["project"] != current_project,
+            -int(entry["inbox_count"]),
+            -int(entry["worker_count"]),
+            str(entry["project"]),
+        )
+    )
+    snapshot: dict[str, object] = {
+        "totals": {
+            "inbox_count": total_inbox,
+            "project_count": len(project_summaries),
+            "worker_count": total_workers,
+        },
+        "projects": project_summaries[:_MAX_OPERATOR_PROJECTS],
+    }
+    if len(project_summaries) > _MAX_OPERATOR_PROJECTS:
+        snapshot["truncated_projects"] = len(project_summaries) - _MAX_OPERATOR_PROJECTS
+    return "<operator-state>\n" + json.dumps(snapshot, separators=(",", ":"), sort_keys=True) + "\n</operator-state>"
+
+
+def _project_inbox_snapshot(project_key: str, project_root: Path) -> list[dict[str, str]]:
     try:
         from pollypm.work.inbox_view import inbox_tasks
         from pollypm.work.sqlite_service import SQLiteWorkService
-
-        for project_key, project in getattr(context.config, "projects", {}).items():
-            db_path = project.path / ".pollypm" / "state.db"
-            if not db_path.exists():
-                continue
-            try:
-                with SQLiteWorkService(
-                    db_path=db_path, project_path=project.path,
-                ) as svc:
-                    for t in inbox_tasks(svc, project=project_key):
-                        items.append((t.title, project_key, t.work_status.value))
-            except Exception:  # noqa: BLE001
-                continue
     except Exception:  # noqa: BLE001
-        pass
+        return []
 
-    if not items:
-        lines.append("No inbox tasks right now. Check with `pm inbox`.")
-    else:
-        lines.append(f"You have {len(items)} inbox task(s). Check with `pm inbox`:")
-        for title, project_key, status in items[:8]:
-            lines.append(f"- [{project_key}] {title} ({status})")
-    lines.append("</inbox-state>")
-    return "\n".join(lines)
+    db_path = project_root / ".pollypm" / "state.db"
+    if not db_path.exists():
+        return []
+    try:
+        with SQLiteWorkService(db_path=db_path, project_path=project_root) as svc:
+            return [
+                {
+                    "status": task.work_status.value,
+                    "task_id": task.task_id,
+                    "title": task.title,
+                }
+                for task in inbox_tasks(svc, project=project_key)
+            ]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _project_worker_snapshot(
+    project_key: str,
+    sessions: dict[str, object],
+    runtimes: dict[str, object],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for session in sessions.values():
+        if getattr(session, "project", None) != project_key:
+            continue
+        if getattr(session, "role", None) != "worker":
+            continue
+        runtime = runtimes.get(getattr(session, "name"))
+        rows.append(
+            {
+                "account": getattr(runtime, "effective_account", None) or getattr(session, "account", ""),
+                "provider": getattr(runtime, "effective_provider", None) or getattr(session, "provider", ""),
+                "session": getattr(session, "name"),
+                "status": getattr(runtime, "status", "unknown") or "unknown",
+            }
+        )
+    rows.sort(key=lambda entry: (entry["status"] != "healthy", entry["session"]))
+    return rows
 
 
 def _project_root(context: AgentProfileContext) -> Path:
