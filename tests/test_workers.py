@@ -219,6 +219,10 @@ def test_operator_prompt_requires_delegation_instructions() -> None:
     assert "pm inbox" in prompt
     assert "pm mail" not in prompt
     assert "<principles>" in prompt
+    assert "<authority>" in prompt
+    assert "CAN, without asking" in prompt
+    assert "MUST ESCALATE to Sam" in prompt
+    assert "scope changes" in prompt.lower()
 
 def test_heartbeat_prompt_describes_recovery_protocol() -> None:
     prompt = heartbeat_prompt()
