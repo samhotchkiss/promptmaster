@@ -29,8 +29,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pollypm.config import load_config
+from pollypm.cockpit_task_priority import priority_glyph, priority_rank
 from pollypm.cockpit_sections.base import _STATUS_ICONS
 from pollypm.heartbeats.snapshots import read_recent_heartbeat_snapshot
+
+
+def _timestamp_sort_value(value) -> float:
+    """Best-effort sortable timestamp for task list ordering."""
+    if not value:
+        return 0.0
+    try:
+        if hasattr(value, "timestamp"):
+            return float(value.timestamp())
+        return float(datetime.fromisoformat(str(value)).timestamp())
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _render_work_service_issues(project: object) -> str:
@@ -62,12 +75,21 @@ def _render_work_service_issues(project: object) -> str:
     # Active tasks (non-terminal) — sorted by status priority
     _so = {"in_progress": 0, "review": 1, "queued": 2, "blocked": 3, "on_hold": 4, "draft": 5}
     active = [t for t in tasks if t.work_status.value not in ("done", "cancelled")]
-    active.sort(key=lambda t: _so.get(t.work_status.value, 9))
+    active.sort(
+        key=lambda t: (
+            _so.get(t.work_status.value, 9),
+            priority_rank(t),
+            -_timestamp_sort_value(getattr(t, "updated_at", None)),
+            int(getattr(t, "task_number", 0) or 0),
+        )
+    )
     if active:
         for t in active:
             icon = _STATUS_ICONS.get(t.work_status.value, "·")
             assignee = f" [{t.assignee}]" if t.assignee else ""
-            lines.append(f"  {icon} #{t.task_number} {t.title}{assignee}")
+            lines.append(
+                f"  {icon} {priority_glyph(t)} #{t.task_number} {t.title}{assignee}"
+            )
         lines.append("")
 
     # Recently completed (last 10)
@@ -77,7 +99,7 @@ def _render_work_service_issues(project: object) -> str:
         lines.append(f"─── completed ({len(completed)}) ───")
         for t in completed[:10]:
             icon = _STATUS_ICONS.get(t.work_status.value, "·")
-            lines.append(f"  {icon} #{t.task_number} {t.title}")
+            lines.append(f"  {icon} {priority_glyph(t)} #{t.task_number} {t.title}")
         lines.append("")
 
     if not tasks:

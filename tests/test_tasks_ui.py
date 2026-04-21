@@ -72,6 +72,7 @@ def _task(
     node_id: str,
     title: str = "Ship Notesy visibility",
     status: WorkStatus = WorkStatus.IN_PROGRESS,
+    priority: Priority = Priority.HIGH,
     updated_at: datetime | None = None,
     executions: list[FlowNodeExecution] | None = None,
 ) -> Task:
@@ -85,7 +86,7 @@ def _task(
         flow_template_version=1,
         current_node_id=node_id,
         assignee="architect_demo",
-        priority=Priority.HIGH,
+        priority=priority,
         description="Make the live task detail useful.",
         roles={"architect": "architect_demo", "operator": "polly"},
         created_at=datetime(2026, 4, 20, 16, 0, tzinfo=UTC),
@@ -462,7 +463,48 @@ def test_task_app_filters_drive_table_contents(env, monkeypatch) -> None:
             await pilot.pause()
             rows = _table_rows(table)
             assert table.row_count == 1
-            assert rows[0][2] == "Done already"
+            assert rows[0][2] == "🟠 Done already"
+
+    _run(body())
+
+
+def test_task_app_surfaces_priority_glyphs_and_sorts_critical_first(env, monkeypatch) -> None:
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    critical = _task(
+        task_number=2,
+        node_id="research",
+        title="Critical fix",
+        priority=Priority.CRITICAL,
+        updated_at=datetime(2026, 4, 20, 17, 5, tzinfo=UTC),
+    )
+    low = _task(
+        task_number=1,
+        node_id="research",
+        title="Low follow-up",
+        priority=Priority.LOW,
+        updated_at=datetime(2026, 4, 20, 17, 20, tzinfo=UTC),
+    )
+    fake_svc = _FakeSvc(
+        tasks_factory=lambda: [low, critical],
+        flow=_flow(),
+    )
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            rows = _table_rows(app.query_one("#tasks-table", DataTable))
+            overview = str(app.query_one("#task-detail", Static).render())
+            assert rows[0][2] == "🔴 Critical fix"
+            assert rows[1][2] == "🟢 Low follow-up"
+            assert "Priority   🔴 critical" in overview
 
     _run(body())
 
