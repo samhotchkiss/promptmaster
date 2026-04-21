@@ -58,6 +58,8 @@ def test_project_magic_appears_in_worker_prompt_manifest(tmp_path: Path) -> None
     prompt = launches["worker_demo"].session.prompt or ""
 
     assert "## Available Magic" in prompt
-    assert ".pollypm/magic/screenshot-verify.md" in prompt
     assert "Screenshot verification" in prompt
-    assert "pollypm/defaults/magic/deploy-site.md" in prompt
+    assert "deploy-site" in prompt
+    assert ".pollypm/MANIFEST.md" in prompt
+    assert "pollypm/defaults/magic/deploy-site.md" not in prompt
+    assert (project_root / ".pollypm" / "MANIFEST.md").exists()

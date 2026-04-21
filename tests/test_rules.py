@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from pollypm.rules import discover_magic, discover_rules, render_magic_manifest, render_rules_manifest
+from pollypm.rules import (
+    discover_magic,
+    discover_rules,
+    render_magic_manifest,
+    render_rules_manifest,
+    render_session_manifest,
+)
 
 
 def test_discover_rules_includes_packaged_defaults(tmp_path: Path) -> None:
@@ -84,3 +90,28 @@ def test_magic_manifest_lists_merged_magic(monkeypatch, tmp_path: Path) -> None:
     assert "## Available Magic" in manifest
     assert "- screenshot-verify: Screenshot verification -> .pollypm/magic/screenshot-verify.md (when checking UI output visually)" in manifest
     assert "- deploy-site: Deploy a site and verify it works -> pollypm/defaults/magic/deploy-site.md" in manifest
+
+
+def test_session_manifest_is_compact_and_writes_full_manifest(monkeypatch, tmp_path: Path) -> None:
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    (tmp_path / ".pollypm" / "rules").mkdir(parents=True)
+    (tmp_path / ".pollypm" / "rules" / "audit.md").write_text(
+        "Description: Project audit flow\nTrigger: when reviewing code in this project\n"
+    )
+    (tmp_path / ".pollypm" / "magic").mkdir(parents=True)
+    (tmp_path / ".pollypm" / "magic" / "screenshot-verify.md").write_text(
+        "Description: Screenshot verification\nTrigger: when checking UI output visually\n"
+    )
+
+    manifest = render_session_manifest(tmp_path)
+
+    assert "## Available Rules" in manifest
+    assert "## Available Magic" in manifest
+    assert ".pollypm/MANIFEST.md" in manifest
+    assert "-> .pollypm/rules/audit.md" not in manifest
+    assert "(when checking UI output visually)" not in manifest
+
+    written = (tmp_path / ".pollypm" / "MANIFEST.md").read_text()
+    assert "-> .pollypm/rules/audit.md" in written
+    assert "-> .pollypm/magic/screenshot-verify.md" in written

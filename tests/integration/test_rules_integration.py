@@ -58,6 +58,8 @@ def test_project_rule_appears_in_worker_prompt_manifest(tmp_path: Path) -> None:
     prompt = launches["worker_demo"].session.prompt or ""
 
     assert "## Available Rules" in prompt
-    assert ".pollypm/rules/deploy.md" in prompt
     assert "Project deploy process" in prompt
-    assert "pollypm/defaults/rules/bugfix.md" in prompt
+    assert "bugfix" in prompt
+    assert ".pollypm/MANIFEST.md" in prompt
+    assert "pollypm/defaults/rules/bugfix.md" not in prompt
+    assert (project_root / ".pollypm" / "MANIFEST.md").exists()
