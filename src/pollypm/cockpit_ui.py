@@ -96,6 +96,7 @@ from pollypm.cockpit_settings_accounts import (
     SETTINGS_ACCOUNT_ACTIONS,
     render_settings_account_detail,
 )
+from pollypm.cockpit_settings_projects import collect_settings_projects
 from pollypm.cockpit_workers import PollyWorkerRosterApp
 from pollypm.session_services import create_tmux_client
 from pollypm.service_api import PollyPMService
@@ -2070,55 +2071,10 @@ def _gather_settings_data(
 
     projects: list[dict] = []
     if config is not None:
-        from datetime import datetime as _dt
-        for key, project in (getattr(config, "projects", {}) or {}).items():
-            path = getattr(project, "path", None)
-            persona = getattr(project, "persona_name", None)
-            path_str = str(path) if path else ""
-            tracked = bool(getattr(project, "tracked", False))
-            path_exists = False
-            task_total = 0
-            last_activity = ""
-            try:
-                if path is not None and path.exists():
-                    path_exists = True
-                    db_path = path / ".pollypm" / "state.db"
-                    if db_path.exists():
-                        try:
-                            mtime = db_path.stat().st_mtime
-                            last_activity = _format_relative_age(
-                                _dt.fromtimestamp(mtime).isoformat()
-                            )
-                        except OSError:
-                            last_activity = ""
-                        try:
-                            from pollypm.work.sqlite_service import SQLiteWorkService
-                            with SQLiteWorkService(
-                                db_path=db_path, project_path=path,
-                            ) as svc:
-                                counts = svc.state_counts(project=key)
-                                task_total = sum(counts.values())
-                        except Exception:  # noqa: BLE001
-                            task_total = 0
-            except OSError:
-                path_exists = False
-            projects.append(
-                {
-                    "key": key,
-                    "name": getattr(project, "name", None) or key,
-                    "persona": (
-                        persona
-                        if isinstance(persona, str) and persona.strip()
-                        else "Polly"
-                    ),
-                    "path": path_str,
-                    "path_exists": path_exists,
-                    "tracked": tracked,
-                    "task_total": task_total,
-                    "last_activity": last_activity,
-                    "project_obj": project,
-                }
-            )
+        projects = collect_settings_projects(
+            config,
+            format_relative_age=_format_relative_age,
+        )
 
     heartbeat: list[tuple[str, str]] = []
     if pp is not None:
@@ -2745,7 +2701,7 @@ class PollySettingsPaneApp(App[None]):
             path = p["path"] or "-"
             path_disp = path if len(path) <= 42 else ("\u2026" + path[-41:])
             path_cell = Text(path_disp, style="dim")
-            tasks_cell = Text(str(p["task_total"]))
+            tasks_cell = Text(str(p.get("task_total_label", p["task_total"])))
             last_cell = Text(p["last_activity"] or "-", style="dim")
             key_cell = Text(p["key"], style=name_style)
             persona_cell = Text(p["persona"], style="dim")
@@ -2793,7 +2749,7 @@ class PollySettingsPaneApp(App[None]):
             f"[dim]Path:[/dim]   {_escape(selected['path']) or '-'}  "
             f"{'' if selected['path_exists'] else '[#ff5f6d](missing)[/]'}",
             f"[dim]Status:[/dim] {tracked_line}",
-            f"[dim]Tasks:[/dim]  {selected['task_total']}",
+            f"[dim]Tasks:[/dim]  {selected.get('task_total_label', selected['task_total'])}",
             f"[dim]Last:[/dim]   {_escape(selected['last_activity']) or '-'}",
         ]
         self.detail.update("\n".join(lines))
