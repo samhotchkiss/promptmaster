@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -7,7 +9,7 @@ import pollypm.cli as cli
 from pollypm.config import write_config
 from pollypm.models import AccountConfig, KnownProject, ProjectKind, ProjectSettings, PollyPMConfig, PollyPMSettings, ProviderKind, SessionConfig
 from pollypm.service_api import PollyPMService
-from pollypm.transcript_ingest import sync_transcripts_once
+from pollypm.transcript_ingest import HOT_SCAN_WINDOW_SECONDS, sync_transcripts_once
 
 
 def _config(tmp_path: Path) -> tuple[PollyPMConfig, Path]:
@@ -259,6 +261,106 @@ def test_sync_transcripts_once_resumes_and_picks_up_rotated_file(tmp_path: Path)
     ]
     assistant_texts = [event["payload"]["text"] for event in events if event["event_type"] == "assistant_turn"]
     assert assistant_texts == ["First", "Second"]
+
+
+def test_sync_transcripts_once_skips_archived_file_stats_between_full_rescans(monkeypatch, tmp_path: Path) -> None:
+    config, _config_path = _config(tmp_path)
+    claude_root = config.accounts["claude_main"].home / ".claude/projects/demo"
+    archived_file = claude_root / "session-archived.jsonl"
+    archived_file.parent.mkdir(parents=True, exist_ok=True)
+    archived_file.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-10T00:00:00Z",
+                "type": "assistant",
+                "sessionId": "session-archived",
+                "cwd": str(config.project.root_dir),
+                "message": {"content": [{"type": "text", "text": "Archived"}], "usage": {"total_tokens": 1}},
+            }
+        )
+        + "\n"
+    )
+    archived_mtime = time.time() - HOT_SCAN_WINDOW_SECONDS - 5
+    os.utime(archived_file, (archived_mtime, archived_mtime))
+
+    sync_transcripts_once(config)
+
+    stat_calls = 0
+    path_cls = type(archived_file)
+    original_stat = path_cls.stat
+
+    def counting_stat(self, *args, **kwargs):
+        nonlocal stat_calls
+        if self == archived_file:
+            stat_calls += 1
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(path_cls, "stat", counting_stat)
+
+    sync_transcripts_once(config)
+
+    events = [
+        json.loads(line)
+        for line in (config.project.root_dir / ".pollypm/transcripts/session-archived/events.jsonl").read_text().splitlines()
+    ]
+    assert stat_calls == 0
+    assert [event["payload"]["text"] for event in events if event["event_type"] == "assistant_turn"] == ["Archived"]
+
+
+def test_sync_transcripts_once_reads_live_append_without_fresh_rglob(monkeypatch, tmp_path: Path) -> None:
+    config, _config_path = _config(tmp_path)
+    claude_root = config.accounts["claude_main"].home / ".claude/projects/demo"
+    live_file = claude_root / "session-live.jsonl"
+    live_file.parent.mkdir(parents=True, exist_ok=True)
+    live_file.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-10T00:00:00Z",
+                "type": "assistant",
+                "sessionId": "session-live",
+                "cwd": str(config.project.root_dir),
+                "message": {"content": [{"type": "text", "text": "First"}], "usage": {"total_tokens": 1}},
+            }
+        )
+        + "\n"
+    )
+
+    sync_transcripts_once(config)
+
+    rglob_calls = 0
+    path_cls = type(claude_root)
+    original_rglob = path_cls.rglob
+
+    def counting_rglob(self, pattern):
+        nonlocal rglob_calls
+        if self == claude_root:
+            rglob_calls += 1
+        return original_rglob(self, pattern)
+
+    monkeypatch.setattr(path_cls, "rglob", counting_rglob)
+
+    with live_file.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-10T00:00:01Z",
+                    "type": "assistant",
+                    "sessionId": "session-live",
+                    "cwd": str(config.project.root_dir),
+                    "message": {"content": [{"type": "text", "text": "Second"}], "usage": {"total_tokens": 2}},
+                }
+            )
+            + "\n"
+        )
+
+    sync_transcripts_once(config)
+
+    events = [
+        json.loads(line)
+        for line in (config.project.root_dir / ".pollypm/transcripts/session-live/events.jsonl").read_text().splitlines()
+    ]
+    assert rglob_calls == 0
+    assert [event["payload"]["text"] for event in events if event["event_type"] == "assistant_turn"] == ["First", "Second"]
 
 
 def test_service_load_supervisor_does_not_start_transcript_ingestion(monkeypatch, tmp_path: Path) -> None:
