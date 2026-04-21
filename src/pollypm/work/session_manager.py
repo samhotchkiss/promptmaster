@@ -440,23 +440,39 @@ class SessionManager:
                         f"Check that tmux is installed and running, then "
                         f"run `pm task release <id>` and retry."
                     ) from exc
-            windows = self._tmux.list_windows(session_name)
-            pane_id = "%0"
-            for w in windows:
-                if w.name == window_name:
-                    pane_id = w.pane_id
-                    break
-            if pane_id == "%0" and windows:
-                pane_id = windows[0].pane_id
+            pane_id = self._resolve_worker_pane_id(
+                session_name=session_name,
+                window_name=window_name,
+                windows=self._tmux.list_windows(session_name),
+            )
         else:
             self._tmux.create_window(session_name, window_name, worker_cmd, detached=True)
-            windows = self._tmux.list_windows(session_name)
-            pane_id = "%0"
-            for w in windows:
-                if w.name == window_name:
-                    pane_id = w.pane_id
-                    break
+            pane_id = self._resolve_worker_pane_id(
+                session_name=session_name,
+                window_name=window_name,
+                windows=self._tmux.list_windows(session_name),
+            )
         return pane_id
+
+    def _resolve_worker_pane_id(self, *, session_name: str, window_name: str, windows) -> str:
+        """Resolve the pane id for a freshly created worker window.
+
+        If tmux cannot report any windows after create-session/create-window,
+        fail closed so the caller can retry instead of persisting a phantom
+        ``%0`` pane binding.
+        """
+
+        for window in windows:
+            if window.name == window_name and getattr(window, "pane_id", ""):
+                return window.pane_id
+        for window in windows:
+            pane_id = getattr(window, "pane_id", "")
+            if pane_id:
+                return pane_id
+        raise ProvisionError(
+            f"tmux did not report a worker pane for session '{session_name}' "
+            f"window '{window_name}'. Retry `pm task claim <id>`."
+        )
 
     def _kill_stale_task_window(self, session_name: str, window_name: str) -> None:
         """Kill a stale ``task-<slug>`` window before re-provisioning.
