@@ -42,7 +42,7 @@ Emit structured JSON via `pm task done --output`:
           "input_validation_gaps": ["Module Foo parses JSON from disk without schema validation"],
           "secret_handling_issues": ["API key policy unspecified for Module Bar"],
           "threat_model_note": "Local-only single-user tool — limited external attack surface",
-          "verdict": "approve_with_changes"
+          "verdict": "approved"
         }
       ],
       "preferred_candidate": "A",
@@ -53,5 +53,5 @@ Emit structured JSON via `pm task done --output`:
   }]
 }
 ```
-Scores 1–10 (higher = more secure). Verdict: `approve`, `approve_with_changes`, `reject`.
+Scores 1–10 (higher = more secure). Verdict uses the work-service decision strings: `approved` or `rejected`. Put non-blocking follow-ups in the issue lists and `objections_for_risk_ledger`, not a third verdict value.
 </output_contract>

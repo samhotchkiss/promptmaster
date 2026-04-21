@@ -39,7 +39,7 @@ Emit structured JSON via `pm task done --output`:
           "score": 7,
           "over_engineered_pieces": ["FooRegistryFactory", "BarProtocol"],
           "scope_shrink_proposal": "Replace FooRegistryFactory with module-level dict",
-          "verdict": "approve_with_changes"
+          "verdict": "approved"
         }
       ],
       "preferred_candidate": "A",
@@ -50,5 +50,5 @@ Emit structured JSON via `pm task done --output`:
   }]
 }
 ```
-Scores are 1–10 (higher = simpler). Verdict is one of `approve`, `approve_with_changes`, `reject`.
+Scores are 1–10 (higher = simpler). Verdict uses the work-service decision strings: `approved` or `rejected`. Put non-blocking follow-ups in the issue lists and `objections_for_risk_ledger`, not a third verdict value.
 </output_contract>
