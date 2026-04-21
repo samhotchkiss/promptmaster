@@ -185,6 +185,14 @@ def ensure_session_lock(base_dir: Path, session_id: str) -> Path:
             raise RuntimeError(
                 f"Session lock conflict at {base_dir}: owned by {existing_session or 'unknown'}"
             ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not create session lock at {base_dir}: {exc}"
+            ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not create session lock at {base_dir}: {exc}"
+        ) from exc
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
