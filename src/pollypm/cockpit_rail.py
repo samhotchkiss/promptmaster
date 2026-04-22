@@ -1,6 +1,7 @@
-"""Rail rendering + routing for the cockpit left pane (#404).
+"""Shared rail data/routing plus a legacy renderer for cockpit surfaces (#404).
 
-This module owns every piece of the cockpit *rail* contract:
+This module owns the shared cockpit *rail* contract used across both
+``cockpit_ui.py`` and the rail-oriented CLI/runtime helpers:
 
 * :class:`CockpitItem` — the dataclass every row is built from.
 * :class:`CockpitRouter` — the orchestrator that loads state, persists
@@ -10,8 +11,9 @@ This module owns every piece of the cockpit *rail* contract:
   (``_selected_project_key``, ``_hidden_rail_items``,
   ``_collapsed_rail_sections``, ``_visibility_passes``,
   ``_rows_for_registration``).
-* :class:`PollyCockpitRail` — the text-only renderer used by ``pm rail``
-  when the user wants the pre-Textual surface.
+* :class:`PollyCockpitRail` — a legacy text-only renderer kept in-tree,
+  but not launched by the default ``pm`` Textual cockpit, ``pm rail``,
+  or ``rail-daemon`` on current ``main``.
 
 Splitting the rail out of ``cockpit.py`` keeps that module focused on
 the dashboard + detail-pane renderers; importers that still reach into

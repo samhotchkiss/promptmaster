@@ -1,0 +1,45 @@
+name: Rail change
+description: File a rail or cockpit-rail issue with explicit dual-surface review.
+title: "[rail] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Rail work spans two live surfaces on `main`:
+
+        - `src/pollypm/cockpit_ui.py` — the Textual cockpit users see when they run `pm`
+        - `src/pollypm/cockpit_rail.py` — shared rail/router/runtime plumbing; the legacy `PollyCockpitRail` class still lives here
+
+        Default to auditing both surfaces unless you can prove one is unaffected.
+  - type: checkboxes
+    id: surfaces
+    attributes:
+      label: Surfaces
+      description: Both surfaces must be reviewed before the issue is filed.
+      options:
+        - label: "`src/pollypm/cockpit_ui.py` reviewed"
+          required: true
+        - label: "`src/pollypm/cockpit_rail.py` reviewed"
+          required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: State the user-visible acceptance criteria for the rail change.
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence / Audit
+      description: Note the commands, code paths, or docs that show why both surfaces do or do not need changes.
+      placeholder: |
+        - `pm` launches ...
+        - `pm rail` / `rail-daemon` use ...
+    validations:
+      required: true
