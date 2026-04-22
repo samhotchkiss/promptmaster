@@ -16,6 +16,7 @@ large state.db, per the agent brief. Run with::
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,10 @@ def _seed_tasks(project_path: Path) -> dict[str, str]:
     with SQLiteWorkService(
         db_path=db_path, project_path=project_path,
     ) as svc:
+        # Dashboard-rendering tests don't exercise git merging; skip the
+        # auto-merge step that real `approve()` would run and that requires
+        # a real task branch in the fixture repo.
+        svc._auto_merge_approved_task_branch = lambda _task: None
         # Queued (created but not claimed)
         t_queued = svc.create(
             title="Queued feature",
@@ -128,11 +133,30 @@ def _seed_tasks(project_path: Path) -> dict[str, str]:
     return ids
 
 
+def _init_git_repo(path: Path) -> None:
+    """Initialise a real git repo with one empty commit and a ``.gitignore``
+    that excludes ``.pollypm/``. Needed because seeding tasks triggers
+    ``svc.approve`` which runs ``_auto_merge_approved_task_branch`` —
+    that path refuses to run when HEAD is dangling or the working tree
+    has uncommitted changes, both of which trip a stubbed repo."""
+    subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.test"], cwd=str(path), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(path), check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=str(path), check=True)
+    (path / ".gitignore").write_text(".pollypm/\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=str(path), check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "init"],
+        cwd=str(path),
+        check=True,
+    )
+
+
 @pytest.fixture
 def dashboard_env(tmp_path: Path):
     project_path = tmp_path / "demo"
     project_path.mkdir()
-    (project_path / ".git").mkdir()  # pretend git repo
+    _init_git_repo(project_path)
     config_path = tmp_path / "pollypm.toml"
     _write_config(project_path, config_path)
     ids = _seed_tasks(project_path)
