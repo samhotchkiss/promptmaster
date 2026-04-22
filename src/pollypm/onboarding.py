@@ -4,6 +4,7 @@ import base64
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -51,6 +52,71 @@ from pollypm.session_services import create_tmux_client
 
 if TYPE_CHECKING:
     from pollypm.tmux.client import TmuxClient
+
+
+DEMO_PROJECT_BASENAME = "pollypm-demo"
+DEMO_PROJECT_MARKER = ".pollypm-demo-fallback"
+DEMO_PROJECT_FILES: dict[str, str] = {
+    DEMO_PROJECT_MARKER: "demo-fallback-v1\n",
+    ".gitignore": ".pollypm/\n__pycache__/\n.pytest_cache/\n",
+    "README.md": """# PollyPM Demo Repo
+
+This repo is the offline fallback used by onboarding when no recent local
+projects are detected.
+
+## What To Try
+
+- Run `python -m unittest discover -s tests -p "test_*.py"`
+- Read `demo_app.py`
+- Ask Polly to explain, extend, or test the queue summary behavior
+
+Everything in this repo uses only the Python standard library.
+""",
+    "demo_app.py": '''"""Small offline demo for PollyPM onboarding."""
+
+from __future__ import annotations
+
+
+def summarize_queue(items: list[str]) -> str:
+    cleaned = [item.strip() for item in items if item.strip()]
+    if not cleaned:
+        return "No tasks queued."
+    if len(cleaned) == 1:
+        return f"1 task queued: {cleaned[0]}"
+    preview = ", ".join(cleaned[:2])
+    if len(cleaned) > 2:
+        preview += f", +{len(cleaned) - 2} more"
+    return f"{len(cleaned)} tasks queued: {preview}"
+
+
+def estimate_focus_minutes(task_count: int, *, per_task: int = 25) -> int:
+    if task_count <= 0:
+        return 0
+    return task_count * per_task
+''',
+    "tests/test_demo_app.py": """import unittest
+
+from demo_app import estimate_focus_minutes, summarize_queue
+
+
+class DemoAppTests(unittest.TestCase):
+    def test_summarize_queue_handles_empty_input(self) -> None:
+        self.assertEqual(summarize_queue([]), "No tasks queued.")
+
+    def test_summarize_queue_shows_preview_and_count(self) -> None:
+        summary = summarize_queue(["plan onboarding", "write docs", "ship fallback"])
+        self.assertEqual(summary, "3 tasks queued: plan onboarding, write docs, +1 more")
+
+    def test_estimate_focus_minutes_uses_default_block(self) -> None:
+        self.assertEqual(estimate_focus_minutes(3), 75)
+
+
+if __name__ == "__main__":
+    unittest.main()
+""",
+}
+
+
 class LoginCancelled(Exception):
     pass
 
@@ -242,6 +308,15 @@ def _scan_recent_projects(config_path: Path) -> list[KnownProject]:
     discovered = discover_recent_project_candidates(config_path)
     if not discovered:
         typer.echo("No recently active git repos were found in your home folder.")
+        demo_path = demo_project_fallback_destination(config_path)
+        typer.echo(
+            f"You can copy a self-contained demo repo to {demo_path} and use it offline."
+        )
+        if typer.confirm("Copy the demo repo and use it as your first project?", default=True):
+            return add_selected_projects(
+                config_path,
+                [provision_demo_project_fallback(config_path)],
+            )
         return []
 
     typer.echo("")
@@ -253,10 +328,72 @@ def _scan_recent_projects(config_path: Path) -> list[KnownProject]:
     return add_selected_projects(config_path, selected)
 
 
-def discover_recent_project_candidates(config_path: Path) -> list[Path]:
-    config = load_config(config_path)
-    known_paths = {project.path.resolve() for project in config.projects.values()}
-    return discover_recent_git_repositories(Path.home(), known_paths=known_paths, recent_days=14)
+def discover_recent_project_candidates(
+    config_path: Path,
+    *,
+    scan_root: Path | None = None,
+    recent_days: int = 14,
+) -> list[Path]:
+    try:
+        config = load_config(config_path)
+        known_paths = {project.path.resolve() for project in config.projects.values()}
+    except Exception:  # noqa: BLE001
+        known_paths = set()
+    return discover_recent_git_repositories(
+        scan_root or Path.home(),
+        known_paths=known_paths,
+        recent_days=recent_days,
+    )
+
+
+def _workspace_root_for_onboarding(config_path: Path) -> Path:
+    try:
+        config = load_config(config_path)
+        workspace_root = getattr(config.project, "workspace_root", DEFAULT_WORKSPACE_ROOT)
+    except Exception:  # noqa: BLE001
+        workspace_root = DEFAULT_WORKSPACE_ROOT
+    return Path(workspace_root).expanduser()
+
+
+def demo_project_fallback_destination(config_path: Path) -> Path:
+    workspace_root = _workspace_root_for_onboarding(config_path)
+    for index in range(100):
+        suffix = "" if index == 0 else f"-{index}"
+        candidate = workspace_root / f"{DEMO_PROJECT_BASENAME}{suffix}"
+        if (candidate / DEMO_PROJECT_MARKER).exists():
+            return candidate
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError("Could not find a free path for the onboarding demo repo.")
+
+
+def _write_demo_project_files(target: Path) -> None:
+    for relative_name, content in DEMO_PROJECT_FILES.items():
+        destination = target / relative_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+
+
+def _init_demo_project_git(target: Path) -> None:
+    if shutil.which("git") is None or (target / ".git").exists():
+        return
+    subprocess.run(
+        ["git", "init", "-q", str(target)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def provision_demo_project_fallback(config_path: Path) -> Path:
+    target = demo_project_fallback_destination(config_path)
+    marker = target / DEMO_PROJECT_MARKER
+    if not marker.exists():
+        target.mkdir(parents=True, exist_ok=True)
+        _write_demo_project_files(target)
+    _init_demo_project_git(target)
+    ensure_project_scaffold(target)
+    return target
 
 
 def add_selected_projects(config_path: Path, selected_paths: list[Path]) -> list[KnownProject]:

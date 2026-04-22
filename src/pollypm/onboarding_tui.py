@@ -40,8 +40,11 @@ from pollypm.onboarding import (
     _detected_host_account,
     _recover_existing_accounts,
     build_onboarded_config,
+    demo_project_fallback_destination,
+    discover_recent_project_candidates,
+    provision_demo_project_fallback,
 )
-from pollypm.projects import discover_recent_git_repositories, ensure_project_scaffold, make_project_key
+from pollypm.projects import ensure_project_scaffold, make_project_key
 from pollypm.session_services import create_tmux_client
 
 ONBOARDING_STAGES = (
@@ -778,11 +781,19 @@ class OnboardingApp(App[OnboardingResult | None]):
             empty = Vertical(classes="section")
             stage.mount(empty)
             empty.mount(Static("Nothing Recent Found", classes="section-title"))
+            demo_target = demo_project_fallback_destination(self.config_path)
             empty.mount(
                 Static(
                     "No recently active git repos were found in your home folder.\n\n"
-                    "You can add projects later anytime from the control room."
+                    "You can copy a self-contained demo repo and exercise PollyPM locally without any network dependency, "
+                    "or skip this step and add projects later anytime from the control room.\n\n"
+                    f"[dim]Demo target: {demo_target}[/dim]"
                 )
+            )
+            demo_actions = Horizontal(classes="button-row")
+            empty.mount(demo_actions)
+            demo_actions.mount(
+                Button("Use Demo Repo", id="projects-use-demo", variant="primary")
             )
         else:
             selections = []
@@ -876,8 +887,7 @@ class OnboardingApp(App[OnboardingResult | None]):
             self.launch_button.focus()
 
     def _scan_recent_projects(self) -> list[Path]:
-        known_paths = {project.path.resolve() for project in self.state.known_projects.values()}
-        return discover_recent_git_repositories(Path.home(), known_paths=known_paths, recent_days=14)
+        return discover_recent_project_candidates(self.config_path)
 
     def _update_scan_loading(self) -> None:
         if self.scan_loading_widget is None:
@@ -997,6 +1007,17 @@ class OnboardingApp(App[OnboardingResult | None]):
             self.step = "controller"
             self._render_current_step()
             return
+        if button_id == "projects-use-demo":
+            try:
+                demo_path = provision_demo_project_fallback(self.config_path)
+            except Exception as exc:  # noqa: BLE001
+                self._set_message(f"Could not prepare the demo repo: {exc}")
+                return
+            self.state.recent_projects = [demo_path]
+            self.state.selected_project_paths = [demo_path]
+            self._set_message(f"Demo repo ready at {demo_path}.")
+            self._render_current_step()
+            return
         if button_id == "projects-finish":
             if self.project_selection is not None:
                 self.state.selected_project_paths = list(self.project_selection.selected)
@@ -1060,7 +1081,9 @@ class OnboardingApp(App[OnboardingResult | None]):
         if self.state.recent_projects:
             self._set_message(f"Found {len(self.state.recent_projects)} recently active repo suggestion(s).")
         else:
-            self._set_message("No recent repos matched your local commit history. You can add projects later.")
+            self._set_message(
+                "No recent repos matched your local commit history. You can use the demo repo fallback or add projects later."
+            )
         self._render_current_step()
 
 

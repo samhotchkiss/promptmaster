@@ -7,7 +7,13 @@ from pollypm.config import load_config, write_config
 from pollypm.doctor import decode_setup_tag, setup_tag_line
 from pollypm.models import KnownProject, ProviderKind
 from pollypm.projects import DEFAULT_WORKSPACE_ROOT
-from pollypm.onboarding import ConnectedAccount, build_onboarded_config
+from pollypm.onboarding import (
+    ConnectedAccount,
+    _scan_recent_projects,
+    build_onboarded_config,
+    demo_project_fallback_destination,
+    provision_demo_project_fallback,
+)
 
 
 def test_build_onboarded_config_uses_controller_for_pollypm_sessions(tmp_path: Path) -> None:
@@ -165,3 +171,70 @@ def test_decode_setup_tag_cli_round_trips(monkeypatch, tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert '"accounts": 2' in result.output
+
+
+def test_provision_demo_project_fallback_creates_self_contained_repo(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    config_path = tmp_path / "pollypm.toml"
+    git_calls: list[list[str]] = []
+
+    def _fake_run(command: list[str], **_kwargs):
+        git_calls.append(command)
+        (workspace_root / "pollypm-demo" / ".git").mkdir(parents=True, exist_ok=True)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr("pollypm.onboarding.DEFAULT_WORKSPACE_ROOT", workspace_root)
+    monkeypatch.setattr("pollypm.onboarding.shutil.which", lambda name: "/usr/bin/git" if name == "git" else None)
+    monkeypatch.setattr("pollypm.onboarding.subprocess.run", _fake_run)
+
+    target = provision_demo_project_fallback(config_path)
+
+    assert target == demo_project_fallback_destination(config_path)
+    assert (target / ".pollypm-demo-fallback").exists()
+    assert (target / "README.md").exists()
+    assert (target / "demo_app.py").exists()
+    assert (target / "tests" / "test_demo_app.py").exists()
+    assert (target / ".pollypm").exists()
+    assert git_calls == [["git", "init", "-q", str(target)]]
+
+    same_target = provision_demo_project_fallback(config_path)
+    assert same_target == target
+    assert git_calls == [["git", "init", "-q", str(target)]]
+
+
+def test_scan_recent_projects_offers_demo_repo_when_discovery_is_empty(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "pollypm.toml"
+    demo_path = tmp_path / "workspace" / "pollypm-demo"
+    messages: list[str] = []
+
+    monkeypatch.setattr(
+        "pollypm.onboarding.discover_recent_project_candidates",
+        lambda _config_path: [],
+    )
+    monkeypatch.setattr(
+        "pollypm.onboarding.demo_project_fallback_destination",
+        lambda _config_path: demo_path,
+    )
+    monkeypatch.setattr(
+        "pollypm.onboarding.provision_demo_project_fallback",
+        lambda _config_path: demo_path,
+    )
+    monkeypatch.setattr(
+        "pollypm.onboarding.add_selected_projects",
+        lambda _config_path, selected_paths: [
+            KnownProject(key="pollypm_demo", path=selected_paths[0], name="PollyPM Demo")
+        ],
+    )
+    monkeypatch.setattr("pollypm.onboarding.typer.confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("pollypm.onboarding.typer.echo", lambda message="": messages.append(message))
+
+    projects = _scan_recent_projects(config_path)
+
+    assert [project.path for project in projects] == [demo_path]
+    assert any("demo repo" in message.lower() for message in messages)

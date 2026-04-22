@@ -310,3 +310,37 @@ def test_onboarding_progress_lines_mark_done_current_and_up_next() -> None:
     assert f"✓[/] [#3ddc84]{ONBOARDING_STAGES[0][1]}" in lines[0]
     assert f"◉[/] [#5b8aff bold]{ONBOARDING_STAGES[1][1]}" in lines[1]
     assert f"○[/] [#6b7a88]{ONBOARDING_STAGES[2][1]}" in lines[2]
+
+
+def test_projects_step_can_offer_demo_repo_fallback(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        demo_path = tmp_path / "workspace" / "pollypm-demo"
+        monkeypatch.setattr(
+            "pollypm.onboarding_tui.demo_project_fallback_destination",
+            lambda _config_path: demo_path,
+        )
+        monkeypatch.setattr(
+            "pollypm.onboarding_tui.provision_demo_project_fallback",
+            lambda _config_path: demo_path,
+        )
+
+        app = OnboardingApp(tmp_path / "pollypm.toml")
+        app.step = "projects"
+        app.state.scan_started = True
+        app.state.scan_complete = True
+        app.state.recent_projects = []
+        app.state.selected_project_paths = []
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#projects-use-demo") is not None
+            await pilot.click("#projects-use-demo")
+            await pilot.pause()
+
+            assert app.state.recent_projects == [demo_path]
+            assert app.state.selected_project_paths == [demo_path]
+            assert app.project_selection is not None
+            assert list(app.project_selection.selected) == [demo_path]
+            assert "Demo repo ready" in str(app.message_widget.render())
+
+    asyncio.run(run())
