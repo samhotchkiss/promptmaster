@@ -89,6 +89,10 @@ def project_settings_env(tmp_path: Path, monkeypatch):
         "pollypm.cockpit_project_settings.PollyPMService",
         lambda _path: service,
     )
+    monkeypatch.setattr(
+        "pollypm.cockpit_settings_history.Path.home",
+        lambda: tmp_path / "home",
+    )
     from pollypm.cockpit_project_settings import PollyProjectSettingsApp
 
     return {
@@ -129,9 +133,15 @@ def test_project_settings_renders_worker_and_account(project_settings_env) -> No
     _run(body())
 
 
-def test_project_settings_reset_and_switch_provider(project_settings_env) -> None:
+def test_project_settings_reset_and_switch_provider(project_settings_env, monkeypatch) -> None:
     app = project_settings_env["app"]
     service = project_settings_env["service"]
+
+    def _auto_confirm(_screen, callback=None, **_kwargs):
+        if callback is not None:
+            callback(True)
+
+    monkeypatch.setattr(app, "push_screen", _auto_confirm)
 
     async def body() -> None:
         async with app.run_test(size=(120, 30)) as pilot:
@@ -142,9 +152,14 @@ def test_project_settings_reset_and_switch_provider(project_settings_env) -> Non
             app.on_switch_codex(None)
             assert service.switched == [("worker-alpha", "codex_main")]
             assert "Switched to codex" in str(app.query_one("#message").render())
-            app.action_undo_recent_change()
+
+        new_app = type(app)(project_settings_env["config_path"], "alpha")
+        monkeypatch.setattr(new_app, "push_screen", _auto_confirm)
+        async with new_app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            new_app.action_undo_recent_change()
             assert service.switched[-1] == ("worker-alpha", "claude_main")
-            assert "Undid" in str(app.query_one("#message").render())
+            assert "Undid" in str(new_app.query_one("#message").render())
 
     _run(body())
 

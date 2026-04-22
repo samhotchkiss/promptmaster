@@ -104,7 +104,13 @@ from pollypm.cockpit_sections.action_bar import render_project_action_bar
 from pollypm.cockpit_settings_accounts import SETTINGS_ACCOUNT_ACTIONS
 from pollypm.cockpit_settings_history import (
     UndoAction,
+    consume_settings_history,
+    history_rationale_for_account,
+    history_rationale_for_project,
+    latest_settings_history_entry,
+    load_settings_history,
     make_undo_action,
+    record_settings_history,
     undo_expired,
     undo_expires_text,
 )
@@ -2204,6 +2210,10 @@ def _gather_settings_data(
         cached_usages = load_cached_account_usage(config_path) if config is not None else {}
     except Exception:  # noqa: BLE001
         cached_usages = {}
+    try:
+        history = load_settings_history()
+    except Exception:  # noqa: BLE001
+        history = []
     for idx, status in enumerate(account_statuses):
         provider = getattr(status, "provider", None)
         provider_name = (
@@ -2242,7 +2252,11 @@ def _gather_settings_data(
                 "auth_storage": getattr(status, "auth_storage", "") or "",
                 "budget_summary": budget_summary,
                 "budget_level": budget_level,
-                "rationale": (
+                "rationale": history_rationale_for_account(
+                    status.key,
+                    entries=history,
+                )
+                or (
                     "Provider budgets come from the cached account_usage sampler so the UI stays offline-safe."
                 ),
                 "budget_rationale": budget_rationale,
@@ -2262,6 +2276,12 @@ def _gather_settings_data(
                 "rationale",
                 "Tracked projects stay visible in the cockpit and feed task counts.",
             )
+            history_rationale = history_rationale_for_project(
+                project["key"],
+                entries=history,
+            )
+            if history_rationale:
+                project["rationale"] = history_rationale
 
     if config is not None and accounts:
         recent_by_account = _collect_recent_tasks_by_account(
@@ -2759,8 +2779,122 @@ class PollySettingsPaneApp(App[None]):
         if undo_expired(self._undo_action):
             self._undo_action = None
 
-    def _record_undo(self, label: str, apply: Callable[[], None]) -> None:
-        self._undo_action = make_undo_action(label, apply)
+    def _record_undo(
+        self,
+        label: str,
+        apply: Callable[[], None],
+        *,
+        kind: str = "",
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        entry = None
+        if kind:
+            entry = record_settings_history(kind, label, payload)
+        self._undo_action = make_undo_action(
+            label,
+            apply,
+            entry_id=entry.entry_id if entry is not None else "",
+            kind=kind,
+            payload=payload,
+        )
+
+    def _undo_action_from_history(self) -> UndoAction | None:
+        entry = latest_settings_history_entry()
+        if entry is None:
+            return None
+        config = load_config(self.config_path)
+
+        if entry.kind == "account.failover":
+            account = str(entry.payload.get("account") or "")
+            enabled = bool(entry.payload.get("enabled"))
+            if not account:
+                return None
+            setter = getattr(self.service, "toggle_failover_account", None)
+            if setter is None:
+                return None
+
+            def _apply() -> None:
+                current = account in (getattr(config.pollypm, "failover_accounts", []) or [])
+                if current != enabled:
+                    setter(account)
+
+            return make_undo_action(
+                entry.label,
+                _apply,
+                entry_id=entry.entry_id,
+                kind=entry.kind,
+                payload=entry.payload,
+            )
+
+        if entry.kind == "account.controller":
+            account = str(entry.payload.get("account") or "")
+            previous = str(entry.payload.get("previous_account") or "")
+            if not account or not previous:
+                return None
+            setter = getattr(self.service, "set_controller_account", None)
+            if setter is None:
+                return None
+
+            def _apply() -> None:
+                setter(previous)
+
+            return make_undo_action(
+                entry.label,
+                _apply,
+                entry_id=entry.entry_id,
+                kind=entry.kind,
+                payload=entry.payload,
+            )
+
+        if entry.kind == "project.tracked":
+            project_key = str(entry.payload.get("project_key") or "")
+            previous = bool(entry.payload.get("previous"))
+            if not project_key:
+                return None
+            setter = getattr(self.service, "set_project_tracked", None)
+            if setter is None:
+                return None
+
+            def _apply() -> None:
+                setter(project_key, previous)
+
+            return make_undo_action(
+                entry.label,
+                _apply,
+                entry_id=entry.entry_id,
+                kind=entry.kind,
+                payload=entry.payload,
+            )
+
+        if entry.kind == "permissions.toggle":
+            previous = bool(entry.payload.get("previous"))
+            setter = getattr(self.service, "set_open_permissions_default", None)
+            if setter is None:
+                return None
+
+            def _apply() -> None:
+                setter(previous)
+
+            return make_undo_action(
+                entry.label,
+                _apply,
+                entry_id=entry.entry_id,
+                kind=entry.kind,
+                payload=entry.payload,
+            )
+
+        return None
+
+    def _current_undo_action(self) -> UndoAction | None:
+        self._clear_expired_undo()
+        if self._undo_action is not None:
+            return self._undo_action
+        self._undo_action = self._undo_action_from_history()
+        return self._undo_action
+
+    def _consume_undo_history(self, action: UndoAction) -> None:
+        if action.entry_id:
+            consume_settings_history(action.entry_id)
 
     def _render_preview(self, key: str) -> None:
         self._clear_expired_undo()
@@ -2803,10 +2937,11 @@ class PollySettingsPaneApp(App[None]):
                 "[b]Preview[/b]",
                 "[dim]About is a quick diff-free summary of the install and disk footprint.[/dim]",
             ]
-            if self._undo_action is not None:
+            undo_action = self._current_undo_action()
+            if undo_action is not None:
                 lines.append(
-                    f"[dim]Undo available for {_escape(self._undo_action.label)} "
-                    f"until {undo_expires_text(self._undo_action)}[/dim]"
+                    f"[dim]Undo available for {_escape(undo_action.label)} "
+                    f"until {undo_expires_text(undo_action)}[/dim]"
                 )
             self.preview.update("\n".join(lines))
             return
@@ -2827,10 +2962,11 @@ class PollySettingsPaneApp(App[None]):
             f"[dim]Actions:[/] c add Claude · o add Codex · x remove selected",
             "[dim]Keyboard:[/] b permissions · m controller · v failover · u undo",
         ]
-        if self._undo_action is not None:
+        undo_action = self._current_undo_action()
+        if undo_action is not None:
             lines.append(
-                f"[dim]Undo available:[/] {_escape(self._undo_action.label)} "
-                f"until {undo_expires_text(self._undo_action)}"
+                f"[dim]Undo available:[/] {_escape(undo_action.label)} "
+                f"until {undo_expires_text(undo_action)}"
             )
         recent = selected.get("recent_tasks") or []
         if recent:
@@ -2855,10 +2991,11 @@ class PollySettingsPaneApp(App[None]):
             f"Rationale: {_escape(selected.get('rationale') or 'No rationale available.')}",
             "[dim]Keyboard:[/] t toggle project · u undo",
         ]
-        if self._undo_action is not None:
+        undo_action = self._current_undo_action()
+        if undo_action is not None:
             lines.append(
-                f"[dim]Undo available:[/] {_escape(self._undo_action.label)} "
-                f"until {undo_expires_text(self._undo_action)}"
+                f"[dim]Undo available:[/] {_escape(undo_action.label)} "
+                f"until {undo_expires_text(undo_action)}"
             )
         return "\n".join(lines)
 
@@ -3355,6 +3492,11 @@ class PollySettingsPaneApp(App[None]):
             self._record_undo(
                 f"permissions {'on' if previous else 'off'}",
                 lambda: self.service.set_open_permissions_default(previous),
+                kind="permissions.toggle",
+                payload={
+                    "previous": previous,
+                    "enabled": enabled,
+                },
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -3398,6 +3540,12 @@ class PollySettingsPaneApp(App[None]):
             self._record_undo(
                 f"project {key} tracked {'on' if previous else 'off'}",
                 lambda: setter(key, previous),
+                kind="project.tracked",
+                payload={
+                    "project_key": key,
+                    "previous": previous,
+                    "enabled": not previous,
+                },
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -3424,6 +3572,11 @@ class PollySettingsPaneApp(App[None]):
                 self._record_undo(
                     f"controller {previous}",
                     lambda: setter(previous),
+                    kind="account.controller",
+                    payload={
+                        "account": key,
+                        "previous_account": previous,
+                    },
                 )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -3451,6 +3604,11 @@ class PollySettingsPaneApp(App[None]):
             self._record_undo(
                 f"failover {key} {'on' if previous else 'off'}",
                 lambda: setter(key),
+                kind="account.failover",
+                payload={
+                    "account": key,
+                    "enabled": not previous,
+                },
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -3521,8 +3679,7 @@ class PollySettingsPaneApp(App[None]):
         )
 
     def action_undo_recent_change(self) -> None:
-        self._clear_expired_undo()
-        action = self._undo_action
+        action = self._current_undo_action()
         if action is None:
             try:
                 self.notify("Nothing recent to undo.", timeout=1.2)
@@ -3531,6 +3688,7 @@ class PollySettingsPaneApp(App[None]):
             return
         try:
             action.apply()
+            self._consume_undo_history(action)
             self.notify(f"Undid {action.label}.", timeout=1.5)
         except Exception as exc:  # noqa: BLE001
             try:

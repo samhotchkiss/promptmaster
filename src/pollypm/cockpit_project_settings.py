@@ -20,12 +20,16 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from pollypm.config import load_config
 from pollypm.cockpit_settings_history import (
     UndoAction,
+    consume_settings_history,
+    latest_settings_history_entry,
     make_undo_action,
+    record_settings_history,
     undo_expired,
 )
 from pollypm.models import ProviderKind
@@ -167,6 +171,13 @@ class PollyProjectSettingsApp(App[None]):
         label = provider.lower()
         return f"[b]{label}[/b] · budget tracked against {account_label}"
 
+    def _current_worker(self):
+        config = load_config(self.config_path)
+        for session in config.sessions.values():
+            if session.role == "worker" and session.project == self.project_key and session.enabled:
+                return session
+        return None
+
     def _render_recent_tasks(self, worker, *, config_path: Path) -> str:
         config = load_config(config_path)
         project = config.projects.get(self.project_key)
@@ -211,30 +222,68 @@ class PollyProjectSettingsApp(App[None]):
                 return name
         return None
 
-    def _record_undo(self, label: str, apply: Callable[[], None]) -> None:
-        self._undo_action = make_undo_action(label, apply)
+    def _record_undo(
+        self,
+        label: str,
+        apply: Callable[[], None],
+        *,
+        kind: str = "",
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        entry = None
+        if kind:
+            entry = record_settings_history(kind, label, payload)
+        self._undo_action = make_undo_action(
+            label,
+            apply,
+            entry_id=entry.entry_id if entry is not None else "",
+            kind=kind,
+            payload=payload,
+        )
 
     def _clear_undo(self) -> None:
         self._undo_action = None
 
+    def _history_undo_action(self) -> UndoAction | None:
+        entry = latest_settings_history_entry()
+        if entry is None or entry.kind != "session.switch":
+            return None
+        session_name = str(entry.payload.get("session_name") or "")
+        previous_account = str(entry.payload.get("from_account") or "")
+        if not session_name or not previous_account:
+            return None
+
+        def _apply() -> None:
+            PollyPMService(self.config_path).switch_session_account(session_name, previous_account)
+
+        return make_undo_action(
+            entry.label,
+            _apply,
+            entry_id=entry.entry_id,
+            kind=entry.kind,
+            payload=entry.payload,
+        )
+
+    def _consume_undo_history(self, action: UndoAction) -> None:
+        if action.entry_id:
+            consume_settings_history(action.entry_id)
+
     @on(Button.Pressed, "#reset-session")
     def on_reset(self, _event: Button.Pressed | None) -> None:
-        config = load_config(self.config_path)
-        worker = None
-        for session in config.sessions.values():
-            if session.role == "worker" and session.project == self.project_key and session.enabled:
-                worker = session
-                break
+        worker = self._current_worker()
         if worker is None:
             self._notify("No worker session to reset.")
             return
-        try:
-            PollyPMService(self.config_path).stop_session(worker.name)
-            self._notify(f"Session {worker.name} stopped. Press N to relaunch.")
-        except Exception as exc:  # noqa: BLE001
-            self._notify(f"Reset failed: {exc}")
-        self._clear_undo()
-        self._refresh()
+        self.push_screen(
+            _SettingsConfirmModal(
+                title="Reset worker session?",
+                prompt=(
+                    f"Stop {worker.name} now? This will leave the project without an active worker until relaunched."
+                ),
+                confirm_label="Reset",
+            ),
+            callback=lambda confirmed: self._confirm_reset(worker.name, confirmed),
+        )
 
     @on(Button.Pressed, "#switch-claude")
     def on_switch_claude(self, _event: Button.Pressed | None) -> None:
@@ -248,17 +297,25 @@ class PollyProjectSettingsApp(App[None]):
     def on_undo(self, _event: Button.Pressed) -> None:
         self.action_undo_recent_change()
 
+    def _confirm_reset(self, worker_name: str, confirmed: bool) -> None:
+        if not confirmed:
+            return
+        try:
+            PollyPMService(self.config_path).stop_session(worker_name)
+            self._notify(f"Session {worker_name} stopped. Press N to relaunch.")
+        except Exception as exc:  # noqa: BLE001
+            self._notify(f"Reset failed: {exc}")
+            return
+        self._clear_undo()
+        self._refresh()
+
     def _switch_provider(self, target_provider: ProviderKind) -> None:
-        config = load_config(self.config_path)
-        worker = None
-        for session in config.sessions.values():
-            if session.role == "worker" and session.project == self.project_key and session.enabled:
-                worker = session
-                break
+        worker = self._current_worker()
         if worker is None:
             self._notify("No worker session to switch.")
             return
         target_account = None
+        config = load_config(self.config_path)
         for name, account in config.accounts.items():
             if account.provider is target_provider:
                 target_account = name
@@ -269,19 +326,55 @@ class PollyProjectSettingsApp(App[None]):
         if worker.provider is target_provider:
             self._notify(f"Already using {target_provider.value}.")
             return
+        self.push_screen(
+            _SettingsConfirmModal(
+                title=f"Switch {worker.name} to {target_provider.value}?",
+                prompt=(
+                    f"Move {worker.name} from {worker.account} to {target_account}. The session will restart."
+                ),
+                confirm_label="Switch",
+            ),
+            callback=lambda confirmed: self._confirm_switch_provider(
+                worker.name,
+                worker.account,
+                target_account,
+                target_provider,
+                confirmed,
+            ),
+        )
+
+    def _confirm_switch_provider(
+        self,
+        worker_name: str,
+        previous_account: str,
+        target_account: str,
+        target_provider: ProviderKind,
+        confirmed: bool,
+    ) -> None:
+        if not confirmed:
+            return
         try:
-            previous_account = worker.account
-            PollyPMService(self.config_path).switch_session_account(worker.name, target_account)
+            PollyPMService(self.config_path).switch_session_account(worker_name, target_account)
             self._record_undo(
-                f"restore {worker.name} -> {previous_account}",
+                f"switch {worker_name} to {target_account}",
                 lambda: PollyPMService(self.config_path).switch_session_account(
-                    worker.name,
+                    worker_name,
                     previous_account,
                 ),
+                kind="session.switch",
+                payload={
+                    "session_name": worker_name,
+                    "from_account": previous_account,
+                    "to_account": target_account,
+                    "provider": target_provider.value,
+                },
             )
-            self._notify(f"Switched to {target_provider.value} ({target_account}). Session restarted.")
+            self._notify(
+                f"Switched to {target_provider.value} ({target_account}). Session restarted."
+            )
         except Exception as exc:  # noqa: BLE001
             self._notify(f"Switch failed: {exc}")
+            return
         self._refresh()
 
     def action_refresh(self) -> None:
@@ -293,10 +386,13 @@ class PollyProjectSettingsApp(App[None]):
             self._clear_undo()
             action = None
         if action is None:
+            action = self._history_undo_action()
+        if action is None:
             self._notify("Nothing recent to undo.")
             return
         try:
             action.apply()
+            self._consume_undo_history(action)
             self._notify(f"Undid {action.label}.")
         except Exception as exc:  # noqa: BLE001
             self._notify(f"Undo failed: {exc}")
@@ -309,3 +405,60 @@ class PollyProjectSettingsApp(App[None]):
 
     def action_show_keyboard_help(self) -> None:
         self._notify("j/k move, Enter apply preview target, u undo, r refresh.")
+
+
+class _SettingsConfirmModal(ModalScreen[bool]):
+    CSS = """
+    Screen {
+        align: center middle;
+    }
+    #settings-confirm {
+        width: 72;
+        height: auto;
+        padding: 1 2;
+        background: $panel;
+        border: heavy $warning;
+    }
+    #settings-confirm-title {
+        padding-bottom: 1;
+        text-style: bold;
+    }
+    #settings-confirm-buttons {
+        height: auto;
+        align-horizontal: right;
+        padding-top: 1;
+    }
+    #settings-confirm-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        prompt: str,
+        confirm_label: str = "Confirm",
+        cancel_label: str = "Cancel",
+    ) -> None:
+        super().__init__()
+        self._title = title
+        self._prompt = prompt
+        self._confirm_label = confirm_label
+        self._cancel_label = cancel_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-confirm"):
+            yield Static(self._title, id="settings-confirm-title")
+            yield Static(self._prompt)
+            with Horizontal(id="settings-confirm-buttons"):
+                yield Button(self._cancel_label, id="cancel")
+                yield Button(self._confirm_label, variant="primary", id="confirm")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)

@@ -336,6 +336,10 @@ def settings_env(tmp_path: Path, monkeypatch):
         "pollypm.cockpit_ui.collect_settings_projects",
         _collect_project_rows,
     )
+    monkeypatch.setattr(
+        "pollypm.cockpit_settings_history.Path.home",
+        lambda: tmp_path / "home",
+    )
     service = _FakeService(statuses, fake_config)
 
     from pollypm.cockpit_ui import PollySettingsPaneApp
@@ -589,6 +593,36 @@ def test_about_section_lists_version_and_disk(settings_env) -> None:
             assert "PollyPM version" in about
             assert "Config path" in about
             assert "Disk usage" in about
+
+    _run(body())
+
+
+def test_settings_data_uses_history_rationale(settings_env, monkeypatch, tmp_path: Path) -> None:
+    history_home = tmp_path / "home"
+    monkeypatch.setattr("pollypm.cockpit_settings_history.Path.home", lambda: history_home)
+
+    from pollypm.cockpit_settings_history import record_settings_history
+
+    record_settings_history(
+        "account.failover",
+        "failover claude_demo on",
+        {"account": "claude_demo", "enabled": True},
+    )
+    record_settings_history(
+        "project.tracked",
+        "project alpha tracked off",
+        {"project_key": "alpha", "previous": True, "enabled": False},
+    )
+
+    app = settings_env["app"]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            account = next(a for a in app.data.accounts if a["key"] == "claude_demo")
+            assert "Failover enabled for claude_demo" in account["rationale"]
+            project = next(p for p in app.data.projects if p["key"] == "alpha")
+            assert "marked paused" in project["rationale"]
 
     _run(body())
 
