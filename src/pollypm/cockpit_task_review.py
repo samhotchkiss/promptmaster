@@ -15,10 +15,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from rich.console import Group
-from rich.syntax import Syntax
-from rich.text import Text
-
 
 @dataclass(slots=True)
 class ReviewSection:
@@ -154,13 +150,6 @@ def load_task_review_diff(
     )
 
 
-def load_task_review_inline_diff(
-    artifact: ReviewArtifact | None,
-) -> ReviewDiffBundle | None:
-    """Load inline review diff content from a captured review artifact only."""
-    return _artifact_review_diff(artifact)
-
-
 def render_task_review_artifact(artifact: ReviewArtifact | None) -> str:
     """Render a review artifact bundle as scrollable plain text."""
     if artifact is None:
@@ -177,28 +166,6 @@ def render_task_review_artifact(artifact: ReviewArtifact | None) -> str:
             ]
         )
     return "\n".join(lines).rstrip()
-
-
-def render_task_review_inline_diff(bundle: ReviewDiffBundle | None):
-    """Render an inline review diff as syntax-highlighted rich content."""
-    if bundle is None:
-        return "No inline diff is available for this task yet."
-    renderables: list[object] = [Text(bundle.source_label, style="bold"), Text("")]
-    for diff_file in bundle.files:
-        renderables.append(Text(diff_file.path, style="cyan"))
-        renderables.append(
-            Syntax(
-                collapse_review_diff_file(diff_file),
-                "diff",
-                line_numbers=False,
-                word_wrap=False,
-            )
-        )
-        hidden_lines = review_diff_hidden_line_count(diff_file)
-        if hidden_lines:
-            renderables.append(Text(f"... {hidden_lines} more lines hidden", style="dim"))
-        renderables.append(Text(""))
-    return Group(*renderables)
 
 
 def _candidate_review_paths(
@@ -425,10 +392,8 @@ __all__ = [
     "ReviewSection",
     "extract_confidence_score",
     "load_task_review_diff",
-    "load_task_review_inline_diff",
     "load_task_review_artifact",
     "render_task_review_artifact",
-    "render_task_review_inline_diff",
     "review_diff_hidden_line_count",
     "review_diff_is_large",
 ]
