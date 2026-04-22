@@ -120,7 +120,6 @@ class CockpitPresence:
     _cached_attached: bool | None = None
     _cached_at: float = 0.0
     _cached_session: str | None = None
-    _heartbeat_states: dict[str, tuple[str | None, int]] = field(default_factory=dict)
 
     def _calm_mode(self) -> bool:
         value = os.environ.get("POLLY_CALM", "")
@@ -194,25 +193,19 @@ class CockpitPresence:
             return ARC_SPINNER[0]
         return ARC_SPINNER[spinner_index % len(ARC_SPINNER)]
 
-    def heartbeat_frame(self, spinner_index: int) -> str:
-        frames = ("♥", "♡")
-        if not self.should_animate():
-            return frames[0]
-        return frames[spinner_index % len(frames)]
 
-    def heartbeat_frame_for(
-        self,
-        session_name: str,
-        heartbeat_at: str | None,
-    ) -> str:
-        frames = ("♥", "♡")
-        if not self.should_animate():
-            return frames[0]
-        previous_at, frame_index = self._heartbeat_states.get(session_name, (None, 0))
-        if heartbeat_at and heartbeat_at != previous_at:
-            frame_index = (frame_index + 1) % len(frames)
-        self._heartbeat_states[session_name] = (heartbeat_at, frame_index)
-        return frames[frame_index]
+def _viewer_attached() -> bool:
+    """Best-effort check for a live terminal viewer.
+
+    The legacy rail is a direct TTY renderer, so this stays local to the
+    rail module rather than depending on the newer cockpit presence
+    stack.
+    """
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:  # noqa: BLE001
+        return False
+
 
 # ── Rail data model + router ─────────────────────────────────────────────
 #
@@ -229,9 +222,6 @@ class CockpitItem:
     label: str
     state: str
     selectable: bool = True
-    session_name: str | None = None
-    work_state: str | None = None
-    heartbeat_at: str | None = None
 
 
 def _selected_project_key(selected: object) -> str | None:
@@ -398,6 +388,7 @@ class CockpitRouter:
         # value: (db_mtime, git_mtime, is_active, has_working_task)
         # Skips re-opening SQLite on every 0.8s cockpit tick when nothing changed.
         self._project_activity_cache: dict[str, tuple[float, float, bool, bool]] = {}
+        self._pinned_projects_cache: set[str] | None = None
 
     def _presence(self) -> CockpitPresence:
         presence = getattr(self, "presence", None)
@@ -588,6 +579,29 @@ class CockpitRouter:
             self._state_cache_mtime_ns = None
         self._state_dirty_since = None
 
+    def pinned_projects(self) -> set[str]:
+        data = self._load_state()
+        value = data.get("pinned_projects")
+        if not isinstance(value, list):
+            return set()
+        return {item for item in value if isinstance(item, str) and item}
+
+    def is_project_pinned(self, project_key: str) -> bool:
+        return project_key in self.pinned_projects()
+
+    def toggle_pinned_project(self, project_key: str) -> bool:
+        data = self._load_state()
+        current = self.pinned_projects()
+        if project_key in current:
+            current.remove(project_key)
+            pinned = False
+        else:
+            current.add(project_key)
+            pinned = True
+        data["pinned_projects"] = sorted(current)
+        self._write_state(data)
+        return pinned
+
     def rail_width(self) -> int:
         """Return the persisted rail width, falling back to the default."""
         data = self._load_state()
@@ -733,6 +747,11 @@ class CockpitRouter:
         supervisor = self._load_supervisor()
         config = supervisor.config
         launches, windows, alerts, _leases, _errors = supervisor.status()
+        recent_events = []
+        try:
+            recent_events = list(supervisor.store.recent_events(limit=300))
+        except Exception:  # noqa: BLE001
+            recent_events = []
 
         cockpit_state = self._load_state()
         ctx = RailContext(
@@ -757,7 +776,6 @@ class CockpitRouter:
         collapsed_sections = self._collapsed_rail_sections_cached(config)
         grouped_registrations = self._grouped_rail_registrations(config, registry)
         grouped: dict[str, list[CockpitItem]] = {name: [] for name in RAIL_SECTIONS}
-        project_session_map = self._project_session_map(launches)
 
         for section, registrations in grouped_registrations.items():
             for reg in registrations:
@@ -771,12 +789,6 @@ class CockpitRouter:
                         state=row.state,
                         selectable=row.selectable,
                     )
-                    self._attach_session_metadata(
-                        item,
-                        launches=launches,
-                        supervisor=supervisor,
-                        project_session_map=project_session_map,
-                    )
                     grouped.setdefault(section, []).append(item)
 
         items: list[CockpitItem] = []
@@ -784,7 +796,10 @@ class CockpitRouter:
             rows = grouped.get(section) or []
             if not rows:
                 continue
-            if section in collapsed_sections:
+            active_rows = [row for row in rows if self._row_is_active(row)]
+            if section in collapsed_sections or (
+                section not in {"top", "system"} and not active_rows
+            ):
                 # Collapsed sections render as a disabled header row so
                 # the user can still see the section exists. Expansion
                 # is a runtime concept tracked via set_selected_key.
@@ -799,56 +814,161 @@ class CockpitRouter:
                 continue
             items.extend(rows)
 
-        return items
+        project_session_map: dict[str, str] = {}
+        for launch in launches:
+            if launch.session.role in {"operator-pm", "heartbeat-supervisor", "triage", "reviewer"}:
+                continue
+            project_session_map.setdefault(launch.session.project, launch.session.name)
 
-    def _attach_session_metadata(
+        return self._decorate_project_items(
+            items,
+            selected_project=_selected_project_key(cockpit_state.get("selected")),
+            launches=launches,
+            recent_events=recent_events,
+            project_session_map=project_session_map,
+        )
+
+    def _decorate_project_items(
         self,
-        item: CockpitItem,
+        items: list[CockpitItem],
         *,
+        selected_project: str | None,
         launches,
-        supervisor,
+        recent_events: list,
         project_session_map: dict[str, str],
-    ) -> None:
-        session_name = self._session_name_for_item(item, project_session_map)
-        if session_name is None:
-            return
-        item.session_name = session_name
-        launch = next((entry for entry in launches if entry.session.name == session_name), None)
-        if launch is None:
-            return
-        item.work_state = self._work_state_for_item_state(item.state, launch.session.role)
-        try:
-            heartbeat = supervisor.store.latest_heartbeat(session_name)
-        except Exception:  # noqa: BLE001
-            heartbeat = None
-        item.heartbeat_at = getattr(heartbeat, "created_at", None)
+    ) -> list[CockpitItem]:
+        """Keep project rows together while decorating their presentation."""
+        from pollypm.cockpit_sections.base import _iso_to_dt, _spark_bar
 
-    def _session_name_for_item(
+        first_project = next((idx for idx, item in enumerate(items) if item.key.startswith("project:")), None)
+        if first_project is None:
+            return items
+        last_project = max(
+            (idx for idx, item in enumerate(items) if item.key.startswith("project:")),
+            default=None,
+        )
+        if last_project is None:
+            return items
+
+        prefix = list(items[:first_project])
+        region = list(items[first_project : last_project + 1])
+        suffix = list(items[last_project + 1 :])
+
+        project_event_spark = self._project_activity_sparkline(
+            project_session_map,
+            recent_events,
+            _iso_to_dt=_iso_to_dt,
+            _spark_bar=_spark_bar,
+        )
+
+        project_blocks: list[tuple[str, list[CockpitItem], bool, bool]] = []
+        current_key: str | None = None
+        current_block: list[CockpitItem] = []
+        current_pinned = False
+        current_selected = False
+
+        def flush_block() -> None:
+            nonlocal current_key, current_block, current_pinned, current_selected
+            if current_key is not None and current_block:
+                project_blocks.append((current_key, current_block, current_pinned, current_selected))
+            current_key = None
+            current_block = []
+            current_pinned = False
+            current_selected = False
+
+        for item in region:
+            if item.key.startswith("project:"):
+                parts = item.key.split(":")
+                if len(parts) == 2:
+                    flush_block()
+                    current_key = parts[1]
+                    current_selected = current_key == selected_project
+                    current_pinned = self.is_project_pinned(current_key)
+                    current_block = [self._decorate_project_row(item, project_event_spark.get(current_key))]
+                    continue
+                if current_key is not None and len(parts) > 2 and parts[1] == current_key:
+                    current_block.append(item)
+                    continue
+            flush_block()
+            prefix.append(item)
+        flush_block()
+
+        project_region: list[CockpitItem] = []
+        if project_blocks:
+            project_blocks.sort(
+                key=lambda row: (
+                    not row[2],
+                    not row[3],
+                    row[0].lower(),
+                ),
+            )
+            for _key, block, _pinned, _selected in project_blocks:
+                project_region.extend(block)
+        return [*prefix, *project_region, *suffix]
+
+    def _decorate_project_row(self, item: CockpitItem, sparkline: str | None) -> CockpitItem:
+        label = item.label
+        if self.is_project_pinned(item.key.split(":", 1)[1]):
+            label = f"📌 {label}"
+        if sparkline:
+            label = f"{label} {sparkline}"
+        return replace(item, label=label)
+
+    def _project_activity_sparkline(
         self,
-        item: CockpitItem,
         project_session_map: dict[str, str],
-    ) -> str | None:
-        if item.key == "polly":
-            return "operator"
-        if item.key == "russell":
-            return "reviewer"
-        if not item.key.startswith("project:") or item.key.count(":") != 1:
-            return None
-        project_key = item.key.split(":", 1)[1]
-        return project_session_map.get(project_key)
+        recent_events: list,
+        *,
+        _iso_to_dt,
+        _spark_bar,
+    ) -> dict[str, str]:
+        from datetime import UTC, datetime
 
-    def _work_state_for_item_state(self, state: str, role: str) -> str | None:
-        if state == "dead":
-            return "exited"
-        if state.startswith("!"):
-            return "stuck"
-        if state.endswith("working"):
-            return "writing"
-        if role == "reviewer":
-            return "reviewing"
-        if state.endswith("live") or state in {"idle", "ready"}:
-            return "idle"
-        return None
+        if not recent_events:
+            return {}
+        now = datetime.now(UTC)
+        buckets: dict[str, list[int]] = {key: [0] * 10 for key in project_session_map}
+        session_to_project = {
+            session_name: project_key
+            for project_key, session_name in project_session_map.items()
+        }
+        for event in recent_events:
+            project_key = session_to_project.get(getattr(event, "session_name", ""))
+            if project_key is None:
+                continue
+            dt = _iso_to_dt(getattr(event, "created_at", None))
+            if dt is None:
+                continue
+            age_minutes = int((now - dt).total_seconds() // 60)
+            if age_minutes < 0 or age_minutes >= 60:
+                continue
+            bucket = 9 - (age_minutes // 6)
+            buckets[project_key][bucket] += 1
+        result: dict[str, str] = {}
+        for project_key, values in buckets.items():
+            if any(values):
+                result[project_key] = self._sparkline(values)
+            else:
+                result[project_key] = "·" * len(values)
+        return result
+
+    def _sparkline(self, values: list[int]) -> str:
+        from pollypm.cockpit_sections.base import _spark_bar
+
+        if not values:
+            return ""
+        if max(values) <= 0:
+            return "·" * len(values)
+        return _spark_bar(values)
+
+    def _row_is_active(self, item: CockpitItem) -> bool:
+        state = item.state.strip().lower()
+        if not state or state in {"idle", "separator", "sub"}:
+            return False
+        return any(
+            marker in state
+            for marker in ("working", "live", "watch", "ready", "alert", "active")
+        ) or state.startswith("!")
 
     def _rail_registry(self):
         """Return the plugin-host rail registry for the active root dir."""
@@ -1738,6 +1858,7 @@ class PollyCockpitRail:
         self.selected_key = self.router.selected_key()
         self.spinner_index = 0
         self.slogan_started_at = time.time()
+        self._ticker_started_at = time.monotonic()
         self._last_items: list[CockpitItem] = []
         self._slogan_phase = 0
 
@@ -1797,11 +1918,13 @@ class PollyCockpitRail:
             self.router.route_selected("inbox")
             self.selected_key = "inbox"
             return True
-        if key in {b"\x0b"}:
-            # Raw rail has no palette UI of its own; jump to settings so
-            # the user's ctrl-k habit still lands in the palette-enabled pane.
-            self.router.route_selected("settings")
-            self.selected_key = "settings"
+        if key in {b"t", b"T"}:
+            self.router.route_selected("activity")
+            self.selected_key = "activity"
+            return True
+        if key in {b"p", b"P"} and self.selected_key.startswith("project:"):
+            project_key = self.selected_key.split(":", 2)[1]
+            self.router.toggle_pinned_project(project_key)
             return True
         return True
 
@@ -1901,7 +2024,7 @@ class PollyCockpitRail:
 
         # ── Spacer + settings at bottom
         if settings_item is not None:
-            target_lines = len(lines) + 4  # section header + blank + item + hint
+            target_lines = len(lines) + 5  # section header + blank + item + ticker + footer
             while len(lines) < height - target_lines + len(lines):
                 if len(lines) >= height - 4:
                     break
@@ -1910,11 +2033,14 @@ class PollyCockpitRail:
             lines.append(self._section_header("system", width))
             lines.append(self._item_row(settings_item, width, active_view))
 
-        # ── Hint line
-        while len(lines) < height - 2:
+        # ── Bottom ticker + hint/footer
+        ticker_text = self._event_ticker_text()
+        while len(lines) < height - 3:
             lines.append(RenderRow(""))
-        lines.append(RenderRow(""))
-        hint = f"{pad}j/k move \u00b7 \u21b5 open \u00b7 n new"
+        if ticker_text:
+            lines.append(RenderRow(""))
+            lines.append(RenderRow(f"{pad}{ticker_text}"[:width], fg=PALETTE["hint"]))
+        hint = f"{pad}j/k move \u00b7 \u21b5 open \u00b7 n new \u00b7 t activity \u00b7 p pin"
         lines.append(RenderRow(hint[:width], fg=PALETTE["hint"]))
 
         # ── Flush
@@ -1938,6 +2064,22 @@ class PollyCockpitRail:
         rule = "\u2500" * max(0, remaining)
         return RenderRow((prefix + rule)[:width], fg=PALETTE["section_label"])
 
+    def _event_ticker_text(self) -> str:
+        if not _viewer_attached():
+            return ""
+        try:
+            supervisor = self.router._load_supervisor()
+            events = list(supervisor.store.recent_events(limit=12))
+        except Exception:  # noqa: BLE001
+            return ""
+        if not events:
+            return ""
+        index = int((time.monotonic() - self._ticker_started_at) // 10)
+        event = events[index % len(events)]
+        event_type = getattr(event, "event_type", "event")
+        session_name = getattr(event, "session_name", "") or "system"
+        return f"events · {event_type}:{session_name}"
+
     def _item_row(self, item: CockpitItem, width: int, active_view: str) -> RenderRow:
         is_selected = item.key == self.selected_key
         is_active = item.key == active_view
@@ -1946,8 +2088,7 @@ class PollyCockpitRail:
         # Build the text with gutter (2-char prefix for alignment)
         bar = "\u258c " if is_selected else "  "
         label = item.label
-        indicator_width = max(1, len(indicator))
-        max_label = width - (5 + indicator_width)
+        max_label = width - 6  # 2 bar + 1 indicator + 1 space + 2 margin
         if len(label) > max_label and max_label > 3:
             label = label[: max_label - 1] + "\u2026"
         text = f" {bar}{indicator} {label}"
@@ -1996,13 +2137,6 @@ class PollyCockpitRail:
         return row
 
     def _indicator(self, item: CockpitItem) -> tuple[str, _C | None]:
-        if item.session_name and item.work_state:
-            pulse = self.presence.heartbeat_frame_for(
-                item.session_name,
-                item.heartbeat_at,
-            )
-            work_glyph, color = self._session_work_glyph(item.work_state)
-            return f"{pulse}{work_glyph}", color
         # State-based indicators first (apply to any item type including projects)
         if item.state.endswith("working"):
             char = self.presence.working_frame(self.spinner_index)
@@ -2032,19 +2166,6 @@ class PollyCockpitRail:
         if item.state == "sub":
             return " ", None
         return "\u25cb", PALETTE["idle"]
-
-    def _session_work_glyph(self, work_state: str) -> tuple[str, _C | None]:
-        if work_state == "writing":
-            if not self.presence.should_animate():
-                return "…", PALETTE["live_indicator"]
-            return self.presence.working_frame(self.spinner_index), PALETTE["live_indicator"]
-        if work_state == "reviewing":
-            return "✎", PALETTE["live_indicator"]
-        if work_state == "stuck":
-            return "⚠", PALETTE["alert_indicator"]
-        if work_state == "exited":
-            return "✕", PALETTE["dead"]
-        return "·", PALETTE["idle"]
 
     def _write(self, text: str) -> None:
         sys.stdout.write(text)
