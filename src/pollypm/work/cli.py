@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import typer
 
@@ -38,8 +38,10 @@ _TASK_APP_HELP = help_with_examples(
         "templates and common failure modes."
     ),
 )
-from pollypm.work.sqlite_service import SQLiteWorkService
 from pollypm.work.service_support import TaskNotFoundError, ValidationError
+
+if TYPE_CHECKING:
+    from pollypm.work.sqlite_service import SQLiteWorkService
 
 task_app = typer.Typer(help=_TASK_APP_HELP)
 flow_app = typer.Typer(
