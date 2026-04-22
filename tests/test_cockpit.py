@@ -5,7 +5,7 @@ from pathlib import Path
 from pollypm.cockpit import build_cockpit_detail
 from pollypm.cockpit_rail import CockpitItem, CockpitPresence, CockpitRouter, PollyCockpitRail
 from pollypm.config import write_config
-from pollypm.cockpit_ui import PollyCockpitApp, PollySettingsPaneApp
+from pollypm.cockpit_ui import PollyCockpitApp, PollySettingsPaneApp, RailItem
 from pollypm.models import (
     AccountConfig,
     KnownProject,
@@ -229,6 +229,74 @@ def test_cockpit_presence_heartbeat_frame_advances_only_on_new_heartbeat() -> No
     assert third == "♥"
 
 
+def test_cockpit_ui_rail_item_indicator_combines_pulse_and_work_glyph(monkeypatch) -> None:
+    monkeypatch.setattr(RailItem, "update_body", lambda self: None)
+
+    class _FakeTmux:
+        def current_session_name(self) -> str | None:
+            return "pollypm"
+
+        def list_clients(self, session_name: str) -> str:
+            del session_name
+            return "client"
+
+    presence = CockpitPresence(_FakeTmux())
+
+    writing = RailItem(
+        CockpitItem(
+            "project:demo",
+            "Demo",
+            "ready",
+            session_name="worker_demo",
+            work_state="writing",
+            heartbeat_at="2026-04-21T23:00:00+00:00",
+        ),
+        active_view=False,
+        presence=presence,
+    )
+    reviewing = RailItem(
+        CockpitItem(
+            "russell",
+            "Russell",
+            "ready",
+            session_name="reviewer",
+            work_state="reviewing",
+            heartbeat_at="2026-04-21T23:00:00+00:00",
+        ),
+        active_view=False,
+        presence=presence,
+    )
+    stuck = RailItem(
+        CockpitItem(
+            "project:demo",
+            "Demo",
+            "! pane dead",
+            session_name="worker_demo",
+            work_state="stuck",
+            heartbeat_at="2026-04-21T23:00:00+00:00",
+        ),
+        active_view=False,
+        presence=presence,
+    )
+    exited = RailItem(
+        CockpitItem(
+            "project:demo",
+            "Demo",
+            "dead",
+            session_name="worker_demo",
+            work_state="exited",
+            heartbeat_at="2026-04-21T23:00:00+00:00",
+        ),
+        active_view=False,
+        presence=presence,
+    )
+
+    assert writing._indicator()[0] == "♡◜"
+    assert reviewing._indicator()[0] == "♡✎"
+    assert stuck._indicator()[0] == "♡⚠"
+    assert exited._indicator()[0] == "♡✕"
+
+
 def test_cockpit_rail_session_indicator_combines_pulse_and_work_glyph(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "pollypm.toml"
     config_path.write_text(
@@ -284,6 +352,17 @@ def test_cockpit_rail_session_indicator_combines_pulse_and_work_glyph(monkeypatc
     assert rail._indicator(reviewing)[0] == "♡✎"
     assert rail._indicator(stuck)[0] == "♡⚠"
     assert rail._indicator(exited)[0] == "♡✕"
+
+
+def test_cockpit_ui_help_legend_mentions_glyph_alphabet() -> None:
+    binding = next(
+        binding for binding in PollyCockpitApp.BINDINGS if getattr(binding, "key", "") == "question_mark"
+    )
+
+    assert "pulse" in binding.description
+    assert "✎" in binding.description
+    assert "⚠" in binding.description
+    assert "✕" in binding.description
 
 
 def test_cockpit_router_config_cache_reuses_loaded_config(monkeypatch, tmp_path: Path) -> None:
