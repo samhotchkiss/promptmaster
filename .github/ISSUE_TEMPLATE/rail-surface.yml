@@ -1,0 +1,42 @@
+name: Rail Surface Work
+description: Feature or bug report for the cockpit rail / rail daemon surfaces
+title: "rail: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        PollyPM has two live rail surfaces:
+
+        - `src/pollypm/cockpit_ui.py` — the Textual cockpit users see when they run `pm`
+        - `src/pollypm/cockpit_rail.py` + `src/pollypm/rail_daemon.py` — the text/daemon rail path
+
+        If this issue changes rendering, indicators, keyboard bindings, tickers, or section behavior, assume **both** surfaces are in scope unless you explicitly limit it below.
+  - type: checkboxes
+    id: surfaces
+    attributes:
+      label: Surfaces
+      description: Select every surface this issue is expected to touch.
+      options:
+        - label: `src/pollypm/cockpit_ui.py` (Textual cockpit)
+        - label: `src/pollypm/cockpit_rail.py` (text rail)
+        - label: `src/pollypm/rail_daemon.py` (headless rail daemon)
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope note
+      description: If this intentionally touches only one surface, explain why.
+      placeholder: "Example: Textual-only because this is a modal dialog that does not exist in the daemon/text rail."
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Include visibility checks for every selected surface.
+      placeholder: |
+        - Textual cockpit shows ...
+        - text/daemon rail shows ...
+    validations:
+      required: true

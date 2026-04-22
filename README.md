@@ -4,6 +4,12 @@ PollyPM is a tmux-first control plane for people who want multiple AI coding ses
 
 Architecturally, PollyPM is a modular monolith: one local system with explicit replaceable boundaries for providers, runtimes, storage backends, scheduler/heartbeat hooks, and cockpit panes. The current cockpit includes a real split-pane task review surface, live session peeks, and cached account-usage tracking so the UI can stay responsive without probing providers inline.
 
+One important contributor constraint: the "rail" is not a single file.
+User-visible rail work usually spans both the Textual cockpit surface in
+`src/pollypm/cockpit_ui.py` and the text/daemon rail path in
+`src/pollypm/cockpit_rail.py` plus `src/pollypm/rail_daemon.py`. Rail
+issues should call out their intended surface coverage explicitly.
+
 **New here? Start with [docs/getting-started.md](docs/getting-started.md)** — a 15-minute walkthrough from install to your first completed task. See [CHANGELOG.md](CHANGELOG.md) for release notes and migration notes. The rest of this README is the module map and architecture reference for contributors.
 
 ## Document Map
