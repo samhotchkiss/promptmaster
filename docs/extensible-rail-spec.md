@@ -2,6 +2,22 @@
 
 **Status:** v1 target. Depends on: plugin-api v1, cockpit.
 
+## 0. Surface contract
+
+PollyPM has **two live rail surfaces** and rail-facing issues must say
+which one they affect:
+
+- `src/pollypm/cockpit_ui.py` — the Textual cockpit launched by `pm`
+  and used for the normal interactive UI.
+- `src/pollypm/cockpit_rail.py` plus `src/pollypm/rail_daemon.py` —
+  the text/daemon rail path that keeps heartbeat and recovery work
+  alive when the cockpit is closed.
+
+If a rail feature changes row rendering, indicators, keyboard
+bindings, footer/ticker content, or section collapse behavior, the
+default expectation is that **both surfaces** are updated. An issue may
+scope itself to only one surface, but it must say so explicitly.
+
 ## 1. Purpose
 
 Today the cockpit's left rail is a hardcoded list (Projects, Tasks, Settings, etc.). Plugins that want to add a visible surface — the Live Activity Feed, a Magic Skills explorer, a Downtime Backlog viewer — can't do it without editing cockpit code.
