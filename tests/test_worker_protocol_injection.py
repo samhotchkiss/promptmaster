@@ -146,18 +146,20 @@ def test_compose_worker_protocol_then_memory_then_persona():
 
 
 def test_worker_guide_under_documented_token_budget():
-    """Spec claims the guide is ~2K tokens. At 4 chars/token that's
-    ~8K chars. We give headroom for the H2 wrapper and check against
-    a 10K-char ceiling. A guide that grows past that should trigger
-    an explicit decision (trim or raise the budget)."""
+    """Guide budget is ~3K tokens (~12K chars at 4 chars/token). The
+    guide grew organically from the original ~2K-token spec as new
+    magic-skills sections landed; raising the ceiling to 12K rather
+    than trimming was the explicit decision — see #709 cluster 9.
+    A guide that grows past 12K should trigger another explicit
+    decision (trim or raise the budget again)."""
     text = load_worker_guide_text()
     if not text:
         pytest.skip("worker guide not available in this install")
     # Raw guide size bound.
-    assert len(text) < 10_000, (
+    assert len(text) < 12_000, (
         f"worker-guide.md is {len(text)} chars (~{len(text)//4} tokens); "
-        f"spec budget is ~2K tokens (~8K chars). Either trim the guide "
-        f"or raise the budget here + in the spec."
+        f"current budget is ~3K tokens (~12K chars). Either trim the "
+        f"guide or raise the budget here + in the spec."
     )
 
 
@@ -167,7 +169,7 @@ def test_worker_protocol_injection_under_budget():
     out = build_worker_protocol_injection(session_role="worker")
     if not out:
         pytest.skip("worker guide not available in this install")
-    assert len(out) < 10_100  # + a few bytes for the heading
+    assert len(out) < 12_100  # + a few bytes for the heading
 
 
 # ---------------------------------------------------------------------------

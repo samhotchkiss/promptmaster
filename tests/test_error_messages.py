@@ -222,7 +222,10 @@ class TestReviewActorGuidance:
 class TestClaimAlreadyClaimed:
     def test_claim_on_in_progress_identifies_claimant_and_offers_recovery(self, svc):
         task = _queued_task(svc)
-        svc.claim(task.task_id, "agent-alpha")
+        # The fixture sets ``roles={"worker": "agent-1", ...}``; post-#645
+        # ``claim`` resolves the caller to the role-mapped name (``agent-1``),
+        # so the error surfaces that resolved name, not the raw actor arg.
+        svc.claim(task.task_id, "agent-1")
 
         with pytest.raises(InvalidTransitionError) as excinfo:
             svc.claim(task.task_id, "agent-beta")
@@ -230,7 +233,7 @@ class TestClaimAlreadyClaimed:
         msg = str(excinfo.value)
         # Names the current claimant — crucial for a worker deciding
         # whether the claim is stale.
-        assert "agent-alpha" in msg
+        assert "agent-1" in msg
         # Recovery commands — hold + resume is the documented path for
         # stale claims (there's no `pm task release` yet).
         assert "pm task hold" in msg
