@@ -445,6 +445,67 @@ def guide_diff_cmd(
 
 
 # ---------------------------------------------------------------------------
+# pm project rename (#766)
+# ---------------------------------------------------------------------------
+
+
+@project_app.command("rename")
+def rename_cmd(
+    old_slug: str = typer.Argument(
+        ...,
+        help="Current project slug (e.g. 'polly_remote').",
+    ),
+    new_slug: str = typer.Argument(
+        ...,
+        help="New slug (lowercase, underscores only — same shape as existing keys).",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Preview changes without mutating config.",
+    ),
+    config_path: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path.",
+    ),
+) -> None:
+    """Rename a project's canonical slug (#766).
+
+    Updates the ``[projects.<old>]`` config block and every
+    ``[sessions.*]`` entry whose ``project`` field matches. Tmux
+    window names, worktree directories, and existing work-service
+    task IDs are NOT auto-updated — those are live state. The
+    command reports what needs manual cleanup.
+
+    Re-run live sessions (``pm reset``, then relaunch workers) to
+    pick up the new session names and window titles.
+    """
+    from pollypm.projects import rename_project
+    path = _require_config(config_path)
+    try:
+        renamed, warnings = rename_project(
+            path, old_slug, new_slug, dry_run=dry_run,
+        )
+    except (typer.BadParameter, Exception) as exc:  # noqa: BLE001
+        if isinstance(exc, typer.BadParameter):
+            typer.echo(f"Error: {exc.message}", err=True)
+        else:
+            typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    prefix = "Would rename" if dry_run else "Renamed"
+    typer.echo(f"{prefix} {old_slug!r} → {new_slug!r}")
+    typer.echo(f"  path:     {renamed.path}")
+    typer.echo(f"  name:     {renamed.name}")
+    if warnings:
+        typer.echo("")
+        typer.echo("Heads up — these were NOT auto-updated:")
+        for warning in warnings:
+            typer.echo(f"  - {warning}")
+    if dry_run:
+        typer.echo("")
+        typer.echo(f"Re-run without --dry-run to apply.")
+
+
+# ---------------------------------------------------------------------------
 # pm project plan
 # ---------------------------------------------------------------------------
 

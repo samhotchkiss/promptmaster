@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -478,6 +479,121 @@ def register_project(config_path: Path, repo_path: Path, *, name: str | None = N
     write_config(config, config_path, force=True)
     ensure_project_scaffold(normalized_path)
     return project
+
+
+def rename_project(
+    config_path: Path,
+    old_slug: str,
+    new_slug: str,
+    *,
+    dry_run: bool = False,
+) -> tuple[KnownProject, list[str]]:
+    """Rename a project's slug (key), updating config references.
+
+    Returns ``(project, warnings)``. The project is the **new** entry
+    (or the existing-old entry when ``dry_run=True``) and ``warnings``
+    lists state that was NOT auto-updated and may need manual cleanup
+    (tmux windows, worktree paths, work-service task IDs).
+
+    Scope:
+    - Moves the ``[projects.<old_slug>]`` config block to the new key,
+      preserving all fields (path, name, persona_name, kind, tracked,
+      role_assignments).
+    - Updates every ``[sessions.*]`` entry whose ``project`` field
+      equals ``old_slug`` to reference ``new_slug``.
+    - Does NOT rename tmux windows (``architect-<slug>``,
+      ``worker-<slug>``), worktree paths, or work-service task IDs
+      (``<slug>/1`` etc.) — those are live state that requires session
+      restart to pick up. The returned warning list names them so the
+      caller can decide.
+
+    ``dry_run=True`` reports what would change without mutating config.
+    """
+    normalized_new = slugify_project_key(new_slug)
+    if not normalized_new:
+        raise typer.BadParameter(
+            f"New slug {new_slug!r} does not yield a valid key "
+            f"(slugs must contain at least one alphanumeric character)."
+        )
+    if normalized_new != new_slug:
+        raise typer.BadParameter(
+            f"New slug {new_slug!r} is not in canonical form. "
+            f"Try {normalized_new!r}."
+        )
+
+    config = load_config(config_path)
+    if old_slug not in config.projects:
+        raise typer.BadParameter(f"Unknown project: {old_slug}")
+    if old_slug == new_slug:
+        raise typer.BadParameter("New slug must differ from the old slug.")
+    if new_slug in config.projects:
+        raise typer.BadParameter(
+            f"A project already exists at key {new_slug!r}. "
+            "Pick a different slug or remove the conflict first."
+        )
+
+    warnings: list[str] = []
+    project = config.projects[old_slug]
+    renamed_project = KnownProject(
+        key=new_slug,
+        path=project.path,
+        name=project.name,
+        persona_name=project.persona_name,
+        kind=project.kind,
+        tracked=project.tracked,
+        role_assignments=dict(project.role_assignments),
+    )
+
+    session_updates: list[tuple[str, str, str]] = []  # (name, old_project, new_project)
+    for session_name, session in config.sessions.items():
+        if session.project == old_slug:
+            session_updates.append((session_name, old_slug, new_slug))
+
+    # Flag live state the rename doesn't touch.
+    for session_name, _, _ in session_updates:
+        if session_name.endswith(f"_{old_slug}") or session_name.endswith(old_slug):
+            warnings.append(
+                f"Session name {session_name!r} still contains the old "
+                f"slug; restart the session to pick up the new name."
+            )
+    tmux_windows_mentioning_old = [
+        s.window_name for s in config.sessions.values()
+        if s.window_name and old_slug in s.window_name
+    ]
+    if tmux_windows_mentioning_old:
+        warnings.append(
+            f"Tmux window names still reference {old_slug!r}: "
+            f"{', '.join(sorted(set(tmux_windows_mentioning_old)))}. "
+            "Kill + relaunch each affected session to pick up new names."
+        )
+    work_db = project.path / ".pollypm" / "state.db"
+    if work_db.exists():
+        warnings.append(
+            f"Work-service task IDs in {work_db} still use the old "
+            f"slug (e.g. {old_slug}/1). Existing tasks keep their IDs; "
+            "new tasks will use the new slug."
+        )
+    worktree_root = project.path / ".pollypm" / "worktrees"
+    if worktree_root.exists():
+        old_worktrees = [p.name for p in worktree_root.iterdir() if old_slug in p.name]
+        if old_worktrees:
+            warnings.append(
+                f"Worktree directories under {worktree_root} still use "
+                f"the old slug: {', '.join(sorted(old_worktrees))}. "
+                "Safe to leave; new worktrees will use the new slug."
+            )
+
+    if dry_run:
+        return project, warnings
+
+    # Apply mutations.
+    del config.projects[old_slug]
+    config.projects[new_slug] = renamed_project
+    for session_name, _old, new in session_updates:
+        session = config.sessions[session_name]
+        config.sessions[session_name] = replace(session, project=new)
+    write_config(config, config_path, force=True)
+    return renamed_project, warnings
 
 
 def remove_project(config_path: Path, project_key: str) -> KnownProject:
