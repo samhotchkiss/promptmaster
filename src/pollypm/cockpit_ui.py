@@ -8183,6 +8183,12 @@ class PollyProjectDashboardApp(App[None]):
         color: #ffd7d9;
         border: round #8d3137;
     }
+    #proj-action-bar.-hover {
+        border: round #5b8aff;
+    }
+    #proj-inbox-section.-hover {
+        border: round #5b8aff;
+    }
     #proj-body {
         height: 1fr;
         padding: 1 0 0 0;
@@ -8695,6 +8701,44 @@ class PollyProjectDashboardApp(App[None]):
     def _route_to_inbox(self) -> None:
         router = CockpitRouter(self.config_path)
         router.route_selected("inbox")
+
+    # ------------------------------------------------------------------
+    # Click handlers (#750)
+    # ------------------------------------------------------------------
+    # The action bar ("1 approval · 1 new in inbox") and the dedicated
+    # Inbox section were previously text-only — clicking them did
+    # nothing, so the user had to discover the ``i`` keybinding. Bind
+    # clicks on either surface to the same action that keyboard ``i``
+    # triggers so mouse users land where they'd expect.
+    @on(events.Click, "#proj-action-bar")
+    def on_action_bar_click(self, _event: events.Click) -> None:
+        self.action_jump_inbox()
+
+    @on(events.Click, "#proj-inbox-section")
+    def on_inbox_section_click(self, _event: events.Click) -> None:
+        self.action_jump_inbox()
+
+    @on(events.Enter, "#proj-action-bar")
+    def on_action_bar_enter(self, _event: events.Enter) -> None:
+        self.action_bar.add_class("-hover")
+
+    @on(events.Leave, "#proj-action-bar")
+    def on_action_bar_leave(self, _event: events.Leave) -> None:
+        self.action_bar.remove_class("-hover")
+
+    @on(events.Enter, "#proj-inbox-section")
+    def on_inbox_section_enter(self, _event: events.Enter) -> None:
+        try:
+            self.query_one("#proj-inbox-section").add_class("-hover")
+        except Exception:  # noqa: BLE001
+            pass
+
+    @on(events.Leave, "#proj-inbox-section")
+    def on_inbox_section_leave(self, _event: events.Leave) -> None:
+        try:
+            self.query_one("#proj-inbox-section").remove_class("-hover")
+        except Exception:  # noqa: BLE001
+            pass
 
     def action_jump_activity(self) -> None:
         """Route to the activity log / feed for the whole workspace."""

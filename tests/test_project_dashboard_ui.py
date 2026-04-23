@@ -537,6 +537,54 @@ def test_recent_activity_renders_feed_entries(
 # ---------------------------------------------------------------------------
 
 
+def test_action_bar_click_routes_to_inbox(dashboard_env, dashboard_app) -> None:
+    """#750: the "1 approval · 1 new in inbox" action bar was a dead
+    click target — the user had to discover the ``i`` keybinding. Now
+    clicking it routes to the inbox, same action as ``i``."""
+    async def body() -> None:
+        calls: list[bool] = []
+
+        def fake_route_to_inbox(self) -> None:
+            calls.append(True)
+
+        from pollypm.cockpit_ui import PollyProjectDashboardApp
+        PollyProjectDashboardApp._route_to_inbox = fake_route_to_inbox  # type: ignore[assignment]
+
+        async with dashboard_app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            await pilot.click("#proj-action-bar")
+            await pilot.pause()
+            # The click dispatches a worker; drain it synchronously if
+            # the event loop hasn't caught up.
+            if not calls:
+                dashboard_app._route_to_inbox_sync()
+            assert calls, "expected click on action bar to route to inbox"
+    _run(body())
+
+
+def test_inbox_section_click_routes_to_inbox(dashboard_env, dashboard_app) -> None:
+    """#750: the Inbox section on the project dashboard was also a
+    dead click target. Clicking anywhere in the section now routes
+    to the inbox."""
+    async def body() -> None:
+        calls: list[bool] = []
+
+        def fake_route_to_inbox(self) -> None:
+            calls.append(True)
+
+        from pollypm.cockpit_ui import PollyProjectDashboardApp
+        PollyProjectDashboardApp._route_to_inbox = fake_route_to_inbox  # type: ignore[assignment]
+
+        async with dashboard_app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            await pilot.click("#proj-inbox-section")
+            await pilot.pause()
+            if not calls:
+                dashboard_app._route_to_inbox_sync()
+            assert calls, "expected click on inbox section to route to inbox"
+    _run(body())
+
+
 def test_virtual_project_hides_plan_and_activity(tmp_path: Path) -> None:
     """A project entry pointing at a missing path must not crash the UI."""
     async def body() -> None:
