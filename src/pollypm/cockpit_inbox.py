@@ -148,19 +148,38 @@ def _inbox_db_sources(config) -> list[tuple[str | None, Path, Path]]:
 
 
 def _count_inbox_tasks_for_label(config) -> int:
-    """Sum of inbox tasks across all tracked projects + workspace-root.
+    """Sum of inbox items across all tracked projects + workspace-root.
 
-    Used by the cockpit rail label and the dashboard summary line; the
-    aggregate must match what :func:`_render_inbox_panel` would render.
-    Dedupes tasks by ``task_id`` so a task that somehow appears in more
-    than one DB counts exactly once.
+    **#759: now matches what ``pm inbox`` (and the inbox pane) show.**
+    Previously counted only work-service chat-flow tasks (~13), while
+    the pane showed tasks + open ``notify`` / ``inbox_task`` / ``alert``
+    messages (~166). The rail and the pane disagreed by an order of
+    magnitude. This function now applies the same filter ``pm inbox``
+    uses so both numbers match by construction.
+
+    Dedupes:
+    - Tasks by ``task_id`` so a task present in more than one DB counts
+      once.
+    - Messages by their ``(scope, message_id)`` pair — same reason.
+
+    The function name is kept for backward compatibility with existing
+    callers; the return value is now an item count, not just a task
+    count.
     """
     try:
         from pollypm.work.inbox_view import inbox_tasks
         from pollypm.work.sqlite_service import SQLiteWorkService
     except Exception:  # noqa: BLE001
         return 0
+
+    try:
+        from pollypm.store import SQLAlchemyStore
+    except Exception:  # noqa: BLE001
+        SQLAlchemyStore = None  # type: ignore[assignment]
+
     seen_task_ids: set[str] = set()
+    seen_message_keys: set[tuple[str, object]] = set()
+
     for project_key, db_path, project_path in _inbox_db_sources(config):
         if not db_path.exists():
             continue
@@ -171,8 +190,47 @@ def _count_inbox_tasks_for_label(config) -> int:
                 for task in inbox_tasks(svc, project=project_key):
                     seen_task_ids.add(task.task_id)
         except Exception:  # noqa: BLE001
+            pass
+
+        if SQLAlchemyStore is None:
             continue
-    return len(seen_task_ids)
+        try:
+            store = SQLAlchemyStore(f"sqlite:///{db_path}")
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            filters: dict[str, object] = dict(
+                recipient="user",
+                state="open",
+                type=["notify", "inbox_task", "alert"],
+            )
+            if project_key:
+                filters["scope"] = project_key
+            try:
+                rows = store.query_messages(**filters)
+            except Exception:  # noqa: BLE001
+                rows = []
+            for row in rows:
+                # query_messages returns dicts with 'id' as the primary
+                # key; some older call sites surface it as 'message_id'.
+                if isinstance(row, dict):
+                    row_id = row.get("id") or row.get("message_id")
+                    scope = row.get("scope", "") or ""
+                else:
+                    row_id = (
+                        getattr(row, "id", None)
+                        or getattr(row, "message_id", None)
+                    )
+                    scope = getattr(row, "scope", "") or ""
+                if row_id is None:
+                    continue
+                seen_message_keys.add((str(scope), row_id))
+        finally:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return len(seen_task_ids) + len(seen_message_keys)
 
 
 @dataclass(slots=True, frozen=True)

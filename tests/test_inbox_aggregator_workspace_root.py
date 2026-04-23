@@ -148,3 +148,60 @@ def test_aggregator_skips_missing_workspace_root_db(env) -> None:
           project="demo", title="only project")
     assert not env["workspace_db"].exists()
     assert _count_inbox_tasks_for_label(_load_cfg(env["config_path"])) == 1
+
+
+def _seed_message(
+    db_path: Path,
+    *,
+    scope: str = "demo",
+    type_: str = "notify",
+    state: str = "open",
+    subject: str = "notify title",
+) -> int:
+    """Seed one user-recipient message directly into the unified store."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    from pollypm.store import SQLAlchemyStore
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        return store.enqueue_message(
+            type=type_,
+            tier="immediate",
+            scope=scope,
+            sender="polly",
+            recipient="user",
+            subject=subject,
+            body="notify body",
+            state=state,
+        )
+    finally:
+        store.close()
+
+
+def test_aggregator_counts_open_messages_not_just_tasks(env) -> None:
+    """#759 regression: the rail badge count must include open notify/
+    inbox_task/alert messages, not only work-service chat-flow tasks.
+    Before this fix the rail showed 13 while the inbox pane showed 166.
+    """
+    # One work-service task so the task-only path is still exercised.
+    _seed(env["project_db"], env["project_path"],
+          project="demo", title="real chat task")
+
+    # Three notify messages directly in the unified store (same shape
+    # that ``pm notify`` / loop-test harnesses produce). All must
+    # contribute to the aggregate count.
+    for _ in range(3):
+        _seed_message(env["workspace_db"], scope="inbox")
+
+    count = _count_inbox_tasks_for_label(_load_cfg(env["config_path"]))
+    assert count == 4, f"expected 1 task + 3 notifies, got {count}"
+
+
+def test_aggregator_skips_non_open_messages(env) -> None:
+    """Only state=open messages contribute. Archived / resolved don't."""
+    # Seed one open + one archived so we can verify filter.
+    _seed_message(env["workspace_db"], scope="inbox")
+    _seed_message(env["workspace_db"], scope="inbox", subject="archived", state="archived")
+
+    count = _count_inbox_tasks_for_label(_load_cfg(env["config_path"]))
+    # Only the open notify counts; archived one is excluded.
+    assert count == 1, f"expected 1 open notify, got {count}"
