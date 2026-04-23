@@ -1052,6 +1052,12 @@ def test_stalled_worker_gets_heartbeat_nudge_after_five_identical_cycles(monkeyp
             (session_name, text, force)
         ),
     )
+    # #765 classifier gates suspected_loop on has_pending_work — simulate
+    # a queued task so this stall-nudge test keeps its original scope.
+    monkeypatch.setattr(
+        "pollypm.heartbeats.stall_classifier.has_pending_work_for_session",
+        lambda config, session_name: True,
+    )
 
     alerts = supervisor._update_alerts(
         launch,
@@ -1120,6 +1126,12 @@ def test_stalled_worker_nudge_skips_when_human_holds_lease(monkeypatch, tmp_path
         supervisor,
         "send_input",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("nudge should be skipped")),
+    )
+    # #765 classifier gates suspected_loop on has_pending_work — simulate
+    # a queued task so the rest of the lease-skip assertion still runs.
+    monkeypatch.setattr(
+        "pollypm.heartbeats.stall_classifier.has_pending_work_for_session",
+        lambda config, session_name: True,
     )
 
     alerts = supervisor._update_alerts(

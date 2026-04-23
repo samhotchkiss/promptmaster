@@ -131,15 +131,40 @@ def _update_alerts(
         history = supervisor.store.recent_heartbeats(session_name, limit=3)
         recent_hashes = [item.snapshot_hash for item in history[:3]]
         if len(recent_hashes) == 3 and len(set(recent_hashes)) == 1:
-            role = launch.session.role
-            if role in {"heartbeat-supervisor", "operator-pm", "reviewer"} or launch.session.name in {"worker_pollypm"}:
+            # #765 — route through the single classifier rather than
+            # maintaining a parallel role-exclusion list here. The same
+            # logic already gates heartbeats/local.py's detector.
+            from pollypm.heartbeats.stall_classifier import (
+                StallContext,
+                classify_stall,
+            )
+
+            from pollypm.heartbeats.stall_classifier import (
+                has_pending_work_for_session,
+            )
+
+            stall_class = classify_stall(
+                StallContext(
+                    role=launch.session.role or "",
+                    session_name=session_name,
+                    has_pending_work=has_pending_work_for_session(
+                        supervisor.config, session_name,
+                    ),
+                )
+            )
+            if stall_class != "unrecoverable_stall":
                 supervisor.msg_store.clear_alert(session_name, "suspected_loop")
             else:
+                # #760 — action-forward copy matching the heartbeat path.
                 supervisor.msg_store.upsert_alert(
                     session_name,
                     "suspected_loop",
                     "warn",
-                    f"Window {window.name} has produced effectively the same snapshot for 3 heartbeats",
+                    (
+                        f"{launch.session.role or 'session'} {session_name} "
+                        f"stalled — no new output for 3 heartbeats with "
+                        f"queued work. Try: pm session restart {session_name}"
+                    ),
                 )
                 active_alerts.append("suspected_loop")
                 longer_history = supervisor.store.recent_heartbeats(session_name, limit=5)

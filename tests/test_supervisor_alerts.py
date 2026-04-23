@@ -115,6 +115,14 @@ def test_supervisor_alert_helper_updates_and_nudges(monkeypatch, tmp_path: Path)
         ),
     )
 
+    # #765 classifier gates suspected_loop on has_pending_work — simulate
+    # a queued task so this stall-detection test stays focused on the
+    # nudge path rather than needing a seeded work-service DB.
+    monkeypatch.setattr(
+        "pollypm.heartbeats.stall_classifier.has_pending_work_for_session",
+        lambda config, session_name: True,
+    )
+
     alerts = _supervisor_alerts._update_alerts(
         supervisor,
         launch,

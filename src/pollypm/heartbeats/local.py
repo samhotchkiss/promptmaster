@@ -1113,42 +1113,23 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             pass
 
     def _has_pending_work(self, api, context: HeartbeatSessionContext) -> bool:
-        """Check if a worker's project has ready/in-progress tasks."""
-        try:
-            config = api.supervisor.config
-            session = config.sessions.get(context.session_name)
-            if session is None:
-                return False
-            project = config.projects.get(session.project)
-            if project is None:
-                return False
-            # Check issue tracker
-            from pollypm.task_backends import get_task_backend
-            backend = get_task_backend(project.path)
-            if backend.exists():
-                tasks = backend.list_tasks(states=["01-ready", "02-in-progress"])
-                if tasks:
-                    return True
-            # Check the work service for worker-actionable tasks on this
-            # worker's project. Review / on_hold / done are idle-by-design
-            # for workers — the reviewer or user owns the next step there.
-            try:
-                from pollypm.work.sqlite_service import SQLiteWorkService
+        """Check if a worker's project has ready/in-progress tasks.
 
-                db_path = project.path / ".pollypm" / "state.db"
-                if db_path.exists():
-                    with SQLiteWorkService(
-                        db_path=db_path, project_path=project.path,
-                    ) as svc:
-                        tasks = svc.list_tasks(project=session.project)
-                    for t in tasks:
-                        if t.work_status.value in self._WORKER_ACTIONABLE_STATUSES:
-                            return True
-            except Exception:  # noqa: BLE001
-                pass
-            return False
+        Delegates to :func:`pollypm.heartbeats.stall_classifier.has_pending_work_for_session`
+        so this path and the supervisor-boundary path
+        (``pollypm.supervisor_alerts._update_alerts``) share one
+        definition of "is there work". See #765.
+        """
+        from pollypm.heartbeats.stall_classifier import (
+            has_pending_work_for_session,
+        )
+
+        try:
+            return has_pending_work_for_session(
+                api.supervisor.config, context.session_name,
+            )
         except Exception:  # noqa: BLE001
-            return True  # Assume work exists on error — don't falsely recover idle workers
+            return True
 
     def _triage_stalled_worker(self, api, context: HeartbeatSessionContext) -> None:
         """Fast heuristic triage for stalled workers (60s path).

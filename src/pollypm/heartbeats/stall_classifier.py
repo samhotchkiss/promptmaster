@@ -125,4 +125,77 @@ def classify_stall(ctx: StallContext) -> StallClass:
     return "legitimate_idle"
 
 
-__all__ = ["StallContext", "StallClass", "classify_stall"]
+_WORKER_ACTIONABLE_STATUSES: frozenset[str] = frozenset(
+    {"queued", "in_progress", "blocked"}
+)
+
+
+def has_pending_work_for_session(config, session_name: str) -> bool:
+    """Best-effort check for queued/actionable work on a session's project.
+
+    Used by the stall detector to decide whether an idle pane is
+    ``legitimate_idle`` (no queue) or ``unrecoverable_stall`` (queue
+    with no output). Mirrors the older helper in
+    :mod:`pollypm.heartbeats.local` so both detection paths (the
+    heartbeat-backend sweep and the supervisor-boundary sweep) share a
+    single definition of "is there work".
+
+    Returns ``True`` when in doubt — a false "yes" only means we run
+    the same-snapshot check that next heartbeat; a false "no" would
+    silence a real stall.
+    """
+    try:
+        sessions = getattr(config, "sessions", None) or {}
+        session = sessions.get(session_name)
+        if session is None:
+            return False
+        project_key = getattr(session, "project", "") or ""
+        if not project_key:
+            return False
+        projects = getattr(config, "projects", None) or {}
+        project = projects.get(project_key)
+        if project is None:
+            return False
+        project_path = getattr(project, "path", None)
+        if project_path is None:
+            return False
+
+        try:
+            from pollypm.task_backends import get_task_backend
+
+            backend = get_task_backend(project_path)
+            if backend.exists():
+                file_tasks = backend.list_tasks(
+                    states=["01-ready", "02-in-progress"],
+                )
+                if file_tasks:
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            from pollypm.work.sqlite_service import SQLiteWorkService
+
+            db_path = project_path / ".pollypm" / "state.db"
+            if db_path.exists():
+                with SQLiteWorkService(
+                    db_path=db_path, project_path=project_path,
+                ) as svc:
+                    for task in svc.list_tasks(project=project_key):
+                        status_value = getattr(task.work_status, "value", "")
+                        if status_value in _WORKER_ACTIONABLE_STATUSES:
+                            return True
+        except Exception:  # noqa: BLE001
+            pass
+
+        return False
+    except Exception:  # noqa: BLE001
+        return True
+
+
+__all__ = [
+    "StallContext",
+    "StallClass",
+    "classify_stall",
+    "has_pending_work_for_session",
+]
