@@ -6322,6 +6322,20 @@ class PollyInboxApp(App[None]):
             self._proposal_specs.pop(task_id, None)
             self._restore_default_hint()
 
+        # #761 — when the inbox item references a task in review state
+        # (plan_review, review_ready, etc.), pull in the review artifact
+        # that the task-Review tab renders (#708) so the user can see
+        # the summary inline without a separate pane-jump. Same
+        # component, same content, same mental model across surfaces.
+        try:
+            review_block = self._render_inline_review_artifact(task)
+        except Exception:  # noqa: BLE001
+            review_block = None
+        if review_block:
+            sections.append("")
+            sections.append("[dim]── review artifact ──[/dim]")
+            sections.append(review_block)
+
         self.detail.update("\n".join(sections))
         # Rebuild the rollup item list (empty for non-rollups).
         self._render_rollup_items(rollup_items_raw)
@@ -6336,6 +6350,37 @@ class PollyInboxApp(App[None]):
     # ------------------------------------------------------------------
     # Rollup rendering / expansion
     # ------------------------------------------------------------------
+
+    def _render_inline_review_artifact(self, task) -> str | None:
+        """Render the task's review artifact for inline display in the
+        inbox detail pane (#761).
+
+        Reuses :mod:`pollypm.cockpit_task_review` — the same module
+        that powers the per-task Review tab (#708). When a task has no
+        artifact, or a load error occurs, returns None so the caller
+        skips the section entirely rather than showing an empty block.
+        """
+        from pollypm.cockpit_task_review import (
+            load_task_review_artifact,
+            render_task_review_artifact,
+        )
+
+        project_path = None
+        try:
+            config = load_config(self.config_path)
+            project = config.projects.get(getattr(task, "project", "") or "")
+            if project is not None:
+                project_path = project.path
+        except Exception:  # noqa: BLE001
+            project_path = None
+
+        artifact = load_task_review_artifact(task, project_path)
+        if artifact is None:
+            return None
+        rendered = render_task_review_artifact(artifact)
+        if not rendered or rendered.strip() == "No review artifact is available for this task yet.":
+            return None
+        return _escape(rendered)
 
     def _clear_rollup_items(self) -> None:
         """Remove every child of the rollup-items box (safe on unmount).

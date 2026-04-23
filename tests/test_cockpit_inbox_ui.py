@@ -906,6 +906,72 @@ def test_d_on_rollup_subitem_targets_its_project(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_inbox_detail_includes_inline_review_artifact(tmp_path: Path) -> None:
+    """#761: when an inbox item references a task with a review
+    artifact on disk (e.g. a plan_review task with
+    docs/project-plan.md), the artifact's summary is rendered inline
+    in the inbox detail pane — same content as the task Review tab,
+    no pane-jump required."""
+    project_path = tmp_path / "demo"
+    project_path.mkdir()
+    (project_path / ".git").mkdir()
+    # Seed the plan-review artifact on disk.
+    plan_path = project_path / "docs" / "project-plan.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# Notesy Plan\n\nShip the inbox review surface.\n")
+
+    config_path = tmp_path / "pollypm.toml"
+    _write_minimal_config(project_path, config_path)
+
+    # Seed the task: a plan_project flow in review state, so
+    # load_task_review_artifact picks up docs/project-plan.md.
+    db_path = project_path / ".pollypm" / "state.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    svc = SQLiteWorkService(db_path=db_path, project_path=project_path)
+    try:
+        svc.create(
+            title="Review the plan",
+            description="Plan needs review",
+            type="task",
+            project="demo",
+            flow_template="plan_project",
+            roles={
+                "requester": "user",
+                "operator": "polly",
+                "architect": "archie",
+            },
+            priority="normal",
+            created_by="polly",
+        )
+    finally:
+        svc.close()
+
+    if not _load_config_compatible(config_path):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_ui import PollyInboxApp
+    app = PollyInboxApp(config_path)
+
+    async def body() -> None:
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            # Open the first item (the plan-review task).
+            app.list_view.index = 0
+            await pilot.press("enter")
+            await pilot.pause()
+
+            detail_text = str(app.detail.render())
+            # The inline review artifact section is present and
+            # contains the plan content + section heading.
+            assert "review artifact" in detail_text.lower(), (
+                f"expected review-artifact section; got {detail_text!r}"
+            )
+            assert "Ship the inbox review surface." in detail_text, (
+                f"plan body missing from rendered inbox detail"
+            )
+
+    _run(body())
+
+
 def test_inbox_app_honors_initial_project_filter(inbox_env) -> None:
     """#751: when launched with ``initial_project``, the inbox applies
     the project filter on mount and shows the filter-bar chip so the
