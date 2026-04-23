@@ -579,6 +579,33 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         else:
             api.clear_alert(context.session_name, "suspected_loop")
 
+        # #757 — mid-flight persona-drift detection. Kickoff-time swaps
+        # are caught by supervisor._assert_session_launch_matches; this
+        # catches sessions whose identity drifted AFTER kickoff (e.g. a
+        # prompt-injection loop, or a session reading a wrong-role
+        # control-prompts file). Conservative: only fires on strong
+        # identity-claim phrasings, never on casual mentions.
+        try:
+            from pollypm.supervisor import detect_persona_drift
+            drifted_to = detect_persona_drift(context.role, context.pane_text or "")
+        except Exception:  # noqa: BLE001
+            drifted_to = None
+        if drifted_to:
+            api.raise_alert(
+                context.session_name,
+                "persona_drift_detected",
+                "error",
+                (
+                    f"Session {context.session_name} (role={context.role}) "
+                    f"appears to have drifted — pane shows identity claim "
+                    f"as {drifted_to!r}. Restart the session to reload "
+                    f"the correct role guide."
+                ),
+            )
+            alerts.append("persona_drift_detected")
+        else:
+            api.clear_alert(context.session_name, "persona_drift_detected")
+
         combined_text = "\n".join(part for part in [context.transcript_delta, context.pane_text] if part).lower()
         status_locked = False
         if any(pattern in combined_text for pattern in self._AUTH_FAILURE_PATTERNS):
