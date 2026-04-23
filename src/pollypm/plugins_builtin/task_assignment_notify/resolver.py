@@ -293,12 +293,26 @@ def _escalate_no_session(event: TaskAssignmentEvent, store: Any | None) -> None:
     """Raise (or refresh) a user-inbox alert when no session matches."""
     if store is None:
         return
+    # #760 — action-forward single-line copy. Names the actor in plain
+    # English, picks the role-correct worker-start hint instead of the
+    # old always-architect default.
+    from pollypm.work.models import ActorType
+
+    if event.actor_type is ActorType.ROLE:
+        actor_display = f"the {event.actor_name} role"
+        if event.actor_name == "architect":
+            try_hint = f"Try: pm worker-start --role architect {event.project}"
+        else:
+            try_hint = (
+                f"Try: pm worker-start --role {event.actor_name} {event.project} "
+                f"(or pm task claim {event.task_id} for a per-task worker)"
+            )
+    else:
+        actor_display = event.actor_name or event.actor_type.value
+        try_hint = f"Try: pm task claim {event.task_id}"
     message = (
-        f"Task {event.task_id} queued for "
-        f"{event.actor_type.value}:{event.actor_name} but no session running. "
-        f"Fix: claim the task (`pm task claim {event.task_id}`) to provision a "
-        f"per-task worker, or spawn the architect "
-        f"(`pm worker-start --role architect {event.project}`)."
+        f"Task {event.task_id} was routed to {actor_display} but no "
+        f"matching session is running. {try_hint}"
     )
     try:
         store.upsert_alert(
