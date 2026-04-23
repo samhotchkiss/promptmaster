@@ -76,8 +76,17 @@ _PLANNING_FLOWS = frozenset({"plan_project", "critique_flow"})
 _APPROVAL_NODE = "user_approval"
 
 
-def _resolve_plan_path(project_path: Path, plan_dir: str) -> Path:
-    """Return the absolute path to ``plan.md`` for a project.
+def _candidate_plan_paths(project_path: Path, plan_dir: str) -> list[Path]:
+    """Return the plan-file paths the gate accepts, in precedence order.
+
+    The architect's approval helper writes ``docs/project-plan.md``
+    (see :mod:`pollypm.plugins_builtin.project_planning.approval`), but
+    the original gate spec named ``docs/plan/plan.md``. Both forms
+    appear in real projects tonight — the Notesy repo has the former
+    but not the latter, so the gate was (silently) refusing to
+    delegate tasks for a fully-approved project. #765 / Notesy root-
+    cause: accept either canonical path. Mirrors the same list in
+    :mod:`pollypm.recovery.state_reconciliation`.
 
     ``plan_dir`` is the ``[planner].plan_dir`` config value (default
     ``"docs/plan"``). Absolute values win; relative values resolve
@@ -85,8 +94,26 @@ def _resolve_plan_path(project_path: Path, plan_dir: str) -> Path:
     """
     raw = Path(plan_dir)
     if raw.is_absolute():
-        return raw / "plan.md"
-    return project_path / raw / "plan.md"
+        primary = raw / "plan.md"
+        # Absolute plan_dir overrides conventional defaults — the user
+        # picked this path explicitly, so we don't also look at the
+        # project-relative default.
+        return [primary]
+    primary = project_path / raw / "plan.md"
+    secondary = project_path / "docs" / "project-plan.md"
+    if primary == secondary:
+        return [primary]
+    return [primary, secondary]
+
+
+def _resolve_plan_path(project_path: Path, plan_dir: str) -> Path:
+    """Return the first-choice plan path for a project (back-compat).
+
+    Kept for callers that want the canonical/primary path. New code
+    should prefer :func:`_first_non_trivial_plan_path`, which honours
+    the fallback to ``docs/project-plan.md``.
+    """
+    return _candidate_plan_paths(project_path, plan_dir)[0]
 
 
 def _plan_file_non_trivial(plan_path: Path) -> bool:
@@ -105,6 +132,20 @@ def _plan_file_non_trivial(plan_path: Path) -> bool:
     except OSError:
         return False
     return len(text.strip()) > MIN_PLAN_SIZE_BYTES
+
+
+def _first_non_trivial_plan_path(
+    project_path: Path, plan_dir: str,
+) -> Path | None:
+    """Return the first candidate plan path that passes ``_plan_file_non_trivial``.
+
+    Returns ``None`` if no candidate passes — the gate fails closed at
+    the call site.
+    """
+    for candidate in _candidate_plan_paths(project_path, plan_dir):
+        if _plan_file_non_trivial(candidate):
+            return candidate
+    return None
 
 
 def _find_approved_plan_task(work_service: Any, project_key: str) -> Any | None:
@@ -214,18 +255,43 @@ def _latest_backlog_created_at(work_service: Any, project_key: str) -> float | N
     Planning tasks (``flow_template_id in _PLANNING_FLOWS``) are
     excluded so the planner's own task doesn't count as "backlog" for
     the purpose of the staleness check.
+
+    Tasks that are **children of an approved plan_project task** are
+    also excluded. These are the architect's own emit output — they
+    exist *because of* the plan, so the fact that they're newer than
+    plan-approved timestamp is expected, not staleness. Without this
+    exclusion, every just-approved plan looks stale relative to its
+    own 18-ish implementation tasks and the gate wrongly blocks
+    delegation (Notesy, 2026-04-23).
     """
     try:
-        tasks = work_service.list_tasks(project=project_key)
+        tasks = list(work_service.list_tasks(project=project_key))
     except Exception:  # noqa: BLE001
         logger.debug(
             "plan_presence: list_tasks failed for project %s", project_key,
             exc_info=True,
         )
         return None
+
+    # Collect the task-ids that were emitted as children of any
+    # approved plan_project task so we can skip them below.
+    plan_child_keys: set[tuple[str, int]] = set()
+    for task in tasks:
+        if task.flow_template_id not in _PLANNING_FLOWS:
+            continue
+        for child in getattr(task, "children", None) or []:
+            try:
+                child_project, child_number = child
+                plan_child_keys.add((str(child_project), int(child_number)))
+            except (TypeError, ValueError):
+                continue
+
     latest: float | None = None
     for task in tasks:
         if task.flow_template_id in _PLANNING_FLOWS:
+            continue
+        key = (project_key, getattr(task, "task_number", -1))
+        if key in plan_child_keys:
             continue
         if task.created_at is None:
             continue
@@ -253,8 +319,7 @@ def has_acceptable_plan(
     """
     if work_service is None:
         return False
-    plan_path = _resolve_plan_path(project_path, plan_dir)
-    if not _plan_file_non_trivial(plan_path):
+    if _first_non_trivial_plan_path(project_path, plan_dir) is None:
         return False
     plan_task = _find_approved_plan_task(work_service, project_key)
     if plan_task is None:

@@ -313,6 +313,80 @@ class TestPredicate:
         finally:
             work.close()
 
+    def test_predicate_accepts_plan_whose_children_are_newer(self, tmp_path):
+        """Tasks emitted as children of the approved plan_project must
+        not count as staleness evidence against that plan. Without this,
+        every just-approved plan looks stale relative to its own 18-ish
+        emitted implementation tasks and the gate wrongly blocks
+        delegation (Notesy regression, 2026-04-23).
+        """
+        from datetime import datetime, timedelta, timezone
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _write_plan(proj)
+
+        # Approve the plan one hour ago.
+        approved_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        _create_done_approved_plan_task(
+            proj, project_key="proj", approved_at=approved_at,
+        )
+        # Now create an implementation task (created_at defaults to now
+        # — newer than the plan approval) and link it as a child of
+        # the plan task. Without the children-exclusion, this should
+        # fail the staleness check; with it, the gate stays open.
+        db_path = proj / ".pollypm" / "state.db"
+        work = SQLiteWorkService(db_path=db_path, project_path=proj)
+        try:
+            plan_tasks = [
+                t for t in work.list_tasks(project="proj")
+                if t.flow_template_id == "plan_project"
+            ]
+            assert len(plan_tasks) == 1
+            plan_task = plan_tasks[0]
+
+            impl = work.create(
+                title="Implement thing",
+                description="impl task emitted from plan",
+                type="task",
+                project="proj",
+                flow_template="standard",
+                roles={"worker": "agent-1", "reviewer": "agent-2"},
+                priority="normal",
+            )
+            work.queue(impl.task_id, "pm")
+            work.link(plan_task.task_id, impl.task_id, "parent")
+
+            assert has_acceptable_plan("proj", proj, work) is True
+        finally:
+            work.close()
+
+
+    def test_predicate_accepts_docs_project_plan_md_fallback(self, tmp_path):
+        """The architect's approval helper writes ``docs/project-plan.md``.
+        The gate must accept that path when ``docs/plan/plan.md`` is
+        absent — otherwise a project with a fully-approved plan gets
+        silently blocked (Notesy regression, 2026-04-23)."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        # Write only the approval-helper path; leave docs/plan/plan.md absent.
+        plan = proj / "docs" / "project-plan.md"
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        body = "# Forward Plan\n\n## Scope\n\n" + (
+            "Canonical forward plan. " * 60
+        )
+        plan.write_text(body, encoding="utf-8")
+        assert (proj / "docs" / "plan" / "plan.md").exists() is False
+
+        _create_done_approved_plan_task(proj, project_key="proj")
+        db_path = proj / ".pollypm" / "state.db"
+        work = SQLiteWorkService(db_path=db_path, project_path=proj)
+        try:
+            assert has_acceptable_plan("proj", proj, work) is True
+        finally:
+            work.close()
+
+
     def test_predicate_false_when_plan_task_rejected(self, tmp_path):
         proj = tmp_path / "proj"
         proj.mkdir()
