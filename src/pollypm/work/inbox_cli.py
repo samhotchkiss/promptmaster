@@ -223,14 +223,116 @@ def inbox_root(
 
 @inbox_app.command("show")
 def inbox_show(
-    task_id: str = typer.Argument(..., help="Task ID (project/number)"),
+    task_id: str = typer.Argument(
+        ...,
+        help="Task ID (``project/number``) or message ID (``msg:N``)",
+    ),
     db: str = _DB_OPTION,
     output_json: bool = _JSON_OPTION,
 ) -> None:
-    """Show full details of an inbox task. Alias for ``pm task get``."""
-    # Delegate to the existing task get implementation so behaviour stays
-    # identical (context loading, JSON shape, ...).
+    """Show full details of an inbox task or message.
+
+    Accepts both ID forms that ``pm inbox --json`` emits:
+    - ``project/number`` — delegates to ``pm task get``.
+    - ``msg:N`` — loads a row from the unified messages store
+      (``pm notify`` writes, heartbeat alerts, etc.). #760.
+    """
+    if task_id.startswith("msg:"):
+        _show_message_by_id(db=db, msg_id_str=task_id, output_json=output_json)
+        return
     task_get(task_id=task_id, db=db, output_json=output_json)
+
+
+def _show_message_by_id(*, db: str, msg_id_str: str, output_json: bool) -> None:
+    """Render a single message row identified by ``msg:<N>``."""
+    try:
+        msg_id = int(msg_id_str.split(":", 1)[1])
+    except (IndexError, ValueError):
+        typer.echo(f"Error: invalid message id {msg_id_str!r}.", err=True)
+        raise typer.Exit(code=2)
+
+    db_path = _resolve_db_path(db, project=None)
+    try:
+        from pollypm.store import SQLAlchemyStore
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"Error: unified store unavailable ({exc}).", err=True)
+        raise typer.Exit(code=1)
+
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        # query_messages has no id filter; scan recent rows and pick the
+        # match. Inbox messages stay under a few hundred thousand rows in
+        # practice and this command is ad-hoc, so a linear scan is fine.
+        rows = store.query_messages(recipient="user")
+        match = next((row for row in rows if row.get("id") == msg_id), None)
+    finally:
+        store.close()
+
+    if match is None:
+        typer.echo(
+            f"Error: no message with id {msg_id_str!r} (user recipient, any state).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if output_json:
+        import json as _json
+
+        typer.echo(_json.dumps(_serialize_message(match), indent=2, default=str))
+        return
+
+    for line in _render_message_display(match):
+        typer.echo(line)
+
+
+def _serialize_message(row: dict[str, Any]) -> dict[str, Any]:
+    """JSON-ready projection of a messages-table row."""
+    out = dict(row)
+    for key in ("created_at", "updated_at", "closed_at"):
+        value = out.get(key)
+        if value is not None and not isinstance(value, str):
+            out[key] = str(value)
+    return out
+
+
+def _render_message_display(row: dict[str, Any]) -> list[str]:
+    """Human-readable lines for ``pm inbox show msg:N`` on a terminal."""
+    mid = row.get("id")
+    subject = row.get("subject") or "(no subject)"
+    sender = row.get("sender") or "(unknown)"
+    recipient = row.get("recipient") or "user"
+    scope = row.get("scope") or "-"
+    msg_type = row.get("type") or "notify"
+    tier = row.get("tier") or "immediate"
+    state = row.get("state") or "open"
+    created = row.get("created_at") or ""
+    labels = row.get("labels")
+    if isinstance(labels, str):
+        import json as _json
+
+        try:
+            labels = _json.loads(labels)
+        except Exception:  # noqa: BLE001
+            labels = []
+    lines = [
+        f"msg:{mid}",
+        f"  subject:   {subject}",
+        f"  type:      {msg_type} / {tier}",
+        f"  state:     {state}",
+        f"  sender:    {sender}",
+        f"  recipient: {recipient}",
+        f"  scope:     {scope}",
+        f"  created:   {created}",
+    ]
+    if labels:
+        lines.append(f"  labels:    {', '.join(str(label) for label in labels)}")
+    body = (row.get("body") or "").rstrip()
+    if body:
+        lines.append("")
+        lines.append("  body:")
+        for body_line in body.splitlines():
+            lines.append(f"    {body_line}")
+    return lines
 
 
 # ---------------------------------------------------------------------------
