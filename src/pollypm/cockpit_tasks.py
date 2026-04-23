@@ -406,6 +406,24 @@ def _plain_english_summary(task) -> str | None:
     return None
 
 
+def _status_label(task, owner: str | None) -> str:
+    """Render a human-meaningful status chip.
+
+    The DB stores a single ``review`` status regardless of whether the
+    human or Russell owes the next action. The cockpit splits them —
+    ``user-review`` means the task is parked at a human-actor node and
+    is waiting on you; ``autoreview`` means Russell's queue. User
+    feedback 2026-04-23: "we need to differentiate between waiting on
+    feedback from russell and from human."
+    """
+    status = task.work_status.value
+    if status != "review":
+        return status
+    if (owner or "") == "human":
+        return "user-review"
+    return "autoreview"
+
+
 def _render_overview(
     task,
     *,
@@ -432,7 +450,7 @@ def _render_overview(
         ])
     lines.extend([
         "",
-        f"Status     {task.work_status.value}",
+        f"Status     {_status_label(task, owner)}",
         f"Priority   {priority_label(task)}",
         f"Flow       {task.flow_template_id}",
         f"Stage      {_format_stage_label(task, flow)}",
@@ -1260,7 +1278,7 @@ class PollyTasksApp(App[None]):
                 getattr(task, "updated_at", None) or getattr(task, "created_at", None)
             )
             feedback = self._rejection_feedback_by_task_id.get(task.task_id)
-            status = task.work_status.value
+            status = _status_label(task, owner)
             title = f"{priority_glyph(task)} {task.title}"
             stage = task.current_node_id or "—"
             task_number = f"#{task.task_number}"

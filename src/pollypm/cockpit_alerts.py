@@ -77,6 +77,18 @@ _OPERATIONAL_ALERT_PREFIXES: tuple[str, ...] = (
     # are the task-level equivalent of the sweep-level no_session —
     # same reasoning.
     "no_session_for_assignment:",
+    # ``pane:<pattern>`` alerts are raised by the heartbeat pattern
+    # matcher (stuck_on_error / auth_expired / etc.) — all supervisor-
+    # internal. Supervisor auto-handles the recovery; toasting every
+    # pattern match just tells the user "something's happening
+    # mechanically" and trains them to dismiss real alerts.
+    "pane:",
+    # ``stuck_on_task:<task_id>`` is the same story — heuristic
+    # 'this session hasn't moved on this task in a while'. When the
+    # heuristic is right, the recovery system nudges/restarts; when
+    # it's wrong (most of the time — architects sit after emit by
+    # design) the user has nothing to act on.
+    "stuck_on_task:",
 )
 
 
