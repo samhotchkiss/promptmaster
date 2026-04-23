@@ -1373,8 +1373,12 @@ def test_build_cockpit_detail_dashboard_shows_activity_and_tokens(monkeypatch, t
 
     class FakeStore:
         def open_alerts(self):
+            # auth_broken stays in the user-actionable set; pane_dead
+            # and needs_followup are filtered out as operational noise
+            # (#765 morning-after widening). Use auth_broken here so
+            # the dashboard still has an alert to render.
             return [
-                FakeAlert("worker_demo", "pane_dead", "Worker pane exited"),
+                FakeAlert("worker_demo", "auth_broken", "Claude probe failed"),
                 FakeAlert("worker_demo", "needs_followup", "Please review"),
             ]
 

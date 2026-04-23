@@ -603,6 +603,7 @@ class SQLiteWorkService:
         transitions = self._load_transitions(project, task_number)
         executions = self._load_executions(project, task_number)
         rels = self._load_relationships(project, task_number)
+        context_entries = self._load_context_entries(project, task_number)
 
         if token_sums is not None:
             tokens_in, tokens_out, sess_count = token_sums.get(
@@ -647,6 +648,7 @@ class SQLiteWorkService:
             updated_at=datetime.fromisoformat(row["updated_at"]),
             transitions=transitions,
             executions=executions,
+            context=context_entries,
             total_input_tokens=tokens_in,
             total_output_tokens=tokens_out,
             session_count=sess_count,
@@ -781,6 +783,37 @@ class SQLiteWorkService:
                     rels["superseded_by_task_number"] = r["from_task_number"]
 
         return rels
+
+    def _load_context_entries(
+        self, project: str, task_number: int,
+    ) -> list[ContextEntry]:
+        """Attach work_context_entries rows to the hydrated task.
+
+        Ordered oldest-first so the rendering layer can scan for the
+        first matching entry_type (e.g. ``plain_summary``) without
+        walking a reverse list.
+        """
+        rows = self._conn.execute(
+            "SELECT actor, created_at, text, entry_type "
+            "FROM work_context_entries "
+            "WHERE task_project = ? AND task_number = ? ORDER BY id",
+            (project, task_number),
+        ).fetchall()
+        entries: list[ContextEntry] = []
+        for r in rows:
+            try:
+                etype = r["entry_type"] or "note"
+            except (KeyError, IndexError):
+                etype = "note"
+            entries.append(
+                ContextEntry(
+                    actor=r["actor"],
+                    timestamp=datetime.fromisoformat(r["created_at"]),
+                    text=r["text"],
+                    entry_type=etype,
+                )
+            )
+        return entries
 
     def _load_transitions(self, project: str, task_number: int) -> list[Transition]:
         rows = self._conn.execute(

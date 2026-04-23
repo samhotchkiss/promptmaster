@@ -388,6 +388,24 @@ def _task_matches_query(task, owner: str | None, query: str) -> bool:
     return query in haystack
 
 
+def _plain_english_summary(task) -> str | None:
+    """Return a plain-English takeaway for ``task`` if one exists.
+
+    Stored as a ``plain_summary``-typed context entry (same mechanism
+    as ``plan_approved`` — see ``work_context_entries.entry_type``).
+    When the architect's emit step writes one, it shows up at the top
+    of every view of the task: cockpit overview, inbox, pm task get.
+    Returns None when no summary has been stored.
+    """
+    entries = getattr(task, "context", None) or []
+    for entry in entries:
+        if getattr(entry, "entry_type", "") == "plain_summary":
+            text = getattr(entry, "text", "") or ""
+            if text.strip():
+                return text.strip()
+    return None
+
+
 def _render_overview(
     task,
     *,
@@ -395,17 +413,31 @@ def _render_overview(
     flow,
     active_session,
     rejection_feedback: RejectionFeedbackNotice | None = None,
+    task_index: dict[str, "object"] | None = None,
 ) -> str:
     icon = PollyTasksApp._STATUS_ICONS.get(task.work_status.value, "·")
     lines = [
         f"{icon} #{task.task_number} {priority_glyph(task)} {task.title}",
+    ]
+    # Plain-English takeaway first — before any of the technical
+    # metadata — so a human reviewer doesn't have to decode the
+    # description to know what's actually happening.
+    summary = _plain_english_summary(task)
+    if summary:
+        lines.extend([
+            "",
+            "In plain English",
+            "",
+            summary,
+        ])
+    lines.extend([
         "",
         f"Status     {task.work_status.value}",
         f"Priority   {priority_label(task)}",
         f"Flow       {task.flow_template_id}",
         f"Stage      {_format_stage_label(task, flow)}",
         f"Owner      {owner or '—'}",
-    ]
+    ])
     if task.assignee:
         lines.append(f"Assignee   {task.assignee}")
     if task.roles:
@@ -437,6 +469,24 @@ def _render_overview(
                 f"Preview    {rejection_feedback.preview}",
             ]
         )
+    # User-reported gap (morning 2026-04-23): blocked tasks didn't
+    # surface WHY they were blocked. Render blocked_by with task
+    # titles and statuses so the user can see the dependency chain
+    # without running a separate query.
+    blocked_by = list(getattr(task, "blocked_by", None) or [])
+    if blocked_by:
+        lines.extend(["", "Blocked by", ""])
+        for project_key, number in blocked_by:
+            blocker_task_id = f"{project_key}/{number}"
+            sibling = (task_index or {}).get(blocker_task_id)
+            if sibling is None:
+                lines.append(f"- {blocker_task_id}")
+                continue
+            title = getattr(sibling, "title", "") or ""
+            status_enum = getattr(sibling, "work_status", None)
+            status = getattr(status_enum, "value", "") if status_enum else ""
+            status_suffix = f" [{status}]" if status else ""
+            lines.append(f"- {blocker_task_id} — {title}{status_suffix}")
     if task.description:
         lines.extend(["", "Description", "", task.description])
     if task.acceptance_criteria:
@@ -1319,6 +1369,7 @@ class PollyTasksApp(App[None]):
         if feedback is not None:
             header_bits.append("Rejected — feedback in inbox")
         self.detail_header.update("\n".join(header_bits))
+        task_index = {t.task_id: t for t in self._tasks}
         self.detail_overview.update(
             _render_overview(
                 task,
@@ -1326,6 +1377,7 @@ class PollyTasksApp(App[None]):
                 flow=flow,
                 active_session=active_session,
                 rejection_feedback=feedback,
+                task_index=task_index,
             )
         )
         self.detail_context.update(_render_context(task))
