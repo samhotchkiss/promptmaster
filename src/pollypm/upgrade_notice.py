@@ -69,54 +69,48 @@ class NoticeResult:
 def _resolve_role_guide_path(role: str, project_path: Path | None) -> Path | None:
     """Return the absolute path of ``role``'s guide for a project, or None.
 
-    Prefers the project-local fork under
-    ``<project>/.pollypm/project-guides/<role>.md`` when present; falls
-    back to the built-in guide shipped with PollyPM. Skip-roles return
-    None. Unknown roles default to the worker guide.
+    Delegates to :func:`pollypm.project_paths.role_guide_path` (#763) —
+    the single source of truth for "where does role X's guide live
+    for project Y." Skip-roles (heartbeat / heartbeat-supervisor)
+    return None so the caller can bucket them correctly.
 
-    Always returns an absolute path — never a repo-relative string — so
-    sessions can resolve it regardless of working directory.
+    When ``project_path`` is None (no project context), falls back to
+    the built-in operator guide for operator-pm and the shipped
+    russell.md for reviewer; other roles return None because there's
+    no sensible target absent a project directory.
     """
     if role in _SKIP_ROLES:
         return None
 
     try:
-        from pollypm.project_guides import (
-            built_in_guide_source_path,
-            normalize_project_guide_role,
-            project_guide_path,
-        )
+        from pollypm.project_paths import role_guide_path
     except ImportError:
         return None
 
-    # Map operator-pm to worker for guide-lookup purposes: the operator
-    # guide isn't a project-local concept (Polly is global), and the
-    # built-in operator guide lives in core_agent_profiles/profiles.
-    lookup_role = role
-    if role == "operator-pm":
-        return _built_in_operator_guide_path()
-    if role not in {"architect", "reviewer", "worker"}:
-        lookup_role = "worker"
+    if project_path is None:
+        # No project context (fake supervisor in tests, or a session
+        # without a project field set). Fall back to the shipped
+        # absolute path from the package — the same target
+        # role_guide_path would resolve to once materialization runs.
+        return _built_in_guide_path_for_role(role)
 
     try:
-        normalized = normalize_project_guide_role(lookup_role)
+        resolved = role_guide_path(project_path, role)
     except Exception:  # noqa: BLE001
         return None
+    # role_guide_path always returns a Path; we only want to return
+    # one the file actually exists at — callers build a notice body
+    # around this and shouldn't reference a non-existent file.
+    if resolved.exists():
+        return resolved.resolve()
 
-    # Prefer project-local fork if this project has one.
-    if project_path is not None:
-        try:
-            local = project_guide_path(project_path, normalized)
-            if local.exists():
-                return local.resolve()
-        except Exception:  # noqa: BLE001
-            pass
-
-    # For the reviewer role, built_in_guide_source_path returns
-    # profiles.py (the module that builds russell_prompt()), which is
-    # not a useful target for an LLM to re-read. Use the shipped
-    # russell.md markdown file directly instead.
-    if normalized == "reviewer":
+    # For the reviewer, built_in_guide_source_path returns profiles.py
+    # (the module that builds russell_prompt()) which isn't a useful
+    # reread target. role_guide_path normalizes to the same path, so
+    # the fallback below only kicks in when BOTH the project-local
+    # fork and the shipped russell.md are missing — pathological but
+    # we handle it explicitly.
+    if role == "reviewer":
         try:
             base = Path(__file__).resolve().parent
             russell_md = (
@@ -130,20 +124,18 @@ def _resolve_role_guide_path(role: str, project_path: Path | None) -> Path | Non
                 return russell_md
         except Exception:  # noqa: BLE001
             pass
-
-    try:
-        built_in = built_in_guide_source_path(normalized)
-    except Exception:  # noqa: BLE001
-        built_in = None
-    if built_in is not None and built_in.exists():
-        return built_in.resolve()
     return None
 
 
-def _built_in_operator_guide_path() -> Path | None:
-    """Absolute path to the shipped operator-pm (Polly) guide."""
-    try:
-        base = Path(__file__).resolve().parent
+def _built_in_guide_path_for_role(role: str) -> Path | None:
+    """Return the absolute shipped-with-package path for ``role``.
+
+    Used as the fallback when no project context is available. Maps
+    unknown roles to the worker guide (same behavior as
+    :func:`pollypm.project_paths.role_guide_path`).
+    """
+    base = Path(__file__).resolve().parent
+    if role == "operator-pm":
         candidate = (
             base
             / "plugins_builtin"
@@ -151,10 +143,29 @@ def _built_in_operator_guide_path() -> Path | None:
             / "profiles"
             / "polly-operator-guide.md"
         )
-        if candidate.exists():
-            return candidate
+        return candidate if candidate.exists() else None
+
+    if role == "reviewer":
+        candidate = (
+            base
+            / "plugins_builtin"
+            / "core_agent_profiles"
+            / "profiles"
+            / "russell.md"
+        )
+        return candidate if candidate.exists() else None
+
+    # architect/worker/unknown: route through project_guides for the
+    # shipped path. Architect's built-in lives under project_planning;
+    # worker's built-in lives at repo-root docs/worker-guide.md.
+    lookup = role if role in {"architect", "worker"} else "worker"
+    try:
+        from pollypm.project_guides import built_in_guide_source_path
+        path = built_in_guide_source_path(lookup)
     except Exception:  # noqa: BLE001
-        pass
+        return None
+    if path is not None and path.exists():
+        return path.resolve()
     return None
 
 
