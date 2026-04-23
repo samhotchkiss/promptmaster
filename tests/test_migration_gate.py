@@ -183,6 +183,39 @@ def test_synthetic_failing_migration_caught_by_check(
 # ---------------------------------------------------------------------------
 
 
+def test_refuse_start_message_offers_three_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#760: the refuse-start message must surface the three recovery
+    paths (apply, dry-run, bypass) as an ``Options:`` block so the
+    user can pick their comfort level instead of being nudged toward a
+    single action."""
+    db_path = tmp_path / "state.db"
+    from pollypm.work.sqlite_service import SQLiteWorkService
+
+    # Bootstrap a fresh DB so inspect() has something real to read.
+    with SQLiteWorkService(db_path):
+        pass
+    synthetic = list(StateStore._MIGRATIONS) + [
+        (9010, "refuse-start options block", []),
+    ]
+    monkeypatch.setattr(StateStore, "_MIGRATIONS", synthetic)
+
+    status = mig_mod.inspect(db_path)
+    rendered = mig_mod._format_refuse_start_message(status)
+
+    assert "Cannot start" in rendered
+    # Each of the three options is named with its command.
+    assert "Apply (recommended)" in rendered
+    assert "pm migrate --apply" in rendered
+    assert "Dry-run first" in rendered
+    assert "pm migrate --check" in rendered
+    assert "Bypass for this shell only (risky)" in rendered
+    assert "POLLYPM_SKIP_MIGRATION_GATE=1" in rendered
+    # The options block follows Next:.
+    assert rendered.index("Next:") < rendered.index("Options:")
+
+
 def test_cockpit_refuses_start_on_pending_migration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

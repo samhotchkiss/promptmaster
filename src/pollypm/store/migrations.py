@@ -405,7 +405,19 @@ def _format_refuse_start_message(status: MigrationStatus) -> str:
             "needs an update before any session can connect. Running "
             "without it risks cross-version data corruption."
         ),
-        next_action="pm migrate --apply",
+        next_action="Apply the pending migration(s) with pm migrate --apply.",
+        # Three escalating options so the user can pick their comfort
+        # level: safe apply, dry-run-first, or emergency bypass for
+        # non-destructive CLI work. The bypass is last because it
+        # leaves the DB on the old schema.
+        suggested_actions=(
+            ("Apply (recommended)", "pm migrate --apply"),
+            ("Dry-run first", "pm migrate --check"),
+            (
+                "Bypass for this shell only (risky)",
+                "export POLLYPM_SKIP_MIGRATION_GATE=1",
+            ),
+        ),
         details=details,
     )
     return msg.render_cli(show_details=True)
