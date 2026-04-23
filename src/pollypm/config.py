@@ -447,10 +447,20 @@ def _parse_planner_settings(raw: dict[str, object]) -> PlannerSettings:
     plan_dir_raw = planner_raw.get("plan_dir", "docs/plan")
     if not isinstance(plan_dir_raw, str) or not plan_dir_raw.strip():
         plan_dir_raw = "docs/plan"
+    auto_claim_raw = planner_raw.get("auto_claim", True)
+    auto_claim = bool(auto_claim_raw) if isinstance(auto_claim_raw, bool) else True
+    max_conc_raw = planner_raw.get("max_concurrent_per_project", 2)
+    max_conc = (
+        int(max_conc_raw)
+        if isinstance(max_conc_raw, int) and max_conc_raw > 0
+        else 2
+    )
     return PlannerSettings(
         auto_on_project_created=auto,
         enforce_plan=enforce,
         plan_dir=plan_dir_raw.strip(),
+        auto_claim=auto_claim,
+        max_concurrent_per_project=max_conc,
     )
 
 
@@ -603,6 +613,8 @@ def _parse_known_projects(raw: dict[str, object], *, base: Path) -> dict[str, Kn
     for project_key, item_raw in projects_raw.items():
         if not isinstance(item_raw, dict):
             continue
+        auto_claim_raw = item_raw.get("auto_claim")
+        max_concurrent_raw = item_raw.get("max_concurrent_workers")
         projects[project_key] = KnownProject(
             key=project_key,
             path=_resolve_path(base, item_raw["path"]),
@@ -614,6 +626,12 @@ def _parse_known_projects(raw: dict[str, object], *, base: Path) -> dict[str, Kn
                 item_raw.get("roles", {}),
                 allowed_roles=_PROJECT_ROLE_ASSIGNMENT_KEYS,
                 scope_label=f"projects.{project_key}.roles",
+            ),
+            auto_claim=bool(auto_claim_raw) if isinstance(auto_claim_raw, bool) else None,
+            max_concurrent_workers=(
+                int(max_concurrent_raw)
+                if isinstance(max_concurrent_raw, int) and max_concurrent_raw > 0
+                else None
             ),
         )
     return projects

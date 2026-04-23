@@ -75,6 +75,9 @@ class KnownProject:
     kind: ProjectKind = ProjectKind.FOLDER
     tracked: bool = False
     role_assignments: dict[str, ModelAssignment] = field(default_factory=dict)
+    # #768 auto-claim overrides. ``None`` means "defer to planner defaults".
+    auto_claim: bool | None = None
+    max_concurrent_workers: int | None = None
 
     def display_label(self) -> str:
         return self.name or self.key
@@ -213,6 +216,16 @@ class PlannerSettings:
     auto_on_project_created: bool = True
     enforce_plan: bool = True
     plan_dir: str = "docs/plan"
+    # #768: when True (default), the task_assignment sweep auto-claims
+    # queued worker-role tasks for any project with an approved plan,
+    # up to ``max_concurrent_per_project`` workers per project. Set to
+    # False to require manual ``pm task claim``. Per-project opt-out is
+    # also available via ``[projects.<key>].auto_claim = false``.
+    auto_claim: bool = True
+    # Default worker-concurrency cap per project. Bounds the number of
+    # parallel Claude sessions a single project can burn overnight.
+    # Per-project override via ``[projects.<key>].max_concurrent_workers``.
+    max_concurrent_per_project: int = 2
 
 
 @dataclass(slots=True)

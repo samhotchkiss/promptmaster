@@ -438,6 +438,243 @@ def _sweep_work_service(
                     )
 
 
+# ---------------------------------------------------------------------------
+# Auto-claim (#768)
+# ---------------------------------------------------------------------------
+
+
+def _auto_claim_enabled_for_project(services: Any, project: Any) -> bool:
+    """Return True when this project is eligible for auto-claim.
+
+    Precedence: per-project opt-out > global flag. Per-project ``None``
+    means "defer to global default" — only an explicit ``False`` turns
+    the project off.
+    """
+    if not getattr(services, "auto_claim", True):
+        return False
+    project_flag = getattr(project, "auto_claim", None)
+    if project_flag is False:
+        return False
+    return True
+
+
+def _max_concurrent_for_project(services: Any, project: Any) -> int:
+    """Resolve the worker-concurrency cap for a project.
+
+    Per-project override wins; otherwise the global ``max_concurrent_per_project``.
+    Always returns at least 1 so an explicitly-zero config doesn't
+    silently disable claims (use ``auto_claim=false`` for that).
+    """
+    override = getattr(project, "max_concurrent_workers", None)
+    if isinstance(override, int) and override > 0:
+        return override
+    return max(1, int(getattr(services, "max_concurrent_per_project", 2)))
+
+
+def _tmux_window_alive_for_task(
+    services: Any, project_key: str, task_number: int,
+) -> bool:
+    """Check whether the per-task tmux window for a claim is still alive.
+
+    Window-naming contract: per-task workers land in a window named
+    ``task-<slug>-<N>`` inside the pollypm storage-closet session (see
+    :mod:`pollypm.work.session_manager`). We query the session service
+    for a window whose name matches the expected shape. Any error
+    returns True so we don't incorrectly reap a live worker on a
+    transient query failure.
+    """
+    session_service = getattr(services, "session_service", None)
+    if session_service is None:
+        return True
+    expected_suffix = f"-{task_number}"
+    try:
+        tmux = getattr(session_service, "tmux", None)
+        if tmux is None:
+            return True
+        target_session = getattr(session_service, "storage_closet_session_name", None)
+        if callable(target_session):
+            session_name = target_session()
+        else:
+            session_name = "pollypm-storage-closet"
+        windows = tmux.list_windows(session_name)
+    except Exception:  # noqa: BLE001
+        return True
+    for window in windows or []:
+        name = getattr(window, "name", "") or ""
+        if (
+            name.startswith("task-")
+            and name.endswith(expected_suffix)
+            and project_key in name
+            and not getattr(window, "pane_dead", False)
+        ):
+            return True
+    return False
+
+
+def _recover_dead_claims(
+    services: Any,
+    work: Any,
+    project: Any,
+    totals: dict[str, Any],
+) -> None:
+    """Unclaim in_progress worker-role tasks whose tmux window is gone.
+
+    For each in_progress task with role=worker in this project, verify
+    the per-task tmux window still exists. If it doesn't (crashed
+    session, closed window, host reboot), call ``hold`` + ``resume`` to
+    walk the task back through queued so it becomes eligible for
+    auto-claim on the next sweep tick.
+    """
+    project_key = getattr(project, "key", None)
+    if not project_key:
+        return
+    try:
+        in_progress = work.list_tasks(
+            project=project_key, work_status=WorkStatus.IN_PROGRESS.value,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    by_outcome = totals["by_outcome"]
+    for task in in_progress:
+        roles = getattr(task, "roles", {}) or {}
+        if "worker" not in roles:
+            continue
+        task_number = getattr(task, "task_number", None)
+        if task_number is None:
+            continue
+        if _tmux_window_alive_for_task(services, project_key, task_number):
+            continue
+        # Window is gone — release the claim back to queued.
+        task_id = getattr(task, "task_id", f"{project_key}/{task_number}")
+        try:
+            work.hold(task_id, "auto_claim_sweep", reason="worker session missing")
+            work.resume(task_id, "auto_claim_sweep")
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_auto_claim: recovery hold/resume failed for %s",
+                task_id, exc_info=True,
+            )
+            continue
+        by_outcome["auto_claim_recovered"] = (
+            by_outcome.get("auto_claim_recovered", 0) + 1
+        )
+        # Record an event so the activity log shows the auto-recovery.
+        msg_store = getattr(services, "msg_store", None)
+        if msg_store is not None:
+            try:
+                msg_store.append_event(
+                    scope=project_key,
+                    sender="auto_claim_sweep",
+                    subject="worker_session_recovered",
+                    payload={
+                        "task_id": task_id,
+                        "reason": "tmux window missing; task returned to queued",
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _auto_claim_next(
+    services: Any,
+    work: Any,
+    project: Any,
+    totals: dict[str, Any],
+) -> None:
+    """Claim the next queued worker-role task if capacity allows.
+
+    Called once per project per sweep tick after the regular sweep body
+    has run. Rate-limited by the per-project ``max_concurrent_workers``
+    so overnight runs don't burn every Claude session at once on a
+    freshly-emitted plan.
+    """
+    project_key = getattr(project, "key", None)
+    if not project_key:
+        return
+    project_path = getattr(project, "path", None)
+    if project_path is None:
+        return
+    # Gate: plan must be approved before we can claim for the project.
+    try:
+        if not has_acceptable_plan(
+            project_key, Path(project_path), work,
+            plan_dir=getattr(services, "plan_dir", "docs/plan"),
+        ):
+            return
+    except Exception:  # noqa: BLE001
+        return
+
+    # Capacity check. We count in_progress worker-role tasks rather than
+    # tmux ``worker_sessions`` rows because the DB claim is the
+    # authoritative signal: a claim without a spawned session is still
+    # "work in flight" (the recovery helper above will unclaim it if
+    # the tmux window never shows up).
+    try:
+        in_progress = work.list_tasks(
+            project=project_key, work_status=WorkStatus.IN_PROGRESS.value,
+        )
+    except Exception:  # noqa: BLE001
+        in_progress = []
+    active = [
+        task for task in in_progress
+        if "worker" in (getattr(task, "roles", {}) or {})
+    ]
+    cap = _max_concurrent_for_project(services, project)
+    if len(active) >= cap:
+        return
+
+    # Pick the oldest queued worker-role task.
+    try:
+        queued = work.list_tasks(
+            project=project_key, work_status=WorkStatus.QUEUED.value,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    candidates = [
+        task for task in queued
+        if "worker" in (getattr(task, "roles", {}) or {})
+        and not task_bypasses_plan_gate(task)
+    ]
+    if not candidates:
+        return
+    # Sort by task_number ascending so deterministic pickup order.
+    candidates.sort(key=lambda t: getattr(t, "task_number", 0))
+    target = candidates[0]
+    task_id = getattr(target, "task_id", None)
+    if not task_id:
+        return
+
+    try:
+        work.claim(task_id, "auto_claim_sweep")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "task_auto_claim: claim(%s) failed: %s", task_id, exc,
+            exc_info=True,
+        )
+        totals["by_outcome"]["auto_claim_failed"] = (
+            totals["by_outcome"].get("auto_claim_failed", 0) + 1
+        )
+        return
+    totals["by_outcome"]["auto_claim_spawned"] = (
+        totals["by_outcome"].get("auto_claim_spawned", 0) + 1
+    )
+    msg_store = getattr(services, "msg_store", None)
+    if msg_store is not None:
+        try:
+            msg_store.append_event(
+                scope=project_key,
+                sender="auto_claim_sweep",
+                subject="worker_auto_claimed",
+                payload={
+                    "task_id": task_id,
+                    "active_workers_before": len(active),
+                    "cap": cap,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _open_project_work_service(project: Any) -> Any | None:
     """Open a per-project ``SQLiteWorkService`` if its state.db exists.
 
@@ -543,6 +780,14 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
                 plan_decisions=plan_decisions,
                 project_path=getattr(project, "path", None),
             )
+            # #768: auto-claim runs after the regular sweep body so
+            # dead-window recovery has the most-recent state to work
+            # with. Skipped entirely for projects that have opted out
+            # (``[projects.<key>].auto_claim = false``) or when the
+            # global flag is disabled.
+            if _auto_claim_enabled_for_project(services, project):
+                _recover_dead_claims(services, project_work, project, totals)
+                _auto_claim_next(services, project_work, project, totals)
             projects_scanned += 1
         finally:
             _close_quietly(project_work)

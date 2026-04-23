@@ -60,6 +60,9 @@ class _RuntimeServices:
     known_projects: tuple[Any, ...] = field(default_factory=tuple)
     enforce_plan: bool = True
     plan_dir: str = "docs/plan"
+    # #768 auto-claim — global default + per-project caps
+    auto_claim: bool = True
+    max_concurrent_per_project: int = 2
 
 
 def load_runtime_services(
@@ -144,6 +147,8 @@ def load_runtime_services(
         enforce_plan=config.planner.enforce_plan,
         plan_dir=config.planner.plan_dir,
         msg_store=msg_store,
+        auto_claim=config.planner.auto_claim,
+        max_concurrent_per_project=config.planner.max_concurrent_per_project,
     )
 
 
