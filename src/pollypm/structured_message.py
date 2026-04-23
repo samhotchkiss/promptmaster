@@ -112,13 +112,20 @@ def _paragraph(text: str, wrap: int) -> str:
     emitted verbatim — those shapes carry meaning (code blocks,
     lists, structured detail dumps) that a reflow would destroy.
     Everything else gets wrapped at ``wrap`` columns.
+
+    Leading/trailing blank lines are trimmed but in-line indentation
+    on preformatted blocks is preserved exactly.
     """
-    text = (text or "").strip()
     if not text:
         return ""
+    # Strip only leading + trailing blank lines; preserve the
+    # indentation inside pre-formatted blocks.
+    stripped = text.strip("\n")
+    if not stripped.strip():
+        return ""
     if wrap <= 0:
-        return text
-    paragraphs = text.split("\n\n")
+        return stripped
+    paragraphs = stripped.split("\n\n")
     wrapped = []
     for para in paragraphs:
         # Preserve any block whose lines read as pre-formatted — at
@@ -128,7 +135,10 @@ def _paragraph(text: str, wrap: int) -> str:
         if _looks_preformatted(para):
             wrapped.append(para)
             continue
-        wrapped.append(textwrap.fill(para.replace("\n", " "), width=wrap))
+        # Non-preformatted paragraph: collapse any internal line
+        # breaks and rewrap. strip() here is fine because the block
+        # is free-form prose.
+        wrapped.append(textwrap.fill(para.strip().replace("\n", " "), width=wrap))
     return "\n\n".join(wrapped)
 
 

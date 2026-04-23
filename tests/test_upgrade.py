@@ -56,6 +56,24 @@ def test_detect_unknown_when_none() -> None:
     ) == "unknown"
 
 
+def test_unsupported_installer_help_uses_structured_shape() -> None:
+    """#760: every user-facing error should follow the four-field
+    StructuredUserMessage shape. This one names a summary, explains
+    why, points at a next step, and preserves the per-tool command
+    list as pre-formatted details."""
+    text = upgrade_mod.unsupported_installer_help()
+    # Summary line with failure icon.
+    assert text.startswith("✗ Could not detect how PollyPM was installed.")
+    # Next-action line is prominent.
+    assert "Next:" in text
+    # Per-tool commands are in the details block and retained their
+    # leading-space indentation (they're pre-formatted).
+    assert "  uv tool upgrade pollypm" in text
+    assert "  pip install -U pollypm" in text
+    assert "  brew upgrade pollypm" in text
+    assert "  npm update -g pollypm" in text
+
+
 # --------------------------------------------------------------------------- #
 # plan_upgrade — per-installer + channel routing
 # --------------------------------------------------------------------------- #

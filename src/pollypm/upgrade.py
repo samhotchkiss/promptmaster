@@ -199,19 +199,36 @@ def plan_upgrade(installer: Installer, channel: str) -> UpgradePlan:
 def unsupported_installer_help() -> str:
     """User-facing text shown when no installer is detected.
 
-    The text is deliberately specific — users see the exact command
-    per tool and can pick the one matching their install.
+    Uses the StructuredUserMessage shape (#760) — consistent with
+    other user-facing errors like the migration-gate refusal. The
+    per-tool commands land in the ``details`` block so they're
+    scannable without dominating the message.
     """
-    return (
-        "Could not detect how PollyPM was installed.\n"
-        "Try one of these manually:\n"
-        "  uv tool upgrade pollypm\n"
-        "  pip install -U pollypm\n"
-        "  brew upgrade pollypm\n"
-        "  npm update -g pollypm\n"
-        "For pre-release builds, add --pre (pip) / --prerelease allow (uv) "
-        "/ @beta (npm)."
+    from pollypm.structured_message import StructuredUserMessage
+
+    msg = StructuredUserMessage(
+        summary="Could not detect how PollyPM was installed.",
+        why=(
+            "pm upgrade needs to know which package manager placed "
+            "pollypm on your PATH so it can hand off the upgrade to "
+            "the right tool. Your system doesn't show any of the "
+            "four we know about (uv, pip, brew, npm)."
+        ),
+        next_action=(
+            "Run the command matching how you installed pollypm — "
+            "details below."
+        ),
+        details=(
+            "  uv tool upgrade pollypm\n"
+            "  pip install -U pollypm\n"
+            "  brew upgrade pollypm\n"
+            "  npm update -g pollypm\n"
+            "\n"
+            "For pre-release builds, add --pre (pip) / --prerelease "
+            "allow (uv) / @beta (npm)."
+        ),
     )
+    return msg.render_cli(show_details=True)
 
 
 def run_migration_check() -> tuple[bool, str]:
