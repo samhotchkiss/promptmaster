@@ -66,6 +66,17 @@ def resolve_static_view_route(key: str) -> StaticViewRoute | None:
             project_key=project_key or None,
             selected_key=key,
         )
+    # #751 — inbox can be project-scoped when jumped-to from a project
+    # dashboard. ``inbox:polly_remote`` lands in the inbox pane with
+    # its filter pre-applied to that project.
+    if key.startswith("inbox:"):
+        _, _, project_key = key.partition(":")
+        if project_key:
+            return StaticViewRoute(
+                kind="inbox",
+                project_key=project_key,
+                selected_key="inbox",
+            )
     return None
 
 

@@ -109,7 +109,12 @@ def register_ui_commands(app: typer.Typer) -> None:
         if kind == "inbox":
             from pollypm.cockpit_ui import PollyInboxApp
 
-            PollyInboxApp(config_path).run(mouse=True)
+            # #751 — ``--project <key>`` pre-scopes the inbox to the
+            # given project on mount. Used when jumping from a
+            # project dashboard so the user sees only that project's
+            # items on arrival.
+            project_key = project or target
+            PollyInboxApp(config_path, initial_project=project_key).run(mouse=True)
             return
         if kind == "workers":
             from pollypm.cockpit_ui import PollyWorkerRosterApp

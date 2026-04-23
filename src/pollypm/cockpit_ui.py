@@ -5541,9 +5541,18 @@ class PollyInboxApp(App[None]):
     # the detail pane.
     ROLLUP_DEFAULT_VISIBLE = 10
 
-    def __init__(self, config_path: Path) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        *,
+        initial_project: str | None = None,
+    ) -> None:
         super().__init__()
         self.config_path = config_path
+        # #751 — when the inbox is launched from a project dashboard,
+        # this is the project key to pre-apply as a filter on mount.
+        # None means "no initial scope" (legacy behavior).
+        self._initial_project = initial_project
         self.list_view = ListView(id="inbox-list")
         self.detail = Static("", id="inbox-detail", markup=True)
         # Rollup items are rendered as sibling widgets under the detail
@@ -5636,9 +5645,20 @@ class PollyInboxApp(App[None]):
         # Session-scoped filters: clear on each mount so restarts of the
         # cockpit land on a pristine full-list view.
         self._reset_filter_state()
-        self.filter_input.display = False
-        self.filter_bar.display = False
-        self.filter_chips.display = False
+        # #751 — when launched with an initial project, pre-apply it
+        # as a filter. The user jumped here from a project dashboard
+        # and expects to see that project's items. Filter chips stay
+        # visible so the scope is obvious and one-click-dismissable.
+        if self._initial_project:
+            self._filter_project = self._initial_project
+            self._filter_bar_visible = True
+            self.filter_input.display = False
+            self.filter_bar.display = True
+            self.filter_chips.display = True
+        else:
+            self.filter_input.display = False
+            self.filter_bar.display = False
+            self.filter_chips.display = False
         self._refresh_list(select_first=True)
         self.set_interval(self.REFRESH_INTERVAL_SECONDS, self._background_refresh)
         self.list_view.focus()
@@ -8700,7 +8720,11 @@ class PollyProjectDashboardApp(App[None]):
 
     def _route_to_inbox(self) -> None:
         router = CockpitRouter(self.config_path)
-        router.route_selected("inbox")
+        # #751 — scope the inbox to the current project on jump so the
+        # user doesn't land in the global feed when they came from a
+        # specific project. Router resolves ``inbox:<key>`` to a
+        # scoped static-view route.
+        router.route_selected(f"inbox:{self.project_key}")
 
     # ------------------------------------------------------------------
     # Click handlers (#750)

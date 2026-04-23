@@ -1947,7 +1947,14 @@ class CockpitRouter:
         pm_cmd = "pm" if shutil.which("pm") else "uv run pm"
         args = [pm_cmd, "cockpit-pane", shlex.quote(kind)]
         if project_key is not None:
-            args.append(shlex.quote(project_key))
+            # #751 — inbox and activity both use --project to scope
+            # their view. Other views (settings/issues/project) use
+            # the positional target argument because they mount the
+            # per-project screen directly, not a scoped filter.
+            if kind in {"inbox", "activity"}:
+                args.extend(["--project", shlex.quote(project_key)])
+            else:
+                args.append(shlex.quote(project_key))
         joined = " ".join(args)
         return f"sh -lc 'cd {root} && {joined}'"
 

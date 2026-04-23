@@ -906,6 +906,44 @@ def test_d_on_rollup_subitem_targets_its_project(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_inbox_app_honors_initial_project_filter(inbox_env) -> None:
+    """#751: when launched with ``initial_project``, the inbox applies
+    the project filter on mount and shows the filter-bar chip so the
+    scope is visible + dismissable."""
+    if not _load_config_compatible(inbox_env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_ui import PollyInboxApp
+
+    app = PollyInboxApp(inbox_env["config_path"], initial_project="demo")
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            # Filter state reflects the initial project.
+            assert app._filter_project == "demo"
+            # Filter bar mounted visible so the user can see + clear.
+            assert app.filter_bar.display is True
+
+    _run(body())
+
+
+def test_inbox_app_without_initial_project_stays_global(inbox_env) -> None:
+    """Legacy path: no initial_project means no filter pre-applied."""
+    if not _load_config_compatible(inbox_env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_ui import PollyInboxApp
+
+    app = PollyInboxApp(inbox_env["config_path"])  # no initial_project
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            assert app._filter_project is None
+            assert app.filter_bar.display is False
+
+    _run(body())
+
+
 def test_background_refresh_skips_when_content_unchanged(inbox_env, inbox_app) -> None:
     """The visible flash every ~8s was caused by the background refresh
     calling ListView.clear() and re-appending every row on every tick,

@@ -39,3 +39,22 @@ def test_resolve_project_route_parses_dashboard_and_task_routes() -> None:
         task_num="7",
     )
     assert resolve_project_route("settings") is None
+
+
+def test_resolve_static_view_route_parses_scoped_inbox() -> None:
+    """#751: ``inbox:<project_key>`` scopes the inbox pane to that
+    project on mount. Same pattern as activity:<project_key>."""
+    route = resolve_static_view_route("inbox:polly_remote")
+    assert route == StaticViewRoute(
+        kind="inbox",
+        project_key="polly_remote",
+        selected_key="inbox",
+    )
+
+
+def test_resolve_static_view_route_bare_inbox_stays_global() -> None:
+    """Bare 'inbox' returns the default (global) route with no scope."""
+    route = resolve_static_view_route("inbox")
+    assert route is not None
+    assert route.kind == "inbox"
+    assert route.project_key is None
