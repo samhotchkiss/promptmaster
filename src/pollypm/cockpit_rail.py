@@ -1141,6 +1141,7 @@ class CockpitRouter:
                 window,
                 launch.session.provider,
                 heartbeat=heartbeat,
+                session_name=session_name,
             )
             if working:
                 return f"{self._presence().working_frame(spinner_index)} working"
@@ -1178,8 +1179,52 @@ class CockpitRouter:
         except Exception:  # noqa: BLE001
             return None
 
-    def _is_pane_working(self, window, provider, *, heartbeat=None) -> bool:
-        """Check if a session pane has an active turn (agent is working, not idle at prompt)."""
+    def _session_snapshot_is_stable(
+        self, session_name: str, *, stable_frames: int = 3,
+    ) -> bool:
+        """Return True if the last ``stable_frames`` heartbeats all share
+        the same snapshot_hash — a strong signal that the pane is not
+        actually producing output, regardless of what the current pane
+        text suggests. See #764.
+        """
+        try:
+            supervisor = self._load_supervisor()
+        except Exception:  # noqa: BLE001
+            return False
+        if supervisor is None:
+            return False
+        try:
+            records = supervisor.store.recent_heartbeats(
+                session_name, limit=stable_frames,
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        if len(records) < stable_frames:
+            return False
+        hashes = {r.snapshot_hash for r in records if r.snapshot_hash}
+        # All three stored with the same hash → unchanged pane.
+        return len(hashes) == 1
+
+    def _is_pane_working(
+        self,
+        window,
+        provider,
+        *,
+        heartbeat=None,
+        session_name: str | None = None,
+    ) -> bool:
+        """Check if a session pane has an active turn (agent is working, not idle at prompt).
+
+        #764: even if the pane text says "esc to interrupt" (claude's
+        turn-in-progress marker), treat the session as NOT working
+        when the snapshot hash has been stable across the last three
+        heartbeats. A genuinely working agent produces fresh output on
+        every heartbeat interval; a stalled session stays pixel-for-
+        pixel identical while still showing "esc to interrupt" from a
+        turn that's been hung for minutes or hours.
+        """
+        if session_name and self._session_snapshot_is_stable(session_name):
+            return False
         pane_text = read_recent_heartbeat_snapshot(heartbeat)
         if pane_text is None:
             try:

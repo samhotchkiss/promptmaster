@@ -139,7 +139,7 @@ def test_build_items_preserves_working_project_session_state(
     monkeypatch.setattr(
         router,
         "_is_pane_working",
-        lambda window, provider, *, heartbeat=None: True,
+        lambda window, provider, *, heartbeat=None, session_name=None: True,
     )
 
     items = router.build_items(spinner_index=1)
@@ -147,6 +147,89 @@ def test_build_items_preserves_working_project_session_state(
 
     assert demo_item.state.endswith("working")
     assert demo_item.state != "idle"
+
+
+def test_is_pane_working_returns_false_when_snapshot_stable(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#764: if the session's last three heartbeats all share the same
+    snapshot_hash, the pane has not actually produced output — return
+    False even if the captured pane text contains "esc to interrupt"
+    (claude's turn-in-progress marker).
+    """
+    _write_config(tmp_path)
+    router = CockpitRouter(tmp_path / "pollypm.toml")
+
+    from types import SimpleNamespace
+
+    class _StubStore:
+        def recent_heartbeats(self, session_name, limit):
+            # Three identical snapshot hashes → stable.
+            return [
+                SimpleNamespace(snapshot_hash="abc123"),
+                SimpleNamespace(snapshot_hash="abc123"),
+                SimpleNamespace(snapshot_hash="abc123"),
+            ]
+
+    class _StubSup:
+        store = _StubStore()
+
+    monkeypatch.setattr(router, "_load_supervisor", lambda: _StubSup())
+    assert router._session_snapshot_is_stable("demo_worker") is True
+
+    window = _FakeWindow("worker-demo")
+    provider = SimpleNamespace(value="claude")
+    # Even though the pane text DOES contain the working marker, the
+    # stability check short-circuits and reports "not working."
+    monkeypatch.setattr(
+        router.tmux,
+        "capture_pane",
+        lambda pane_id, lines=15: "some output\nesc to interrupt\n",
+        raising=False,
+    )
+    working = router._is_pane_working(
+        window, provider, heartbeat=None, session_name="demo_worker",
+    )
+    assert working is False
+
+
+def test_is_pane_working_still_true_when_snapshots_differ(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """When the pane IS churning (three distinct snapshot hashes across
+    the last three heartbeats), the 'esc to interrupt' marker still
+    means 'working'. Only unchanged panes are demoted to idle."""
+    _write_config(tmp_path)
+    router = CockpitRouter(tmp_path / "pollypm.toml")
+
+    from types import SimpleNamespace
+
+    class _StubStore:
+        def recent_heartbeats(self, session_name, limit):
+            return [
+                SimpleNamespace(snapshot_hash="a"),
+                SimpleNamespace(snapshot_hash="b"),
+                SimpleNamespace(snapshot_hash="c"),
+            ]
+
+    class _StubSup:
+        store = _StubStore()
+
+    monkeypatch.setattr(router, "_load_supervisor", lambda: _StubSup())
+    assert router._session_snapshot_is_stable("demo_worker") is False
+
+    window = _FakeWindow("worker-demo")
+    provider = SimpleNamespace(value="claude")
+    monkeypatch.setattr(
+        router.tmux,
+        "capture_pane",
+        lambda pane_id, lines=15: "fresh turn\nesc to interrupt\n",
+        raising=False,
+    )
+    working = router._is_pane_working(
+        window, provider, heartbeat=None, session_name="demo_worker",
+    )
+    assert working is True
 
 
 def test_removing_core_rail_items_yields_empty_rail(monkeypatch, tmp_path: Path) -> None:
