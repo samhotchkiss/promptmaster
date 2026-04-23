@@ -249,9 +249,11 @@ class TestNoSessionAlerts:
         assert alert.session_name == "worker-ghost"
         assert alert.severity == "warn"
         assert "ghost" in alert.message
-        # Fix-it now points at both supported flows post-#406-era cleanup.
+        # Fix-it hint names the role-matching worker-start command (this
+        # test seeds a ``worker`` task, so the hint should say
+        # ``--role worker``) alongside the per-task claim fallback.
         assert "pm task claim" in alert.message
-        assert "pm worker-start --role architect ghost" in alert.message
+        assert "pm worker-start --role worker ghost" in alert.message
 
         store.close()
 

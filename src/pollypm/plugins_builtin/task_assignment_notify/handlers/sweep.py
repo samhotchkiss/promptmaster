@@ -223,11 +223,23 @@ def _emit_no_session_alert(
     # queries filter on.
     candidates = role_candidate_names(role, project) if actor_type is ActorType.ROLE else [role]
     expected_name = candidates[0] if candidates else f"{role}-{project}"
+    # #760 — actionable single-line copy. Old phrasing started with
+    # routing-engine language ("no live session for role:worker in
+    # project X") which read as machine-to-machine. New phrasing
+    # starts with the user-visible effect and names the concrete
+    # command alternatives.
+    if actor_type is ActorType.ROLE and role == "architect":
+        fix_hint = f"Try: pm worker-start --role architect {project}"
+    elif actor_type is ActorType.ROLE:
+        fix_hint = (
+            f"Try: pm worker-start --role {role} {project} "
+            f"(or pm task claim {example_task_id} for a per-task worker)"
+        )
+    else:
+        fix_hint = f"Try: pm task claim {example_task_id}"
     message = (
-        f"Queued task {example_task_id} has no live session for "
-        f"{actor_type.value}:{role} in project '{project}'. "
-        f"Fix: `pm task claim {example_task_id}` for a per-task worker, or "
-        f"`pm worker-start --role architect {project}` to spawn the architect."
+        f"No worker is running for the {role} role on '{project}' — "
+        f"task {example_task_id} is stuck in the queue. {fix_hint}"
     )
     try:
         store.upsert_alert(expected_name, "no_session", "warn", message)
@@ -260,10 +272,15 @@ def _emit_plan_missing_alert(
     # session_name ``plan_gate-<project>`` so the cockpit's per-session
     # alert view groups it alongside the project's worker alerts.
     session_name = f"plan_gate-{project}"
+    # #760 — actionable single-line copy: name the project + the
+    # blocked task so the reader knows why it matters, end with a
+    # copy-pasteable command. Prior phrasing ("cannot be delegated",
+    # "no approved plan found at docs/plan/plan.md") was developer
+    # jargon that left the user guessing.
     message = (
-        f"Queued task {example_task_id} in project '{project}' cannot "
-        f"be delegated — no approved plan found at docs/plan/plan.md. "
-        f"Fix: pm project plan {project}"
+        f"Project '{project}' has no approved plan yet — "
+        f"queued task {example_task_id} is waiting on it. "
+        f"Try: pm project plan {project}"
     )
     try:
         store.upsert_alert(session_name, "plan_missing", "warn", message)
