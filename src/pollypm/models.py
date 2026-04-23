@@ -34,6 +34,26 @@ class ProjectSettings:
 
 
 @dataclass(slots=True)
+class ModelAssignment:
+    alias: str | None = None
+    provider: str | None = None
+    model: str | None = None
+
+    def __post_init__(self) -> None:
+        has_alias = isinstance(self.alias, str) and bool(self.alias.strip())
+        has_pair = (
+            isinstance(self.provider, str)
+            and bool(self.provider.strip())
+            and isinstance(self.model, str)
+            and bool(self.model.strip())
+        )
+        if has_alias == has_pair:
+            raise ValueError(
+                "ModelAssignment requires exactly one of alias or provider/model."
+            )
+
+
+@dataclass(slots=True)
 class KnownProject:
     key: str
     path: Path
@@ -41,9 +61,13 @@ class KnownProject:
     persona_name: str | None = None
     kind: ProjectKind = ProjectKind.FOLDER
     tracked: bool = False
+    role_assignments: dict[str, ModelAssignment] = field(default_factory=dict)
 
     def display_label(self) -> str:
         return self.name or self.key
+
+
+ProjectConfig = KnownProject
 
 
 @dataclass(slots=True)
@@ -84,6 +108,7 @@ class PollyPMSettings:
     lease_timeout_minutes: int = 30
     timezone: str = ""  # IANA timezone (e.g. "America/Denver"). Empty = auto-detect.
     release_channel: Literal["stable", "beta"] = "stable"
+    role_assignments: dict[str, ModelAssignment] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
