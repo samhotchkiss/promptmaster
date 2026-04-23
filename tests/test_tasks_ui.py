@@ -1077,7 +1077,11 @@ def test_task_bulk_selection_and_batch_review(env, monkeypatch) -> None:
             await pilot.press("A")
             await pilot.pause()
             banner = str(app.query_one("#tasks-banner", Static).render())
-            assert "Approve 2 tasks" in banner
+            # #767 — banner now has a bolder, more visible shape:
+            # "APPROVED · 2 tasks   Undo press Z (Ns)".
+            assert "APPROVED" in banner
+            assert "2 tasks" in banner
+            assert "Undo" in banner
             assert fake_svc.approve_calls == []
 
             await asyncio.sleep(0.3)
@@ -1137,7 +1141,9 @@ def test_task_app_approve_undo_banner_and_auto_merge(env, monkeypatch) -> None:
             await pilot.press("a")
             await pilot.pause()
             banner = str(app.query_one("#tasks-banner", Static).render())
-            assert "[Z] Undo" in banner
+            # #767 — banner reads "APPROVED · #1   Undo press Z (Ns)".
+            assert "APPROVED" in banner
+            assert "Undo" in banner
             assert fake_svc.approve_calls == []
 
             await pilot.press("z")
@@ -1152,6 +1158,87 @@ def test_task_app_approve_undo_banner_and_auto_merge(env, monkeypatch) -> None:
             ]
             assert notification_calls == ["demo/1"]
             assert merge_calls and merge_calls[0][:4] == ["gh", "pr", "merge", "123"]
+
+    _run(body())
+
+
+def test_task_app_banner_includes_progress_bar_and_success_state(env, monkeypatch) -> None:
+    """#767: the redesigned banner renders a visible progress bar
+    underneath the APPROVED line, uses the success (green) CSS class
+    by default, and is tall enough (multi-line) to be noticeable."""
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    task = _task(node_id="critic_panel", status=WorkStatus.REVIEW)
+    fake_svc = _FakeSvc(tasks_factory=lambda: [task], flow=_flow())
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+    # Long window so we can inspect the banner mid-countdown without
+    # racing the auto-commit.
+    monkeypatch.setattr("pollypm.cockpit_tasks._PENDING_UNDO_SECONDS", 60.0)
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            await pilot.press("a")
+            await pilot.pause()
+
+            banner_widget = app.query_one("#tasks-banner", Static)
+            rendered = str(banner_widget.render())
+            # Multi-line: APPROVED line + progress-bar line.
+            assert "\n" in rendered, (
+                f"banner should span multiple lines for visibility; got {rendered!r}"
+            )
+            # Progress bar uses full / empty block glyphs.
+            assert "█" in rendered or "░" in rendered, (
+                f"banner should render a progress bar; got {rendered!r}"
+            )
+            # Approve decision → success class, NOT reject class.
+            assert not banner_widget.has_class("-reject")
+
+    _run(body())
+
+
+def test_task_app_reject_banner_uses_reject_class(env, monkeypatch) -> None:
+    """Rejecting paints the banner red (distinct color class) so the
+    user immediately reads the decision visually."""
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+    from pollypm.cockpit_tasks import _PendingReviewAction
+    from time import monotonic
+
+    task = _task(node_id="critic_panel", status=WorkStatus.REVIEW)
+    fake_svc = _FakeSvc(tasks_factory=lambda: [task], flow=_flow())
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+    monkeypatch.setattr("pollypm.cockpit_tasks._PENDING_UNDO_SECONDS", 60.0)
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            # Drive _sync_banner with a reject-decision pending action.
+            app._pending_review_action = _PendingReviewAction(
+                task_ids=("demo/1",),
+                task_numbers=(1,),
+                decision="reject",
+                reason="needs work",
+                deadline=monotonic() + 60.0,
+            )
+            app._sync_banner()
+            await pilot.pause()
+
+            banner_widget = app.query_one("#tasks-banner", Static)
+            rendered = str(banner_widget.render())
+            assert "REJECTED" in rendered
+            assert banner_widget.has_class("-reject")
 
     _run(body())
 

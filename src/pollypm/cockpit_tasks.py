@@ -819,10 +819,15 @@ class PollyTasksApp(App[None]):
         padding: 1 0 0 0;
     }
     #tasks-banner {
-        height: auto;
-        padding: 0 1 1 1;
-        color: #b7c4d1;
-        background: #0d1419;
+        height: 3;
+        padding: 0 1;
+        color: #0d1419;
+        background: #3ddc84;
+        text-style: bold;
+    }
+    #tasks-banner.-reject {
+        color: #ffd7d9;
+        background: #d93f3a;
     }
     #task-tabs { height: 1fr; }
     #task-detail-scroll,
@@ -920,7 +925,7 @@ class PollyTasksApp(App[None]):
         self.refresh_live_button = Button("Refresh Live", id="task-refresh-live")
         self.live_tail_fill = Static("", id="task-live-header-fill")
         self.live_tail_pill = Static("[End]", id="task-live-end-pill")
-        self.banner = Static("", id="tasks-banner", markup=False)
+        self.banner = Static("", id="tasks-banner", markup=True)
         self._pending_review_action: _PendingReviewAction | None = None
         self._pending_commit_timer = None
         self._pending_countdown_timer = None
@@ -1106,24 +1111,51 @@ class PollyTasksApp(App[None]):
         header_row.display = self._live_tail_paused
 
     def _sync_banner(self) -> None:
-        banner = ""
-        if self._pending_review_action is not None:
-            seconds_left = max(
-                0,
-                int(self._pending_review_action.deadline - monotonic() + 0.999),
-            )
-            verb = (
-                "Approve"
-                if self._pending_review_action.decision == "approve"
-                else "Reject"
-            )
-            if len(self._pending_review_action.task_numbers) == 1:
-                target = f"#{self._pending_review_action.task_numbers[0]}"
-            else:
-                target = f"{len(self._pending_review_action.task_numbers)} tasks"
-            banner = f"{verb} {target} — [Z] Undo ({seconds_left}s)"
-        self.banner.update(banner)
-        self.banner.display = bool(banner)
+        """Render the approve/reject commit banner with an undo countdown.
+
+        #767: the old banner was a single dim gray line tucked below
+        the task table — users reported missing the confirmation entirely
+        and not realizing the action had registered. The new banner is:
+        - Full-width, tall (3 rows), high-contrast (success green on
+          dark, or error red for reject).
+        - Bold "APPROVED" / "REJECTED" label so the click is obviously
+          confirmed the instant it fires.
+        - Visible ticking countdown (``Undo (3s)``) at the end plus a
+          shrinking progress bar underneath so the decaying window is
+          tangible without reading numbers.
+        """
+        if self._pending_review_action is None:
+            self.banner.update("")
+            self.banner.display = False
+            self.banner.remove_class("-reject")
+            return
+
+        pending = self._pending_review_action
+        total_window = float(_PENDING_UNDO_SECONDS)
+        remaining = max(0.0, pending.deadline - monotonic())
+        seconds_left = max(0, int(remaining + 0.999))
+
+        if pending.decision == "approve":
+            label = "APPROVED"
+            self.banner.remove_class("-reject")
+        else:
+            label = "REJECTED"
+            self.banner.add_class("-reject")
+
+        if len(pending.task_numbers) == 1:
+            target = f"#{pending.task_numbers[0]}"
+        else:
+            target = f"{len(pending.task_numbers)} tasks"
+
+        bar_total = 30
+        filled = int(round(bar_total * (remaining / total_window)))
+        filled = max(0, min(bar_total, filled))
+        progress_bar = "█" * filled + "░" * (bar_total - filled)
+
+        line_one = f"✓ {label} · {target}   [b]Undo[/b] press [b]Z[/b] ({seconds_left}s)"
+        line_two = progress_bar
+        self.banner.update(f"{line_one}\n{line_two}")
+        self.banner.display = True
 
     def _set_detail_empty(self, message: str) -> None:
         self._selected_task_id = None
