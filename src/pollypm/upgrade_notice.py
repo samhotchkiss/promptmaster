@@ -1,27 +1,26 @@
 """In-session ``<system-update>`` notice injection (#718).
 
-When PollyPM is upgraded while sessions are live, ``claude --resume`` /
-``codex --resume`` preserve the original conversation — the system
-prompt from turn 1 stays baked into history and new system prompts are
-NOT merged. Killing + relaunching sessions would work but drops
-in-flight context.
+**Default-disabled as of #755/#763.** Models treat a ``<system-update>``
+tag delivered via user-turn input as a prompt-injection attack pattern
+(correctly — the tag has no provenance the model can verify). So the
+default ``pm upgrade`` path no longer calls into this module; post-
+upgrade behavior is driven by the sentinel flag at
+``~/.pollypm/post-upgrade.flag`` and the cockpit restart-nudge from #719.
 
-This module solves that by injecting a user-turn notice into each live
-session telling the model to re-read its role guide from disk (which
-IS the new, post-upgrade version). The model can then converge on the
-new instructions at its next turn boundary without losing any
-conversation state.
+The module remains available for explicit opt-in use (e.g. a future
+``pm upgrade --force-notify`` flag or debug scripts). When it IS
+invoked, it now resolves role-guide paths to **absolute** locations
+inside the target project's ``.pollypm/`` so sessions can actually
+resolve them regardless of their working directory (#762/#763), and it
+rejects calls with test-fixture version pairs (#756) unless explicitly
+allowed.
 
-Consumed by ``pm upgrade`` (#716) after a successful install.
+Resolution priority for each session's role-guide path:
+1. Project-local fork at ``<project>/.pollypm/project-guides/<role>.md``
+   (from #733).
+2. Built-in source from ``pollypm.project_guides.built_in_guide_source_path``.
 
-Limitations:
-
-* Models aren't perfectly adherent to "disregard prior instructions"
-  framing. The 90% case converges cleanly; the 10% case benefits from
-  the hard-recycle escape hatch in #720.
-* Sessions that are mid-tool-call see the notice as a pending user
-  message — Claude Code / Codex render it at the next turn break.
-  Don't inject when a session is actively emitting tokens.
+Consumed by ``pm upgrade`` (#716) only when explicit opt-in is set.
 """
 
 from __future__ import annotations
@@ -35,22 +34,21 @@ from typing import Any, Callable, Iterable
 logger = logging.getLogger(__name__)
 
 
-# Role → guide path (relative to the pollypm install root).
-# Keeps the mapping small and explicit; new roles default to the worker
-# guide unless listed here.
-_ROLE_GUIDES: dict[str, str] = {
-    "worker": "docs/worker-guide.md",
-    "operator-pm": (
-        "src/pollypm/plugins_builtin/core_agent_profiles/profiles/"
-        "polly-operator-guide.md"
-    ),
-    "reviewer": (
-        "src/pollypm/plugins_builtin/core_agent_profiles/profiles/russell.md"
-    ),
-    "architect": (
-        "src/pollypm/plugins_builtin/core_agent_profiles/profiles/architect.md"
-    ),
-}
+class FixtureLeakError(RuntimeError):
+    """Raised when ``inject_system_update_notice`` is called with version
+    strings that match the canonical test fixtures.
+
+    See #756 — a production path was hitting live supervisors with
+    ``("0.1.0", "0.2.0")``, the exact fixture pair from
+    ``tests/test_upgrade_notice.py``. That caller has been removed, but
+    the guard stays to catch future leaks loudly instead of silently.
+    """
+
+
+# Fixture values from tests/test_upgrade_notice.py. Any call matching
+# this pair is presumed to be a leak from a test or scratch script.
+_FIXTURE_VERSION_PAIR: tuple[str, str] = ("0.1.0", "0.2.0")
+
 
 # Roles that don't participate in the notice — they're control / infra
 # sessions without an LLM in the loop.
@@ -68,10 +66,101 @@ class NoticeResult:
     reason: str  # "sent" | "skipped: <role>" | "no guide" | "send failed: <err>"
 
 
-def _guide_path_for_role(role: str) -> str | None:
+def _resolve_role_guide_path(role: str, project_path: Path | None) -> Path | None:
+    """Return the absolute path of ``role``'s guide for a project, or None.
+
+    Prefers the project-local fork under
+    ``<project>/.pollypm/project-guides/<role>.md`` when present; falls
+    back to the built-in guide shipped with PollyPM. Skip-roles return
+    None. Unknown roles default to the worker guide.
+
+    Always returns an absolute path — never a repo-relative string — so
+    sessions can resolve it regardless of working directory.
+    """
     if role in _SKIP_ROLES:
         return None
-    return _ROLE_GUIDES.get(role, _ROLE_GUIDES.get("worker"))
+
+    try:
+        from pollypm.project_guides import (
+            built_in_guide_source_path,
+            normalize_project_guide_role,
+            project_guide_path,
+        )
+    except ImportError:
+        return None
+
+    # Map operator-pm to worker for guide-lookup purposes: the operator
+    # guide isn't a project-local concept (Polly is global), and the
+    # built-in operator guide lives in core_agent_profiles/profiles.
+    lookup_role = role
+    if role == "operator-pm":
+        return _built_in_operator_guide_path()
+    if role not in {"architect", "reviewer", "worker"}:
+        lookup_role = "worker"
+
+    try:
+        normalized = normalize_project_guide_role(lookup_role)
+    except Exception:  # noqa: BLE001
+        return None
+
+    # Prefer project-local fork if this project has one.
+    if project_path is not None:
+        try:
+            local = project_guide_path(project_path, normalized)
+            if local.exists():
+                return local.resolve()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # For the reviewer role, built_in_guide_source_path returns
+    # profiles.py (the module that builds russell_prompt()), which is
+    # not a useful target for an LLM to re-read. Use the shipped
+    # russell.md markdown file directly instead.
+    if normalized == "reviewer":
+        try:
+            base = Path(__file__).resolve().parent
+            russell_md = (
+                base
+                / "plugins_builtin"
+                / "core_agent_profiles"
+                / "profiles"
+                / "russell.md"
+            )
+            if russell_md.exists():
+                return russell_md
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        built_in = built_in_guide_source_path(normalized)
+    except Exception:  # noqa: BLE001
+        built_in = None
+    if built_in is not None and built_in.exists():
+        return built_in.resolve()
+    return None
+
+
+def _built_in_operator_guide_path() -> Path | None:
+    """Absolute path to the shipped operator-pm (Polly) guide."""
+    try:
+        base = Path(__file__).resolve().parent
+        candidate = (
+            base
+            / "plugins_builtin"
+            / "core_agent_profiles"
+            / "profiles"
+            / "polly-operator-guide.md"
+        )
+        if candidate.exists():
+            return candidate
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _guide_path_for_role(role: str, project_path: Path | None = None) -> Path | None:
+    """Legacy-name shim; forwards to the absolute-path resolver."""
+    return _resolve_role_guide_path(role, project_path)
 
 
 def build_notice(old_version: str, new_version: str, guide_path: str) -> str:
@@ -177,6 +266,7 @@ def inject_system_update_notice(
     supervisor: Any | None = None,
     config_path: Path | None = None,
     send_keys: Callable[..., Any] | None = None,
+    allow_fixture_versions: bool = False,
 ) -> list[NoticeResult]:
     """Deliver the ``<system-update>`` notice to every live session.
 
@@ -185,12 +275,39 @@ def inject_system_update_notice(
     for the "3 sessions notified" count).
 
     Supervisor can be passed in for tests; production call from
-    ``pm upgrade`` constructs it via :class:`PollyPMService`.
+    ``pm upgrade`` constructs it via :class:`PollyPMService`. Guide
+    paths are resolved to **absolute** locations (project-local fork if
+    present, else built-in) so sessions resolve them regardless of CWD.
+
+    Raises :class:`FixtureLeakError` if called with the canonical test
+    fixture version pair (``"0.1.0" → "0.2.0"``) and
+    ``allow_fixture_versions`` is not explicitly set. This prevents a
+    test harness from accidentally spamming live supervisors (#756).
     """
+    if (
+        (old_version, new_version) == _FIXTURE_VERSION_PAIR
+        and not allow_fixture_versions
+    ):
+        raise FixtureLeakError(
+            f"Refusing to inject_system_update_notice with fixture version "
+            f"pair {_FIXTURE_VERSION_PAIR!r}. Pass allow_fixture_versions=True "
+            "explicitly if this is intentional (only tests should)."
+        )
+
+    logger.info(
+        "inject_system_update_notice called: old=%s new=%s supervisor_provided=%s",
+        old_version,
+        new_version,
+        supervisor is not None,
+    )
+
     if supervisor is None:
         supervisor = _load_supervisor(config_path)
         if supervisor is None:
             return []
+
+    config = getattr(supervisor, "config", None)
+    projects = getattr(config, "projects", {}) if config is not None else {}
 
     tmux = getattr(supervisor, "tmux", None)
     results: list[NoticeResult] = []
@@ -200,15 +317,22 @@ def inject_system_update_notice(
             continue
         role = getattr(session, "role", "") or ""
         name = getattr(session, "name", "") or "unknown"
-        guide = _guide_path_for_role(role)
-        if guide is None:
+        project_key = getattr(session, "project", None)
+        project_path: Path | None = None
+        if project_key and isinstance(projects, dict):
+            project = projects.get(project_key)
+            candidate = getattr(project, "path", None)
+            if candidate is not None:
+                project_path = Path(candidate)
+        guide_path = _resolve_role_guide_path(role, project_path)
+        if guide_path is None:
             results.append(NoticeResult(
                 session_name=name, role=role, delivered=False,
                 reason=f"skipped: {role or 'no role'}",
             ))
             continue
         target = _target_for_launch(supervisor, launch)
-        notice = build_notice(old_version, new_version, guide)
+        notice = build_notice(old_version, new_version, str(guide_path))
         ok, detail = _send_to_session(
             tmux, target=target, text=notice, send_keys=send_keys,
         )

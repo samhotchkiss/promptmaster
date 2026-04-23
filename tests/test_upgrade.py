@@ -193,10 +193,14 @@ def test_run_migration_check_no_module_is_soft_pass() -> None:
     assert "not yet implemented" in detail or "ok" in detail
 
 
-def test_inject_notice_no_module_is_soft_pass() -> None:
+def test_inject_notice_is_default_disabled() -> None:
+    """#755: the default pm upgrade flow no longer injects
+    `<system-update>` notices; the live sessions reject them as prompt
+    injection. Helper returns a soft-skip instead of dispatching."""
     ok, detail = upgrade_mod.inject_notice("0.1.0", "0.2.0")
     assert ok is True
-    assert "not yet" in detail or "notif" in detail.lower()
+    assert "skipped" in detail
+    assert "#755" in detail or "disabled" in detail.lower()
 
 
 # --------------------------------------------------------------------------- #

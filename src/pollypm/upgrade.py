@@ -238,21 +238,22 @@ def run_migration_check() -> tuple[bool, str]:
 
 
 def inject_notice(old_version: str, new_version: str) -> tuple[bool, str]:
-    """Inject the `<system-update>` notice into every live session.
+    """In-session notice injection — disabled in the default flow (#755).
 
-    Delegates to the helper in #718. Until that lands, this is a no-op
-    returning ``(True, "skipped: notice injection not yet
-    implemented")``.
+    Modeled as a no-op because the ``<system-update>`` tag, delivered
+    as a user-turn message, triggers anti-prompt-injection defenses in
+    every live session (both Claude Code and Codex correctly refuse to
+    swap roles based on an unverifiable in-channel signal). Post-
+    upgrade behavior is now driven by the sentinel flag at
+    ``~/.pollypm/post-upgrade.flag`` + the cockpit restart-nudge from
+    #719, which are out-of-band signals the user can actually trust.
+
+    The underlying :func:`pollypm.upgrade_notice.inject_system_update_notice`
+    helper is still available for explicit opt-in use (e.g. a future
+    ``pm upgrade --force-notify`` flag or debug scripts) but is never
+    invoked by the default upgrade flow.
     """
-    try:
-        from pollypm.upgrade_notice import inject_system_update_notice
-    except ImportError:
-        return (True, "skipped: notice injection not yet implemented (#718)")
-    try:
-        inject_system_update_notice(old_version, new_version)
-    except Exception as exc:  # noqa: BLE001
-        return (False, f"notice injection raised {type(exc).__name__}: {exc}")
-    return (True, "notified live sessions")
+    return (True, "skipped: in-channel <system-update> disabled (see #755)")
 
 
 def _read_new_version() -> str:
