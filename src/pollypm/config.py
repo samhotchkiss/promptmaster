@@ -255,10 +255,20 @@ def _parse_project_settings(raw: dict[str, object], *, base: Path) -> ProjectSet
     project_raw = raw.get("project", {})
     if not isinstance(project_raw, dict):
         project_raw = {}
-    base_dir = _resolve_path(base, str(project_raw.get("base_dir", str(GLOBAL_CONFIG_DIR))))
+    # #763: detect per-project configs at ``<root>/.pollypm/config/project.toml``
+    # and default base_dir + root_dir into the project's own ``.pollypm/``
+    # rather than leaking into the shared ``~/.pollypm/``. Global configs
+    # (``~/.pollypm/pollypm.toml``) keep the pre-existing behavior.
+    if base.name == "config" and base.parent.name == ".pollypm":
+        default_base_dir = base.parent
+        root_dir = base.parent.parent
+    else:
+        default_base_dir = GLOBAL_CONFIG_DIR
+        root_dir = base
+    base_dir = _resolve_path(base, str(project_raw.get("base_dir", str(default_base_dir))))
     return ProjectSettings(
         name=_normalize_project_display_name("pollypm", project_raw.get("name")) or "PollyPM",
-        root_dir=base,
+        root_dir=root_dir,
         tmux_session=_normalize_tmux_session_name(project_raw.get("tmux_session")),
         workspace_root=_resolve_path(base, str(project_raw.get("workspace_root", str(Path.home() / "dev")))),
         base_dir=base_dir,

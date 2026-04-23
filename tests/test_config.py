@@ -150,6 +150,34 @@ cwd = "."
     assert config.sessions["worker"].cwd == tmp_path
 
 
+def test_per_project_config_defaults_base_dir_into_project(tmp_path: Path) -> None:
+    """#763: per-project configs at ``<root>/.pollypm/config/project.toml``
+    must default ``base_dir`` into the project's own ``.pollypm/`` —
+    never into the shared ``~/.pollypm/``. Previously this leaked, so
+    control-prompts / state.db / logs from every project collided in
+    the user's home directory.
+    """
+    project_root = tmp_path / "my_project"
+    config_dir = project_root / ".pollypm" / "config"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "project.toml"
+    # Minimal body — this is exactly what a project scaffold writes.
+    config_path.write_text('[project]\ndisplay_name = "My Project"\n')
+
+    config = load_config(config_path)
+
+    assert config.project.root_dir == project_root
+    assert config.project.base_dir == project_root / ".pollypm"
+    assert config.project.state_db == project_root / ".pollypm" / "state.db"
+    assert config.project.logs_dir == project_root / ".pollypm" / "logs"
+    # The control-prompts directory is computed from base_dir; the fix
+    # makes this stay inside the project.
+    assert (
+        config.project.base_dir / "control-prompts"
+        == project_root / ".pollypm" / "control-prompts"
+    )
+
+
 def test_load_config_flattens_legacy_global_dot_pollypm_paths(
     tmp_path: Path,
 ) -> None:
