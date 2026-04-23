@@ -415,3 +415,34 @@ def require_no_pending_or_exit(db_path: Path) -> None:
         return
     sys.stderr.write(_format_refuse_start_message(status) + "\n")
     raise SystemExit(2)
+
+
+def check_pending(db_path: Path | None = None) -> tuple[bool, str]:
+    """Report whether the workspace state.db has any pending migrations.
+
+    Returns ``(ok, detail)`` where ``ok=True`` means the DB is up to date
+    (or doesn't exist yet, which is a legitimate first-boot state).
+    Used by ``pm upgrade`` to abort before a version bump if the operator
+    would land on an incompatible schema.
+    """
+    if db_path is None:
+        try:
+            from pollypm.config import DEFAULT_CONFIG_PATH, load_config
+        except ImportError:
+            return (True, "skipped: config module unavailable")
+        if not DEFAULT_CONFIG_PATH.is_file():
+            return (True, "skipped: no config present")
+        try:
+            config = load_config(DEFAULT_CONFIG_PATH)
+        except Exception as exc:  # noqa: BLE001
+            return (True, f"skipped: config load failed ({type(exc).__name__})")
+        db_path = config.project.state_db
+    if not db_path.is_file():
+        return (True, "skipped: no state.db present")
+    try:
+        status = inspect(db_path)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"migration check raised {type(exc).__name__}: {exc}")
+    if status.up_to_date:
+        return (True, "ok: migrations up to date")
+    return (False, format_pending_summary(status))
