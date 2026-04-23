@@ -5,6 +5,7 @@ from pollypm.config import load_config, project_config_path, render_example_conf
 from pollypm.models import (
     AccountConfig,
     KnownProject,
+    ModelAssignment,
     PollyPMConfig,
     PollyPMSettings,
     ProjectSettings,
@@ -475,3 +476,115 @@ def test_release_channel_invalid_falls_back_to_stable(
         "release_channel" in record.getMessage() and "bogus" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_role_assignments_round_trip_global_and_project_scope(tmp_path: Path) -> None:
+    project_root = tmp_path / "wire"
+    project_root.mkdir()
+    config = PollyPMConfig(
+        project=ProjectSettings(
+            root_dir=tmp_path,
+            base_dir=tmp_path / ".pollypm",
+            logs_dir=tmp_path / ".pollypm" / "logs",
+            snapshots_dir=tmp_path / ".pollypm" / "snapshots",
+            state_db=tmp_path / ".pollypm" / "state.db",
+        ),
+        pollypm=PollyPMSettings(
+            controller_account="claude_primary",
+            role_assignments={
+                "operator_pm": ModelAssignment(alias="opus-4.7"),
+                "architect": ModelAssignment(provider="claude", model="claude-opus-4-7"),
+                "worker": ModelAssignment(alias="codex-gpt-5.4"),
+                "reviewer": ModelAssignment(provider="codex", model="gpt-5.4"),
+            },
+        ),
+        accounts={
+            "claude_primary": AccountConfig(
+                name="claude_primary",
+                provider=ProviderKind.CLAUDE,
+                home=tmp_path / ".pollypm" / "homes" / "claude_primary",
+            )
+        },
+        sessions={
+            "operator": SessionConfig(
+                name="operator",
+                role="operator-pm",
+                provider=ProviderKind.CLAUDE,
+                account="claude_primary",
+                cwd=tmp_path,
+            )
+        },
+        projects={
+            "wire": KnownProject(
+                key="wire",
+                path=project_root,
+                role_assignments={
+                    "architect": ModelAssignment(alias="sonnet-4.6"),
+                    "worker": ModelAssignment(provider="codex", model="gpt-5.4"),
+                    "reviewer": ModelAssignment(alias="haiku-4.5"),
+                },
+            )
+        },
+    )
+
+    config_path = tmp_path / "pollypm.toml"
+    write_config(config, config_path, force=True)
+
+    loaded = load_config(config_path)
+
+    assert loaded.pollypm.role_assignments == config.pollypm.role_assignments
+    assert loaded.projects["wire"].role_assignments == config.projects["wire"].role_assignments
+
+
+def test_invalid_role_assignments_warn_and_drop_entries(tmp_path: Path, caplog) -> None:
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        """
+[project]
+name = "pollypm"
+tmux_session = "pollypm"
+
+[pollypm]
+controller_account = "claude_primary"
+
+[pollypm.roles.architect]
+alias = "opus-4.7"
+provider = "claude"
+model = "claude-opus-4-7"
+
+[pollypm.roles.worker]
+
+[pollypm.roles.ghost]
+alias = "haiku-4.5"
+
+[accounts.claude_primary]
+provider = "claude"
+home = ".pollypm/homes/claude_primary"
+
+[sessions.operator]
+role = "operator-pm"
+provider = "claude"
+account = "claude_primary"
+cwd = "."
+
+[projects.demo]
+path = "demo"
+
+[projects.demo.roles.operator_pm]
+alias = "opus-4.7"
+"""
+    )
+    (tmp_path / "demo").mkdir()
+
+    import logging as _logging
+
+    with caplog.at_level(_logging.WARNING, logger="pollypm.config"):
+        config = load_config(config_path)
+
+    assert config.pollypm.role_assignments == {}
+    assert config.projects["demo"].role_assignments == {}
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("pollypm.roles.architect" in message for message in messages)
+    assert any("pollypm.roles.worker" in message for message in messages)
+    assert any("pollypm.roles.ghost" in message for message in messages)
+    assert any("projects.demo.roles.operator_pm" in message for message in messages)

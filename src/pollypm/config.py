@@ -9,6 +9,7 @@ from pollypm.models import (
     EventsRetentionSettings,
     LoggingSettings,
     MemorySettings,
+    ModelAssignment,
     KnownProject,
     PlannerSettings,
     PluginSettings,
@@ -29,6 +30,17 @@ PROJECT_CONFIG_DIRNAME = ".pollypm/config"
 PROJECT_CONFIG_FILENAME = "project.toml"
 
 _VALID_RELEASE_CHANNELS = ("stable", "beta")
+_GLOBAL_ROLE_ASSIGNMENT_KEYS = (
+    "operator_pm",
+    "architect",
+    "worker",
+    "reviewer",
+)
+_PROJECT_ROLE_ASSIGNMENT_KEYS = (
+    "architect",
+    "worker",
+    "reviewer",
+)
 
 _log = logging.getLogger(__name__)
 
@@ -110,6 +122,90 @@ def _resolve_path(base: Path, raw_path: str) -> Path:
 def _toml_str(value: str) -> str:
     """Escape a string for TOML double-quoted format."""
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _clean_optional_str(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _parse_role_assignments(
+    raw_roles: object,
+    *,
+    allowed_roles: tuple[str, ...],
+    scope_label: str,
+) -> dict[str, ModelAssignment]:
+    if not isinstance(raw_roles, dict):
+        return {}
+    assignments: dict[str, ModelAssignment] = {}
+    allowed = set(allowed_roles)
+    for role_name, role_raw in raw_roles.items():
+        if not isinstance(role_name, str):
+            _log.warning(
+                "Dropping invalid role assignment under %s: role key %r is not a string.",
+                scope_label,
+                role_name,
+            )
+            continue
+        if role_name not in allowed:
+            if role_name == "operator_pm" and "project" in scope_label:
+                reason = "operator_pm is global-only"
+            else:
+                reason = "unknown role"
+            _log.warning(
+                "Dropping invalid role assignment for %s.%s: %s.",
+                scope_label,
+                role_name,
+                reason,
+            )
+            continue
+        if not isinstance(role_raw, dict):
+            _log.warning(
+                "Dropping invalid role assignment for %s.%s: entry must be a table.",
+                scope_label,
+                role_name,
+            )
+            continue
+        alias = _clean_optional_str(role_raw.get("alias"))
+        provider = _clean_optional_str(role_raw.get("provider"))
+        model = _clean_optional_str(role_raw.get("model"))
+        if alias is not None and (provider is not None or model is not None):
+            _log.warning(
+                "Dropping invalid role assignment for %s.%s: alias and provider/model cannot both be set.",
+                scope_label,
+                role_name,
+            )
+            continue
+        if alias is None and provider is None and model is None:
+            _log.warning(
+                "Dropping invalid role assignment for %s.%s: empty assignment.",
+                scope_label,
+                role_name,
+            )
+            continue
+        if provider is None or model is None:
+            if alias is None:
+                _log.warning(
+                    "Dropping invalid role assignment for %s.%s: provider and model must both be set.",
+                    scope_label,
+                    role_name,
+                )
+                continue
+        try:
+            assignments[role_name] = ModelAssignment(
+                alias=alias,
+                provider=provider,
+                model=model,
+            )
+        except ValueError:
+            _log.warning(
+                "Dropping invalid role assignment for %s.%s: assignment must be alias-only or provider/model-only.",
+                scope_label,
+                role_name,
+            )
+    return assignments
 
 
 def _format_path(path: Path, root: Path) -> str:
@@ -268,6 +364,11 @@ def _parse_pollypm_settings(raw: dict[str, object], sessions: dict[str, SessionC
         lease_timeout_minutes=max(1, int(pollypm_raw.get("lease_timeout_minutes", 30))),
         timezone=_validate_timezone(str(pollypm_raw.get("timezone", ""))),
         release_channel=_validate_release_channel(pollypm_raw.get("release_channel")),
+        role_assignments=_parse_role_assignments(
+            pollypm_raw.get("roles", {}),
+            allowed_roles=_GLOBAL_ROLE_ASSIGNMENT_KEYS,
+            scope_label="pollypm.roles",
+        ),
     )
 
 
@@ -499,6 +600,11 @@ def _parse_known_projects(raw: dict[str, object], *, base: Path) -> dict[str, Kn
             persona_name=item_raw.get("persona_name") if isinstance(item_raw.get("persona_name"), str) else None,
             kind=ProjectKind(item_raw.get("kind", "folder")),
             tracked=bool(item_raw.get("tracked", False)),
+            role_assignments=_parse_role_assignments(
+                item_raw.get("roles", {}),
+                allowed_roles=_PROJECT_ROLE_ASSIGNMENT_KEYS,
+                scope_label=f"projects.{project_key}.roles",
+            ),
         )
     return projects
 
@@ -614,6 +720,34 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> PollyPMConfig:
     return config
 
 
+def _ordered_role_assignments(
+    assignments: dict[str, ModelAssignment],
+    allowed_roles: tuple[str, ...],
+) -> list[tuple[str, ModelAssignment]]:
+    return [
+        (role_name, assignments[role_name])
+        for role_name in allowed_roles
+        if role_name in assignments
+    ]
+
+
+def _append_role_assignment_tables(
+    lines: list[str],
+    *,
+    table_prefix: str,
+    assignments: dict[str, ModelAssignment],
+    allowed_roles: tuple[str, ...],
+) -> None:
+    for role_name, assignment in _ordered_role_assignments(assignments, allowed_roles):
+        lines.append(f"[{table_prefix}.{role_name}]")
+        if assignment.alias is not None:
+            lines.append(f'alias = "{_toml_str(assignment.alias)}"')
+        else:
+            lines.append(f'provider = "{_toml_str(assignment.provider or "")}"')
+            lines.append(f'model = "{_toml_str(assignment.model or "")}"')
+        lines.append("")
+
+
 def _render_global_config(config: PollyPMConfig) -> str:
     root = config.project.root_dir
     lines = [
@@ -641,6 +775,12 @@ def _render_global_config(config: PollyPMConfig) -> str:
         items = ", ".join(f'"{name}"' for name in config.pollypm.failover_accounts)
         lines.append(f"failover_accounts = [{items}]")
     lines.append("")
+    _append_role_assignment_tables(
+        lines,
+        table_prefix="pollypm.roles",
+        assignments=config.pollypm.role_assignments,
+        allowed_roles=_GLOBAL_ROLE_ASSIGNMENT_KEYS,
+    )
 
     lines.extend(
         [
@@ -758,6 +898,12 @@ def _render_global_config(config: PollyPMConfig) -> str:
         if project.tracked:
             lines.append("tracked = true")
         lines.append("")
+        _append_role_assignment_tables(
+            lines,
+            table_prefix=f"projects.{project_key}.roles",
+            assignments=project.role_assignments,
+            allowed_roles=_PROJECT_ROLE_ASSIGNMENT_KEYS,
+        )
 
     return "\n".join(lines).rstrip() + "\n"
 
