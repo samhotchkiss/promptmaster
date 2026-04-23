@@ -428,6 +428,73 @@ class TestInboxCLI:
         assert result.exit_code == 2, result.output
         assert "--match" in result.output
 
+    # #754 — channel separation on pm inbox
+    def _seed_dev_notify(self, db_path: str, subject: str) -> int:
+        from pollypm.store import SQLAlchemyStore
+        store = SQLAlchemyStore(f"sqlite:///{db_path}")
+        try:
+            return store.enqueue_message(
+                type="notify", tier="immediate", scope="inbox",
+                sender="polly", recipient="user",
+                subject=subject, body="body",
+                labels=["channel:dev"],
+            )
+        finally:
+            store.close()
+
+    def test_inbox_default_channel_hides_dev_traffic(self, db_path):
+        """#754: dev-channel notifications are hidden from the default
+        pm inbox view so test harnesses don't pollute the real signal."""
+        self._seed_notify(db_path, "real action required")
+        self._seed_dev_notify(db_path, "test-noise-1")
+        self._seed_dev_notify(db_path, "test-noise-2")
+
+        result = runner.invoke(inbox_app, ["--db", db_path, "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        subjects = [m["title"] for m in payload["messages"]]
+        assert "real action required" in " ".join(subjects)
+        assert not any("test-noise" in s for s in subjects), (
+            f"dev-channel messages should be hidden from the default "
+            f"inbox view — got {subjects!r}"
+        )
+        assert payload["assigned_count"] == 1
+
+    def test_inbox_channel_dev_shows_only_dev_traffic(self, db_path):
+        self._seed_notify(db_path, "real action required")
+        self._seed_dev_notify(db_path, "test-noise-1")
+        self._seed_dev_notify(db_path, "test-noise-2")
+
+        result = runner.invoke(
+            inbox_app, ["--db", db_path, "--json", "--channel", "dev"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        subjects = " ".join(m["title"] for m in payload["messages"])
+        assert "real action required" not in subjects
+        assert "test-noise-1" in subjects
+        assert "test-noise-2" in subjects
+
+    def test_inbox_channel_all_shows_everything(self, db_path):
+        self._seed_notify(db_path, "real action required")
+        self._seed_dev_notify(db_path, "test-noise-1")
+
+        result = runner.invoke(
+            inbox_app, ["--db", db_path, "--json", "--channel", "all"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        subjects = " ".join(m["title"] for m in payload["messages"])
+        assert "real action required" in subjects
+        assert "test-noise-1" in subjects
+
+    def test_inbox_channel_rejects_unknown_value(self, db_path):
+        result = runner.invoke(
+            inbox_app, ["--db", db_path, "--channel", "bogus"],
+        )
+        assert result.exit_code == 1, result.output
+        assert "--channel" in result.output
+
 
 # ---------------------------------------------------------------------------
 # Cockpit panel rendering with a fake work service

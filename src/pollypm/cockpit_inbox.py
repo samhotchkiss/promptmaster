@@ -147,6 +147,28 @@ def _inbox_db_sources(config) -> list[tuple[str | None, Path, Path]]:
     return sources
 
 
+def _row_is_dev_channel(labels_raw: object) -> bool:
+    """Return True if the message's labels list contains ``channel:dev``.
+
+    Accepts the raw column value (JSON string or list) since
+    ``Store.query_messages`` may surface either depending on the
+    engine. Any other channel (or no explicit channel) is treated as
+    user-facing. See #754.
+    """
+    import json as _json
+    labels: list[str] = []
+    if isinstance(labels_raw, list):
+        labels = [str(x) for x in labels_raw]
+    elif isinstance(labels_raw, str) and labels_raw:
+        try:
+            parsed = _json.loads(labels_raw)
+            if isinstance(parsed, list):
+                labels = [str(x) for x in parsed]
+        except ValueError:
+            labels = []
+    return "channel:dev" in labels
+
+
 def _count_inbox_tasks_for_label(config) -> int:
     """Sum of inbox items across all tracked projects + workspace-root.
 
@@ -216,13 +238,20 @@ def _count_inbox_tasks_for_label(config) -> int:
                 if isinstance(row, dict):
                     row_id = row.get("id") or row.get("message_id")
                     scope = row.get("scope", "") or ""
+                    labels_raw = row.get("labels")
                 else:
                     row_id = (
                         getattr(row, "id", None)
                         or getattr(row, "message_id", None)
                     )
                     scope = getattr(row, "scope", "") or ""
+                    labels_raw = getattr(row, "labels", None)
                 if row_id is None:
+                    continue
+                # #754 — skip dev-channel messages; those are test /
+                # debug traffic that should never count against the
+                # user-facing inbox badge.
+                if _row_is_dev_channel(labels_raw):
                     continue
                 seen_message_keys.add((str(scope), row_id))
         finally:

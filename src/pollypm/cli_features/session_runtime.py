@@ -349,6 +349,17 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
                 "inbox instead (fast-track plan_review)."
             ),
         ),
+        channel: str = typer.Option(
+            "inbox", "--channel",
+            help=(
+                "Delivery channel. ``inbox`` (default) = real user-facing "
+                "notification that surfaces in ``pm inbox`` and the cockpit. "
+                "``dev`` = developer / test-harness traffic that stays in "
+                "the store for debugging but is hidden from the default "
+                "inbox view. Use ``dev`` in tests and one-off scripts so "
+                "they never pollute the real signal (#754)."
+            ),
+        ),
         db: str = typer.Option(
             ".pollypm/state.db", "--db",
             help="Path to SQLite database (default: same resolution as `pm inbox`).",
@@ -357,6 +368,14 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
         """Create a work-service inbox item for the human user."""
         if not subject.strip():
             typer.echo("Error: subject must not be empty.", err=True)
+            raise typer.Exit(code=1)
+
+        channel_name = (channel or "inbox").strip().lower()
+        if channel_name not in {"inbox", "dev"}:
+            typer.echo(
+                f"Error: --channel must be 'inbox' or 'dev' (got {channel!r}).",
+                err=True,
+            )
             raise typer.Exit(code=1)
 
         if body == "-":
@@ -389,6 +408,13 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
             raise typer.Exit(code=1)
 
         label_list = [label for label in (labels or []) if label and label.strip()]
+        # Channel separation (#754): dev-channel messages carry a
+        # ``channel:dev`` label so the default inbox view (and the
+        # cockpit rail count) can skip them. Regular user-facing
+        # notifications inherit the implicit ``channel:inbox`` label.
+        if channel_name == "dev":
+            if "channel:dev" not in label_list:
+                label_list.append("channel:dev")
         milestone_key = milestone.strip() or None
 
         from pollypm.store import SQLAlchemyStore

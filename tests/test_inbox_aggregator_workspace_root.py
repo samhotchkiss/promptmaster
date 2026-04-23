@@ -205,3 +205,36 @@ def test_aggregator_skips_non_open_messages(env) -> None:
     count = _count_inbox_tasks_for_label(_load_cfg(env["config_path"]))
     # Only the open notify counts; archived one is excluded.
     assert count == 1, f"expected 1 open notify, got {count}"
+
+
+def test_aggregator_skips_dev_channel_messages(env) -> None:
+    """#754: messages tagged with ``channel:dev`` are test/debug
+    traffic and must NOT count against the user-facing rail badge."""
+    from pollypm.store import SQLAlchemyStore
+
+    env["workspace_db"].parent.mkdir(parents=True, exist_ok=True)
+    store = SQLAlchemyStore(f"sqlite:///{env['workspace_db']}")
+    try:
+        # One inbox-channel (implicit, no label).
+        store.enqueue_message(
+            type="notify", tier="immediate", scope="inbox",
+            sender="polly", recipient="user",
+            subject="real action", body="body",
+        )
+        # Two dev-channel test notifications.
+        for i in range(2):
+            store.enqueue_message(
+                type="notify", tier="immediate", scope="inbox",
+                sender="polly", recipient="user",
+                subject=f"dev-test-{i}", body="body",
+                labels=["channel:dev"],
+            )
+    finally:
+        store.close()
+
+    count = _count_inbox_tasks_for_label(_load_cfg(env["config_path"]))
+    # Only the one inbox-channel message counts.
+    assert count == 1, (
+        f"expected 1 user-facing notify, got {count} — dev-channel "
+        "messages must be hidden from the rail badge"
+    )

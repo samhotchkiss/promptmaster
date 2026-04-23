@@ -76,12 +76,45 @@ def _message_row_to_display(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _message_has_channel_label(row: dict[str, Any], channel: str) -> bool:
+    """Return True if ``row`` carries the ``channel:<channel>`` label.
+
+    The default channel is ``inbox`` — messages without any explicit
+    channel label are treated as inbox-channel so existing callers
+    keep working. See #754.
+    """
+    import json as _json
+    raw = row.get("labels")
+    labels: list[str] = []
+    if isinstance(raw, list):
+        labels = [str(x) for x in raw]
+    elif isinstance(raw, str) and raw:
+        try:
+            parsed = _json.loads(raw)
+            if isinstance(parsed, list):
+                labels = [str(x) for x in parsed]
+        except ValueError:
+            labels = []
+    explicit = [lab[len("channel:"):] for lab in labels if lab.startswith("channel:")]
+    actual = explicit[0] if explicit else "inbox"
+    return actual == channel
+
+
 @inbox_app.callback(invoke_without_command=True)
 def inbox_root(
     ctx: typer.Context,
     project: Optional[str] = _PROJECT_OPTION,
     db: str = _DB_OPTION,
     output_json: bool = _JSON_OPTION,
+    channel: str = typer.Option(
+        "inbox", "--channel",
+        help=(
+            "Filter messages by delivery channel (#754). ``inbox`` "
+            "(default) shows real user-facing notifications. Pass "
+            "``dev`` to surface developer / test-harness traffic "
+            "that's normally hidden. Pass ``all`` to show every channel."
+        ),
+    ),
 ) -> None:
     """Show messages + tasks waiting on the user.
 
@@ -101,6 +134,14 @@ def inbox_root(
     """
     if ctx.invoked_subcommand is not None:
         return
+
+    channel_filter = (channel or "inbox").strip().lower()
+    if channel_filter not in {"inbox", "dev", "all"}:
+        typer.echo(
+            f"Error: --channel must be 'inbox', 'dev', or 'all' (got {channel!r}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     # --- Messages path (unified Store, #340 writers) -------------------
     db_path = _resolve_db_path(db, project=project)
@@ -125,6 +166,14 @@ def inbox_root(
             f"falling back to work-service tasks only.",
             err=True,
         )
+
+    # Channel filter (#754): ``inbox`` (default) hides dev-channel
+    # messages, ``dev`` shows only dev-channel, ``all`` shows both.
+    if channel_filter != "all":
+        message_rows = [
+            r for r in message_rows
+            if _message_has_channel_label(r, channel_filter)
+        ]
 
     display_messages = [_message_row_to_display(r) for r in message_rows]
 
