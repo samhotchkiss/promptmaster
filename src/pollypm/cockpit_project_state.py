@@ -41,6 +41,7 @@ _SORT_RANKS: dict[ProjectRailState, int] = {
 }
 
 _TERMINAL_STATUSES = frozenset({"done", "accepted", "cancelled", "canceled"})
+_INACTIVE_STATUSES = frozenset({"draft"})
 _WAITING_STATUSES = frozenset({"waiting_on_user", "blocked", "on_hold"})
 _AUTOMATED_STATUSES = frozenset({"queued", "in_progress"})
 _PLAN_BYPASS_FLOWS = frozenset({"plan_project", "critique_flow"})
@@ -111,28 +112,24 @@ def rollup_project_state(
     progress next, and no badge only when there is no non-terminal work.
     """
     task_list = list(tasks)
-    nonterminal = [task for task in task_list if not _is_terminal(task)]
-    if not nonterminal:
+    active_tasks = [
+        task for task in task_list
+        if not _is_terminal(task) and _status(task) not in _INACTIVE_STATUSES
+    ]
+    if not active_tasks:
         return _rollup(ProjectRailState.NONE, project_key=project_key)
 
     alert_ids = frozenset(actionable_task_alert_ids)
     waiting = [
-        task for task in nonterminal
+        task for task in active_tasks
         if _is_waiting_on_user(task) or task_id_for(task) in alert_ids
     ]
     advanceable = [
-        task for task in nonterminal
+        task for task in active_tasks
         if _can_independently_advance(task, plan_blocked=plan_blocked)
     ]
 
-    if plan_blocked and not advanceable:
-        return _rollup(
-            ProjectRailState.RED,
-            project_key=project_key,
-            task=_first_actionable_task(waiting) or nonterminal[0],
-            reason="plan-blocked",
-        )
-    if waiting and len(waiting) == len(nonterminal):
+    if waiting and len(waiting) == len(active_tasks):
         return _rollup(
             ProjectRailState.RED,
             project_key=project_key,
@@ -146,18 +143,22 @@ def rollup_project_state(
             task=_first_actionable_task(waiting),
             reason="some tasks waiting on user",
         )
-    if all(_is_user_review(task) for task in nonterminal):
+    if all(_is_user_review(task) for task in active_tasks):
         return _rollup(
             ProjectRailState.GREEN,
             project_key=project_key,
-            task=nonterminal[0],
+            task=active_tasks[0],
             reason="user review remaining",
         )
-    if any(_is_automated_progress(task) for task in nonterminal):
+    if any(_is_automated_progress(task) for task in active_tasks):
         return _rollup(
             ProjectRailState.WORKING,
             project_key=project_key,
-            reason="automated work active",
+            reason=(
+                "plan needed before automated work"
+                if plan_blocked and not advanceable
+                else "automated work active"
+            ),
         )
     return _rollup(
         ProjectRailState.WORKING,

@@ -102,15 +102,30 @@ def test_rollup_unbadged_when_all_tasks_are_terminal() -> None:
     assert rollup.sort_rank == 4
 
 
-def test_plan_blocked_project_is_red_when_no_task_can_advance() -> None:
+def test_rollup_unbadged_when_all_tasks_are_draft() -> None:
+    rollup = rollup_project_state(
+        "demo",
+        [
+            _task(1, "draft", flow="plan_project"),
+            _task(2, "draft", flow="chat"),
+        ],
+        plan_blocked=True,
+    )
+
+    assert rollup.state is ProjectRailState.NONE
+    assert rollup.badge is None
+
+
+def test_plan_blocked_project_is_not_red_without_user_action() -> None:
     rollup = rollup_project_state(
         "demo",
         [_task(1, "queued")],
         plan_blocked=True,
     )
 
-    assert rollup.state is ProjectRailState.RED
-    assert rollup.reason == "plan-blocked"
+    assert rollup.state is ProjectRailState.WORKING
+    assert rollup.badge == "⚙️"
+    assert rollup.reason == "plan needed before automated work"
 
 
 def test_plan_blocked_project_allows_planner_task_to_advance() -> None:
