@@ -147,6 +147,43 @@ def test_mounts_with_global_scope_and_renders_entries(
     _run(body())
 
 
+def test_default_activity_hides_low_signal_heartbeat_noise(
+    activity_env, activity_app,
+) -> None:
+    """Heartbeat/token-ledger rows are loaded but hidden from the default feed."""
+    async def body() -> None:
+        entries = [
+            _make_entry(entry_id="evt:1", kind="task.done", verb="done"),
+            _make_entry(
+                entry_id="evt:2",
+                kind="heartbeat",
+                actor="heartbeat",
+                verb="heartbeat",
+                summary="heartbeat",
+            ),
+            _make_entry(
+                entry_id="evt:3",
+                kind="token_ledger",
+                actor="heartbeat",
+                verb="token_ledger",
+                summary="token_ledger",
+            ),
+        ]
+        activity_app._gather = lambda: entries  # type: ignore[method-assign]
+        async with activity_app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            assert len(activity_app._entries) == 3
+            assert activity_app.table.row_count == 1
+            assert "2 heartbeat/ledger hidden" in str(activity_app.counters.render())
+
+            await pilot.press("N")
+            await pilot.pause()
+            assert activity_app.table.row_count == 3
+            assert "noise=shown" in str(activity_app.counters.render())
+
+    _run(body())
+
+
 # ---------------------------------------------------------------------------
 # 2. Project filter narrows the feed.
 # ---------------------------------------------------------------------------

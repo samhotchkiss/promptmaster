@@ -131,6 +131,15 @@ def _entry_search_haystack(entry) -> str:
     return " ".join(bit for bit in bits if bit).lower()
 
 
+_LOW_SIGNAL_ACTIVITY_KINDS = frozenset({"heartbeat", "token_ledger"})
+
+
+def _is_low_signal_activity(entry) -> bool:
+    kind = (getattr(entry, "kind", "") or "").lower()
+    verb = (getattr(entry, "verb", "") or "").lower()
+    return kind in _LOW_SIGNAL_ACTIVITY_KINDS or verb in _LOW_SIGNAL_ACTIVITY_KINDS
+
+
 def _parse_search_query(query: str) -> tuple[re.Pattern[str] | None, list[str]]:
     """Return a compiled regex matcher or lowercase literal tokens."""
     raw = (query or "").strip()
@@ -244,6 +253,7 @@ class PollyActivityFeedApp(App[None]):
         Binding("slash", "start_fuzzy", "Search", show=False),
         Binding("p", "pick_project", "Project"),
         Binding("t", "pick_type", "Type"),
+        Binding("N", "toggle_noise", "Noise", show=False),
         Binding("F", "toggle_follow", "Follow"),
         Binding("c", "clear_filters", "Clear"),
         Binding("R,u", "refresh", "Refresh", show=False),
@@ -255,7 +265,7 @@ class PollyActivityFeedApp(App[None]):
 
     _DEFAULT_HINT = (
         "j/k move \u00b7 / search \u00b7 p project \u00b7 t type "
-        "\u00b7 F follow \u00b7 c clear \u00b7 \u21b5 detail \u00b7 q back"
+        "\u00b7 N noise \u00b7 F follow \u00b7 c clear \u00b7 \u21b5 detail \u00b7 q back"
     )
 
     def __init__(self, config_path: Path, *, project_key: str | None = None) -> None:
@@ -278,6 +288,7 @@ class PollyActivityFeedApp(App[None]):
         self._filter_type: str | None = None
         self._filter_fuzzy: str = ""
         self._filter_mode: str | None = None
+        self._show_system_noise: bool = False
         self._open_entry_id: str | None = None
         self._follow_on: bool = False
         self._follow_timer = None
@@ -358,10 +369,20 @@ class PollyActivityFeedApp(App[None]):
         kind = self._filter_type
         regex, fuzzy_terms = _parse_search_query(self._filter_fuzzy)
         has_search = regex is not None or bool(fuzzy_terms)
+        explicit_noise_request = (
+            self._show_system_noise
+            or has_search
+            or (kind or "").lower() in _LOW_SIGNAL_ACTIVITY_KINDS
+        )
         if not (project or actor or kind or has_search):
-            return list(rows)
+            return [
+                entry for entry in rows
+                if explicit_noise_request or not _is_low_signal_activity(entry)
+            ]
         out = []
         for entry in rows:
+            if not explicit_noise_request and _is_low_signal_activity(entry):
+                continue
             if project and (entry.project or "") != project:
                 continue
             if actor and (entry.actor or "") != actor:
@@ -400,6 +421,11 @@ class PollyActivityFeedApp(App[None]):
         events_last_24h = self._events_in_last_24h()
         visible_count = len(filtered_entries)
         total_count = len(self._entries)
+        hidden_noise_count = 0
+        if not self._show_system_noise and not self._filter_fuzzy:
+            hidden_noise_count = sum(
+                1 for entry in self._entries if _is_low_signal_activity(entry)
+            )
         title_bits = ["[b #eef6ff]Activity[/b #eef6ff]"]
         if self._filter_project:
             title_bits.append(
@@ -414,6 +440,8 @@ class PollyActivityFeedApp(App[None]):
         filter_description = self._describe_filters()
         if filter_description:
             chips.append(f"[#97a6b2]filters: {filter_description}[/#97a6b2]")
+        if hidden_noise_count:
+            chips.append(f"[dim]{hidden_noise_count} heartbeat/ledger hidden[/dim]")
         chips.append(
             "[#3ddc84]follow on[/#3ddc84]" if self._follow_on else "[dim]follow off[/dim]"
         )
@@ -494,6 +522,8 @@ class PollyActivityFeedApp(App[None]):
             bits.append(f"actor={self._filter_actor}")
         if self._filter_type:
             bits.append(f"type={self._filter_type}")
+        if self._show_system_noise:
+            bits.append("noise=shown")
         if self._filter_fuzzy:
             bits.append(f'search="{self._filter_fuzzy}"')
         return " \u00b7 ".join(bits)
@@ -568,6 +598,10 @@ class PollyActivityFeedApp(App[None]):
             else "type: (no event types in current window)"
         )
         self._open_filter("type", placeholder=hint)
+
+    def action_toggle_noise(self) -> None:
+        self._show_system_noise = not self._show_system_noise
+        self._render()
 
     def _open_filter(self, mode: str, *, placeholder: str) -> None:
         self._filter_mode = mode
