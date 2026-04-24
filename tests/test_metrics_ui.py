@@ -115,8 +115,12 @@ def _make_snapshot(
         captured_at=datetime.now(UTC).isoformat(),
         fleet=_mk("fleet", "Fleet", fleet_rows or [
             ("Workers", "1 working · 0 idle · 0 stuck · 0 offline", "ok"),
-            ("Tasks in flight", "0 queued · 1 in_progress · 0 review · 0 blocked", "ok"),
-            ("Inbox", "0 unread · 0 plan_review · 0 blocking_question", "ok"),
+            (
+                "Tasks in flight",
+                "0 queued · 1 in_progress · 0 review · 0 blocked · 0 on_hold",
+                "ok",
+            ),
+            ("Inbox", "0 action · 0 unread · 0 plan_review · 0 blocked", "ok"),
         ]),
         resources=_mk("resources", "Resources", resource_rows or [
             ("state.db", "1.0 MB · freelist 0.0%", "ok"),
@@ -173,8 +177,14 @@ def test_fleet_section_reflects_synthetic_roster_and_tasks() -> None:
         _make_roster_row(status="idle", session_name="i1"),
         _make_roster_row(status="offline", session_name="o1"),
     ]
-    counts = {"queued": 2, "in_progress": 3, "review": 1, "blocked": 1}
-    inbox = {"unread": 4, "plan_review": 1, "blocking_question": 2}
+    counts = {
+        "queued": 2,
+        "in_progress": 3,
+        "review": 1,
+        "blocked": 1,
+        "on_hold": 2,
+    }
+    inbox = {"action": 6, "unread": 4, "plan_review": 1, "blocked": 2}
 
     section = _fleet_section(None, roster, counts, inbox)
     assert section.key == "fleet"
@@ -187,12 +197,14 @@ def test_fleet_section_reflects_synthetic_roster_and_tasks() -> None:
     tif = next(r for r in section.rows if r[0] == "Tasks in flight")
     assert "3 in_progress" in tif[1]
     assert "1 blocked" in tif[1]
+    assert "2 on_hold" in tif[1]
     assert tif[2] == "alert"
     # Inbox row — non-zero fields produce a warn tone.
     ibx = next(r for r in section.rows if r[0] == "Inbox")
+    assert "6 action" in ibx[1]
     assert "4 unread" in ibx[1]
     assert "1 plan_review" in ibx[1]
-    assert "2 blocking_question" in ibx[1]
+    assert "2 blocked" in ibx[1]
     assert ibx[2] == "warn"
 
 

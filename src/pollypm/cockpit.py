@@ -380,58 +380,55 @@ def _fleet_section(config, roster_rows: list, task_counts: dict[str, int],
     in_progress = int(task_counts.get("in_progress", 0))
     review = int(task_counts.get("review", 0))
     blocked = int(task_counts.get("blocked", 0))
+    on_hold = int(task_counts.get("on_hold", 0))
     flight_tone = "alert" if blocked else ("ok" if in_progress else "muted")
     rows.append(
         ("Tasks in flight",
-         f"{queued} queued · {in_progress} in_progress · {review} review · {blocked} blocked",
+         f"{queued} queued · {in_progress} in_progress · {review} review · "
+         f"{blocked} blocked · {on_hold} on_hold",
          flight_tone),
     )
 
+    action = inbox_breakdown.get("action", 0)
     unread = inbox_breakdown.get("unread", 0)
     plan_review = inbox_breakdown.get("plan_review", 0)
-    blocking = inbox_breakdown.get("blocking_question", 0)
-    inbox_tone = "warn" if (unread or plan_review or blocking) else "ok"
+    blocked = inbox_breakdown.get("blocked", 0)
+    inbox_tone = "warn" if (action or unread or plan_review or blocked) else "ok"
     rows.append(
         ("Inbox",
-         f"{unread} unread · {plan_review} plan_review · {blocking} blocking_question",
+         f"{action} action · {unread} unread · {plan_review} plan_review · {blocked} blocked",
          inbox_tone),
     )
     return MetricsSection(key="fleet", title="Fleet", rows=rows)
 
 
 def _inbox_breakdown(config) -> dict[str, int]:
-    """Return ``{"unread": N, "plan_review": N, "blocking_question": N}``.
+    """Return actionable inbox counts from the shared inbox-entry triage.
 
     Uses the same scan as :func:`_count_inbox_tasks_for_label` so the
     numbers line up with the rail badge. Best-effort: returns zero-value
     dict on any error.
     """
-    out = {"unread": 0, "plan_review": 0, "blocking_question": 0}
+    out = {"action": 0, "unread": 0, "plan_review": 0, "blocked": 0}
     try:
-        from pollypm.work.inbox_view import inbox_tasks
-        from pollypm.work.sqlite_service import SQLiteWorkService
+        from pollypm.cockpit_inbox_items import load_inbox_entries
     except Exception:  # noqa: BLE001
         return out
-    seen: set[str] = set()
-    for project_key, db_path, project_path in _inbox_db_sources(config):
-        if not db_path.exists():
+    try:
+        items, unread_ids, _replies = load_inbox_entries(config)
+    except Exception:  # noqa: BLE001
+        return out
+    out["unread"] = len(unread_ids)
+    for item in items:
+        if not getattr(item, "needs_action", False):
             continue
-        try:
-            with SQLiteWorkService(
-                db_path=db_path, project_path=project_path,
-            ) as svc:
-                for task in inbox_tasks(svc, project=project_key):
-                    if task.task_id in seen:
-                        continue
-                    seen.add(task.task_id)
-                    labels = list(task.labels or [])
-                    if "plan_review" in labels:
-                        out["plan_review"] += 1
-                    if "blocking_question" in labels:
-                        out["blocking_question"] += 1
-                    out["unread"] += 1
-        except Exception:  # noqa: BLE001
-            continue
+        out["action"] += 1
+        labels = {str(label) for label in list(getattr(item, "labels", []) or [])}
+        triage_label = str(getattr(item, "triage_label", "") or "")
+        if "plan_review" in labels or triage_label == "plan review":
+            out["plan_review"] += 1
+        if triage_label in {"blocked", "worker blocked"}:
+            out["blocked"] += 1
     return out
 
 
