@@ -248,6 +248,18 @@ def test_new_event_count_counts_only_newer(tmp_path: Path) -> None:
     assert new_event_count(projector, last_seen_id=oldest_id) == 2
 
 
+def test_new_event_count_ignores_heartbeat_noise(tmp_path: Path) -> None:
+    state_db = tmp_path / "state.db"
+    StateStore(state_db).close()
+    _seed_event(state_db, "heartbeat", "heartbeat", "heartbeat")
+    _seed_event(state_db, "heartbeat", "token_ledger", "token_ledger")
+    _seed_event(state_db, "worker", "task.done", "Shipped the task")
+
+    projector = EventProjector(state_db)
+
+    assert new_event_count(projector, last_seen_id=None) == 1
+
+
 def test_new_event_count_none_projector() -> None:
     assert new_event_count(None, last_seen_id=None) == 0
 

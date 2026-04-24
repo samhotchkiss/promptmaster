@@ -673,6 +673,15 @@ def __getattr__(name: str):
 # ---------------------------------------------------------------------------
 
 
+_LOW_SIGNAL_BADGE_KINDS = frozenset({"heartbeat", "token_ledger"})
+
+
+def _counts_for_activity_badge(entry: FeedEntry) -> bool:
+    kind = (getattr(entry, "kind", "") or "").lower()
+    verb = (getattr(entry, "verb", "") or "").lower()
+    return kind not in _LOW_SIGNAL_BADGE_KINDS and verb not in _LOW_SIGNAL_BADGE_KINDS
+
+
 def new_event_count(
     projector: EventProjector | None, last_seen_id: int | None,
 ) -> int:
@@ -689,7 +698,7 @@ def new_event_count(
     except Exception:  # noqa: BLE001
         logger.exception("activity_feed: badge probe failed")
         return 0
-    return len(entries)
+    return sum(1 for entry in entries if _counts_for_activity_badge(entry))
 
 
 __all__ = [
