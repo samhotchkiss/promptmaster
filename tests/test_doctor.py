@@ -737,6 +737,10 @@ def test_render_human_summary_pluralisation() -> None:
     assert "1 warning, 1 error," in text
     assert "warning(s)" not in text
     assert "error(s)" not in text
+    # The dotted breakdown line right after Summary picks up the same
+    # singular form — at count=1 the bare ``1 warnings · 1 errors``
+    # was just as wrong as the parenthetical-s line above it.
+    assert "1 warning · 1 error" in text
 
     only_warn = doctor.run_checks([
         doctor.Check("warn-a", _warn, "test"),
@@ -746,6 +750,7 @@ def test_render_human_summary_pluralisation() -> None:
     assert "2 warnings, 0 errors," in text
     assert "warning(s)" not in text
     assert "error(s)" not in text
+    assert "2 warnings · 0 errors" in text
 
 
 def test_render_json_is_parseable() -> None:

@@ -69,7 +69,8 @@ def render_human(report: doctor.DoctorReport) -> str:
         f"({report.duration_seconds:.2f}s)"
     )
     lines.append(
-        f"{total} checks · {passed} passed · {warnings} warnings · {errors} errors"
+        f"{total} checks · {passed} passed · "
+        f"{warnings} {warning_word} · {errors} {error_word}"
     )
 
     failures = [
