@@ -730,8 +730,8 @@ class PollyCockpitApp(App[None]):
         Binding("k,up", "cursor_up", "Up", show=False),
         Binding("g,home", "cursor_first", "First", show=False),
         Binding("G,end", "cursor_last", "Last", show=False),
-        Binding("ctrl+q", "request_quit", "Quit", priority=True),
-        Binding("ctrl+w", "detach", "Detach", priority=True),
+        Binding("ctrl+q,Q", "request_quit", "Quit", priority=True),
+        Binding("ctrl+w,W", "detach", "Detach", priority=True),
     ]
 
     def action_open_command_palette(self) -> None:
@@ -1273,7 +1273,10 @@ class PollyCockpitApp(App[None]):
     _HEARTBEAT_STALE_SECONDS = 180  # warn if no heartbeat in 3 minutes
 
     def _update_hint(self) -> None:
-        hint_text = "j/k move \u00b7 \u21b5 open \u00b7 n new \u00b7 t activity \u00b7 p pin"
+        hint_text = (
+            "j/k move \u00b7 \u21b5 open \u00b7 n new \u00b7 t activity "
+            "\u00b7 p pin \u00b7 W detach \u00b7 Q quit"
+        )
         try:
             supervisor = self.router._load_supervisor()
             last_hb = supervisor.store.last_heartbeat_at()
@@ -1408,7 +1411,7 @@ class PollyCockpitApp(App[None]):
         result = self.router.tmux.run(
             "confirm-before",
             "-p",
-            "Shut down PollyPM? This stops ALL agents. (Ctrl-W detaches instead) [y/N]",
+            "Shut down PollyPM? This stops ALL agents. (W/Ctrl-W detaches instead) [y/N]",
             "run-shell 'echo CONFIRMED'",
             check=False,
         )
