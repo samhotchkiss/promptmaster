@@ -655,11 +655,14 @@ def _build_dashboard(supervisor, config, config_path: Path | None = None) -> str
     sends = [event for event in day_events if event.event_type == "send_input"]
     activity_parts = []
     if commits:
-        activity_parts.append(f"{len(commits)} commits")
+        word = "commit" if len(commits) == 1 else "commits"
+        activity_parts.append(f"{len(commits)} {word}")
     if sends:
-        activity_parts.append(f"{len(sends)} messages")
+        word = "message" if len(sends) == 1 else "messages"
+        activity_parts.append(f"{len(sends)} {word}")
     if recoveries:
-        activity_parts.append(f"{len(recoveries)} recoveries")
+        word = "recovery" if len(recoveries) == 1 else "recoveries"
+        activity_parts.append(f"{len(recoveries)} {word}")
     if activity_parts:
         lines.append("  Today: " + " · ".join(activity_parts))
     else:

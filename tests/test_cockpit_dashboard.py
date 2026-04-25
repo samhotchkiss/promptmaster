@@ -475,6 +475,68 @@ def test_cockpit_dispatch_passes_config_path_to_dashboard_builder(
     assert seen["config_path"] == config_path
 
 
+def test_dashboard_activity_line_pluralises_singular_counts(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """The Activity line must read ``1 commit · 1 message · 1 recovery``.
+
+    The ``Today: …`` line under the Activity divider used bare-plural
+    ``commits`` / ``messages`` / ``recoveries`` for every count. At
+    a low-traffic state with one of each it printed
+    ``Today: 1 commits · 1 messages · 1 recoveries`` — three copy
+    bugs on one line. Mirrors cycles 57–63 across other surfaces.
+    """
+    from pollypm.storage.state import EventRecord
+
+    monkeypatch.setattr(
+        "pollypm.cockpit_sections.dashboard._dashboard_project_tasks",
+        lambda project_key, project_path: ({}, {}),
+    )
+    monkeypatch.setattr("pollypm.cockpit._count_inbox_tasks_for_label", lambda config: 0)
+
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return NOW
+            return NOW.astimezone(tz)
+    monkeypatch.setattr("pollypm.cockpit_sections.dashboard.datetime", _FrozenDateTime)
+
+    base_dir = tmp_path / ".pollypm"
+    one_each = [
+        EventRecord(
+            session_name="worker_demo",
+            event_type="commit",
+            message="committed abc123",
+            created_at=(NOW - timedelta(minutes=5)).isoformat(),
+        ),
+        EventRecord(
+            session_name="worker_demo",
+            event_type="send_input",
+            message="poke",
+            created_at=(NOW - timedelta(minutes=3)).isoformat(),
+        ),
+        EventRecord(
+            session_name="worker_demo",
+            event_type="recover",
+            message="recovered after pane drift",
+            created_at=(NOW - timedelta(minutes=2)).isoformat(),
+        ),
+    ]
+    config = SimpleNamespace(
+        project=SimpleNamespace(base_dir=base_dir, root_dir=tmp_path),
+        pollypm=SimpleNamespace(timezone="UTC"),
+        projects={"only": _FakeProject(tmp_path / "only", "Only")},
+        accounts={},
+    )
+    supervisor = SimpleNamespace(store=_FakeStore(recent_events=one_each))
+    out = _build_dashboard(supervisor, config)
+    assert "Today: 1 commit · 1 message · 1 recovery" in out
+    assert "1 commits" not in out
+    assert "1 messages" not in out
+    assert "1 recoveries" not in out
+
+
 def test_dashboard_footer_pluralises_project_count(monkeypatch, tmp_path: Path) -> None:
     """The dashboard footer must read ``1 project`` / ``5 projects``.
 
