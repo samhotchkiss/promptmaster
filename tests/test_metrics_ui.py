@@ -346,6 +346,46 @@ def test_failure_section_no_session_metric_is_zero_when_store_omitted() -> None:
     assert rows["no_session alerts"] == "0"
 
 
+def test_failure_section_uses_execute_when_store_supports_it() -> None:
+    """The cockpit metric pipeline passes a ``StateStore`` whose
+    alert-table access is via raw SQL (``store.execute(...)``), not
+    the SQLAlchemy ``query_messages`` API. Exercise the execute
+    branch so the live cockpit code path stays covered.
+    """
+    from pollypm.cockpit import _failure_section
+
+    class _Cursor:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _StateStore:
+        # Records the SQL fired so the test can assert on it.
+        def __init__(self):
+            self.queries: list[tuple[str, tuple]] = []
+
+        def execute(self, sql, params=()):
+            self.queries.append((sql, params))
+            # Pretend we have 3 no_session alerts in the last 24h.
+            return _Cursor([
+                ("no_session_for_assignment:proj/1",),
+                ("no_session_for_assignment:demo/2",),
+                ("no_session",),
+            ])
+
+    store = _StateStore()
+    sec = _failure_section([], store=store)
+    rows = {r[0]: r[1] for r in sec.rows}
+    assert rows["no_session alerts"] == "3"
+    # Confirm we actually queried the messages table for alerts —
+    # protects against an accidental signature drift that silently
+    # zeroes the metric again.
+    assert any("messages" in sql for sql, _ in store.queries)
+    assert any("no_session%" in sql for sql, _ in store.queries)
+
+
 # ---------------------------------------------------------------------------
 # 6. Scheduler section shows last-fired-at; red if stale
 # ---------------------------------------------------------------------------
