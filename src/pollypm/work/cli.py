@@ -19,7 +19,7 @@ from pollypm.errors import (
     format_task_not_found_error,
     render_cli_error,
 )
-from pollypm.work.models import OutputType
+from pollypm.work.models import ArtifactKind, OutputType
 from pollypm.work.readiness import format_readiness_warnings, readiness_warnings
 
 _TASK_APP_HELP = help_with_examples(
@@ -877,6 +877,52 @@ def task_done(
             err=True,
         )
         raise typer.Exit(code=1)
+    artifacts = wo_dict.get("artifacts")
+    if artifacts is not None:
+        if not isinstance(artifacts, list):
+            typer.echo(
+                "Error: --output 'artifacts' must be a list of objects, "
+                f"got {type(artifacts).__name__}.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        valid_kinds = {member.value for member in ArtifactKind}
+        for idx, raw_artifact in enumerate(artifacts):
+            if not isinstance(raw_artifact, dict):
+                typer.echo(
+                    f"Error: --output artifacts[{idx}] must be an "
+                    f"object, got {type(raw_artifact).__name__}.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            kind_value = raw_artifact.get("kind")
+            if kind_value is None:
+                typer.echo(
+                    f"Error: --output artifacts[{idx}] is missing "
+                    f"'kind'. Supported kinds: "
+                    f"{', '.join(sorted(valid_kinds))}.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            if not isinstance(kind_value, str) or kind_value not in valid_kinds:
+                typer.echo(
+                    f"Error: --output artifacts[{idx}] has unknown "
+                    f"kind {kind_value!r}; expected one of "
+                    f"{', '.join(sorted(valid_kinds))}.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            description = raw_artifact.get("description")
+            if not (isinstance(description, str) and description.strip()):
+                typer.echo(
+                    f"Error: --output artifacts[{idx}] (kind="
+                    f"{kind_value!r}) is missing a non-empty "
+                    "'description'. The reviewer uses this to find the "
+                    "artifact — a blank description renders as a bare "
+                    "kind tag with no context.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
     # Sync worker commits to task branch before state transition
     _sync_commits_to_task_branch(task_id)
     task = _run(svc.node_done, task_id, actor, wo_dict)

@@ -249,6 +249,118 @@ class TestCliDoneOutputValidation:
         for known in ("code_change", "action", "document", "mixed"):
             assert known in combined
 
+    def test_done_artifact_must_have_kind(self, db_path):
+        self._setup_claimed_task(db_path)
+        wo = json.dumps(
+            {
+                "type": "code_change",
+                "summary": "Implemented X",
+                "artifacts": [{"description": "commit"}],  # no kind
+            }
+        )
+        result = runner.invoke(
+            task_app,
+            [
+                "done", "proj/1", "--output", wo,
+                "--actor", "pete", "--db", db_path,
+            ],
+        )
+        assert result.exit_code != 0
+        combined = result.output + (result.stderr or "")
+        assert "missing 'kind'" in combined
+        # Error names supported kinds so the worker can pick.
+        for known in ("commit", "file_change", "action", "note"):
+            assert known in combined
+
+    def test_done_artifact_unknown_kind_rejected(self, db_path):
+        self._setup_claimed_task(db_path)
+        wo = json.dumps(
+            {
+                "type": "code_change",
+                "summary": "Implemented X",
+                "artifacts": [
+                    {"kind": "diff", "description": "patch"},
+                ],
+            }
+        )
+        result = runner.invoke(
+            task_app,
+            [
+                "done", "proj/1", "--output", wo,
+                "--actor", "pete", "--db", db_path,
+            ],
+        )
+        assert result.exit_code != 0
+        combined = result.output + (result.stderr or "")
+        assert "diff" in combined
+        for known in ("commit", "file_change", "action", "note"):
+            assert known in combined
+
+    def test_done_artifact_missing_description_rejected(self, db_path):
+        self._setup_claimed_task(db_path)
+        wo = json.dumps(
+            {
+                "type": "code_change",
+                "summary": "Implemented X",
+                "artifacts": [{"kind": "commit", "ref": "deadbeef"}],
+            }
+        )
+        result = runner.invoke(
+            task_app,
+            [
+                "done", "proj/1", "--output", wo,
+                "--actor", "pete", "--db", db_path,
+            ],
+        )
+        assert result.exit_code != 0
+        assert "non-empty 'description'" in (
+            result.output + (result.stderr or "")
+        )
+
+    def test_done_artifacts_must_be_list(self, db_path):
+        self._setup_claimed_task(db_path)
+        wo = json.dumps(
+            {
+                "type": "code_change",
+                "summary": "Implemented X",
+                "artifacts": "not a list",
+            }
+        )
+        result = runner.invoke(
+            task_app,
+            [
+                "done", "proj/1", "--output", wo,
+                "--actor", "pete", "--db", db_path,
+            ],
+        )
+        assert result.exit_code != 0
+        assert "must be a list" in (
+            result.output + (result.stderr or "")
+        )
+
+    def test_done_with_well_formed_artifacts_passes(self, db_path):
+        """A correctly-shaped payload still succeeds end-to-end —
+        regression guard against the new validation accidentally
+        rejecting valid output."""
+        self._setup_claimed_task(db_path)
+        wo = json.dumps(
+            {
+                "type": "code_change",
+                "summary": "Implemented the feature",
+                "artifacts": [
+                    {"kind": "commit", "description": "abc123", "ref": "abc123"},
+                ],
+            }
+        )
+        result = runner.invoke(
+            task_app,
+            [
+                "done", "proj/1", "--output", wo,
+                "--actor", "pete", "--db", db_path,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
 
 class TestCliNext:
     def test_cli_next(self, db_path):
