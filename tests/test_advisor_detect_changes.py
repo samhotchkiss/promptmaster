@@ -74,6 +74,47 @@ class TestDetectChangesUnit:
         assert "bar.py" in names
         assert "2 commits" in report.files_diff_summary
 
+    def test_files_diff_summary_singular_pluralisation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cycle 67: ``files_diff_summary`` pluralises per count.
+
+        Previously read ``1 commits, 1 files changed, 1 task
+        transitions`` at the singular boundary — three copy bugs in
+        one line. Pulled in alongside the doctor / cockpit / inbox /
+        morning-briefing plural cleanup batch.
+        """
+        project = tmp_path / "proj"
+        (project / ".git").mkdir(parents=True)
+
+        def fake_run_git(path, args, *, timeout=10.0):
+            if args[0] == "log":
+                return 0, "aaa1111\n"
+            if args[0] == "diff":
+                return 0, "src/foo.py\n"
+            return 1, ""
+
+        monkeypatch.setattr(dc_module, "_run_git", fake_run_git)
+        monkeypatch.setattr(
+            dc_module, "_gather_task_transitions",
+            lambda *a, **kw: [
+                TaskTransitionRecord(
+                    project="proj",
+                    task_number=1,
+                    task_title="t",
+                    from_state="queued",
+                    to_state="in_progress",
+                    actor="worker",
+                    timestamp="2026-04-16T12:01:00+00:00",
+                ),
+            ],
+        )
+        since = datetime(2026, 4, 16, 12, 0, tzinfo=UTC)
+        report = detect_changes(project, since=since, project_key="proj")
+        assert report.files_diff_summary == (
+            "1 commit, 1 file changed, 1 task transition"
+        )
+
     def test_task_transitions_alone_flag_has_changes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

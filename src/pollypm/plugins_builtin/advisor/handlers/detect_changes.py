@@ -369,9 +369,15 @@ def detect_changes(
         project_path, key_name, since, work_service=work_service,
     )
 
+    n_commits = len(commit_shas)
+    n_files = len(changed_files)
+    n_trans = len(transitions)
+    commit_word = "commit" if n_commits == 1 else "commits"
+    file_word = "file" if n_files == 1 else "files"
+    trans_word = "task transition" if n_trans == 1 else "task transitions"
     summary = (
-        f"{len(commit_shas)} commits, {len(changed_files)} files changed, "
-        f"{len(transitions)} task transitions"
+        f"{n_commits} {commit_word}, {n_files} {file_word} changed, "
+        f"{n_trans} {trans_word}"
     )
 
     report = ChangeReport(

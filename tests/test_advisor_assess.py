@@ -153,7 +153,7 @@ class TestBuildContextPack:
                     timestamp="2026-04-16T12:01:00+00:00",
                 )
             ],
-            files_diff_summary="2 commits, 2 files changed, 1 task transitions",
+            files_diff_summary="2 commits, 2 files changed, 1 task transition",
         )
         pack = build_context_pack(
             project_key="proj",
