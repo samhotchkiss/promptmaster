@@ -607,6 +607,32 @@ def test_agent_worktree_count_warn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert result.severity == "warning"
 
 
+def test_agent_worktree_count_pluralisation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Singular and plural worktree counts must not render ``worktree(s)``.
+
+    Same shape as the inbox-count check (cycles 45/47): the doctor
+    status string is shown verbatim to the user, so the parenthetical
+    plural reads as a copy bug at count=1. Lock the literal out of
+    both warn and ok status strings.
+    """
+    one = [tmp_path / "agent-1"]
+    one[0].mkdir()
+    monkeypatch.setattr(doctor, "_agent_worktree_dirs", lambda: one)
+    ok = doctor.check_agent_worktree_count()
+    assert "1 agent worktree under" in ok.status
+    assert "worktree(s)" not in ok.status
+
+    many = [tmp_path / f"agent-{i}" for i in range(2, 65)]
+    for d in many:
+        d.mkdir()
+    monkeypatch.setattr(doctor, "_agent_worktree_dirs", lambda: many)
+    warn = doctor.check_agent_worktree_count()
+    assert "agent worktrees under" in warn.status
+    assert "worktree(s)" not in warn.status
+
+
 def test_logs_dir_size_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()

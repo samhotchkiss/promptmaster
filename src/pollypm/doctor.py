@@ -2545,9 +2545,10 @@ def check_agent_worktree_count() -> CheckResult:
     """Warn when the harness's agent worktree dir has accumulated >50 entries."""
     worktrees = _agent_worktree_dirs()
     count = len(worktrees)
+    worktree_word = "worktree" if count == 1 else "worktrees"
     if count > _WORKTREE_WARN_COUNT:
         return _fail(
-            f"{count} agent worktree(s) under .claude/worktrees/ (warn at {_WORKTREE_WARN_COUNT})",
+            f"{count} agent {worktree_word} under .claude/worktrees/ (warn at {_WORKTREE_WARN_COUNT})",
             why=(
                 "The Claude Code harness sometimes leaves agent worktrees "
                 "behind. The hourly agent_worktree.prune handler reaps "
@@ -2566,7 +2567,7 @@ def check_agent_worktree_count() -> CheckResult:
             data={"count": count},
         )
     return _ok(
-        f"{count} agent worktree(s) under .claude/worktrees/",
+        f"{count} agent {worktree_word} under .claude/worktrees/",
         data={"count": count},
     )
 
