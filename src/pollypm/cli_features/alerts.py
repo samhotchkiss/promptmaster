@@ -272,7 +272,13 @@ def heartbeat_uninstall() -> None:
     typer.echo("Removed heartbeat cron job.")
 
 
-@heartbeat_app.command("record")
+@heartbeat_app.command(
+    "record",
+    help=(
+        "Record a heartbeat snapshot for a session — used by the "
+        "session manager + tests to inject pane state."
+    ),
+)
 def heartbeat_record(
     session_name: str = typer.Argument(..., help="Session name from config."),
     payload_json: str = typer.Argument(..., help="Heartbeat snapshot payload as JSON."),

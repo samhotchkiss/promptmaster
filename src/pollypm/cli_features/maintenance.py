@@ -784,7 +784,13 @@ def register_maintenance_commands(app: typer.Typer) -> None:
         typer.echo("  pm doctor              # verify the restored state")
 
 
-@debug_app.command("decode-setup-tag")
+@debug_app.command(
+    "decode-setup-tag",
+    help=(
+        "Decode a setup tag (the short hex from ``pm doctor``'s "
+        "footer) into the underlying environment fingerprint JSON."
+    ),
+)
 def decode_setup_tag(
     tag: str = typer.Argument(..., help="The 6-8 hex setup tag to decode."),
 ) -> None:
