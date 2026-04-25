@@ -543,6 +543,50 @@ def test_project_local_guide_drift_skip_without_config(monkeypatch: pytest.Monke
     assert result.passed and result.skipped
 
 
+def test_project_local_guide_drift_marks_truncation_in_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Cycle 101 — when more than 4 guides are stale, the headline
+    sample (first 4) was indistinguishable from the complete list:
+    "across 9 projects: a, b, c, d" looks final. Readers acted on
+    those four and missed the rest. The fix block already showed
+    "... and N more"; mirror it in the summary so the user sees
+    the truncation up-front.
+    """
+    project_path = tmp_path / "multi"
+    project_path.mkdir()
+    projects = {}
+    drift_entries = []
+    for idx in range(6):
+        key = f"proj-{idx}"
+        projects[key] = type("P", (), {"path": project_path, "name": key})
+        drift_entries.append(
+            {
+                "role": "worker",
+                "path": project_path / ".pollypm" / "project-guides" / "worker.md",
+                "forked_from": "deadbeef",
+                "current_ref": "cafebabe",
+                "drifted": True,
+                "project": key,
+            }
+        )
+    fake_config = type("C", (), {"projects": projects})
+    monkeypatch.setattr(doctor, "_safe_load_config", lambda: (Path("/tmp/x"), fake_config))
+    # Each project surfaces one stale guide — 6 entries total, > 4.
+    iter_drift = iter(drift_entries)
+    monkeypatch.setattr(
+        doctor,
+        "_list_drifted_project_guides",
+        lambda _path: [next(iter_drift)],
+    )
+    result = doctor.check_project_local_guide_drift()
+    assert not result.passed
+    # The headline must announce the overflow, not silently truncate.
+    assert "(+2 more)" in result.status
+    # And the fix block keeps its own overflow note.
+    assert "... and 2 more" in result.fix
+
+
 # --------------------------------------------------------------------- #
 # Scheduler checks
 # --------------------------------------------------------------------- #

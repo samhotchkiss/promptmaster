@@ -1978,6 +1978,13 @@ def check_project_local_guide_drift() -> CheckResult:
         f"{item['project']}:{item['role']}"
         for item in stale[:4]
     )
+    # Without an explicit overflow tag, the headline ("across 9
+    # projects: a, b, c, d") looks like the complete list — readers
+    # then act on those four and miss the rest. Mirror the fix
+    # block's "... and N more" so the summary is honest about the
+    # truncation.
+    if len(stale) > 4:
+        sample = f"{sample} (+{len(stale) - 4} more)"
     fix_lines = ["Refresh each stale guide from the current built-in prompt:"]
     for item in stale[:4]:
         fix_lines.append(
