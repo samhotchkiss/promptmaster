@@ -740,6 +740,56 @@ def test_inbox_section_omits_need_action_count_when_cards_show_full_set(
     _run(body())
 
 
+def test_action_count_dedupes_review_task_and_matching_message() -> None:
+    """When a message and a review-stage task share the same
+    ``primary_ref``, they're the same conceptual action — count once.
+
+    Without this, the banner reads "2 need action" while only one card
+    is rendered, because the second item is the underlying task already
+    represented by the message. The user has no way to discover what
+    the missing item is; the count just lies.
+    """
+    from pollypm.cockpit_ui import _action_count
+
+    items = [
+        # Task in review status — task-source action.
+        {
+            "source": "task",
+            "needs_action": True,
+            "primary_ref": "demo/3",
+        },
+        # Message about the same task.
+        {
+            "source": "message",
+            "needs_action": True,
+            "primary_ref": "demo/3",
+        },
+    ]
+    action_items = [
+        {"source": "message", "primary_ref": "demo/3"},
+    ]
+
+    assert _action_count(items, action_items) == 1
+
+
+def test_action_count_keeps_distinct_task_actions() -> None:
+    """Tasks whose primary_ref does *not* appear in any action card
+    must still be counted — otherwise the banner under-reports work
+    waiting on the user.
+    """
+    from pollypm.cockpit_ui import _action_count
+
+    items = [
+        {"source": "task", "needs_action": True, "primary_ref": "demo/3"},
+        {"source": "task", "needs_action": True, "primary_ref": "demo/4"},
+        {"source": "message", "needs_action": True, "primary_ref": "demo/3"},
+    ]
+    action_items = [{"source": "message", "primary_ref": "demo/3"}]
+
+    # demo/4 has no message coverage → 1 task action + 1 message = 2.
+    assert _action_count(items, action_items) == 2
+
+
 def test_pipeline_in_progress_section_names_assignee_and_node() -> None:
     """In-progress rows must tell the operator which worker is
     carrying the task and which node they're at — without this, the

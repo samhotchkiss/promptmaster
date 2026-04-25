@@ -8783,12 +8783,31 @@ def _dashboard_inbox(
         action_items.append(item)
         if len(action_items) >= 2:
             break
+    return _action_count(items, action_items), top, action_items
+
+
+def _action_count(items: list[dict], action_items: list[dict]) -> int:
+    """Count distinct user actions across task and message inbox sources.
+
+    A message and a review-stage task that share the same ``primary_ref``
+    represent the same conceptual action — count once. Without this
+    dedupe the banner reports "N need action" while only one card is
+    rendered, and the user has no way to discover what the missing
+    item is.
+    """
+    action_refs = {
+        str(item.get("primary_ref"))
+        for item in action_items
+        if item.get("primary_ref")
+    }
     task_action_count = sum(
         1
         for item in items
-        if item.get("source") == "task" and item.get("needs_action")
+        if item.get("source") == "task"
+        and item.get("needs_action")
+        and str(item.get("primary_ref") or "") not in action_refs
     )
-    return task_action_count + len(action_items), top, action_items
+    return task_action_count + len(action_items)
 
 
 def _dashboard_activity(
