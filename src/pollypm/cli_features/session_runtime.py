@@ -504,6 +504,34 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
                     err=True,
                 )
                 raise typer.Exit(code=1)
+            # The dashboard contract requires at least one of summary,
+            # steps (or required_actions), or question — otherwise the
+            # rendered Action Needed card has nothing to show and the
+            # caller is sending a structurally-empty payload that
+            # silently degrades to the heuristic fallback. Catch this
+            # at the producer so the operator sees the contract failure
+            # immediately instead of in the dashboard pane hours later.
+            has_summary = bool(str(parsed_prompt.get("summary") or "").strip())
+            has_question = bool(str(parsed_prompt.get("question") or "").strip())
+            raw_steps = (
+                parsed_prompt.get("steps")
+                or parsed_prompt.get("required_actions")
+                or []
+            )
+            has_steps = isinstance(raw_steps, list) and any(
+                str(step).strip() for step in raw_steps
+            )
+            if not (has_summary or has_question or has_steps):
+                typer.echo(
+                    "Error: --user-prompt-json must include at least one of "
+                    "'summary', 'steps' (or 'required_actions'), or "
+                    "'question' — those are the fields the dashboard "
+                    "Action Needed card renders. Empty payloads degrade "
+                    "to body heuristics and are indistinguishable from "
+                    "omitting the flag entirely.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
             user_prompt_payload = parsed_prompt
 
         from pollypm.store import SQLAlchemyStore

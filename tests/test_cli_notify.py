@@ -176,6 +176,82 @@ class TestNotifyWritesToMessages:
         assert len(rows) == 1
         assert rows[0]["recipient"] == "polly"
 
+    def test_user_prompt_json_with_summary_passes(self, db_path):
+        """A non-empty user_prompt with at least one of summary/steps/
+        question is the contract — accept and persist."""
+        prompt = json.dumps(
+            {"summary": "A full plan is ready for your review."}
+        )
+        result = _invoke_notify(
+            db_path,
+            "Plan ready",
+            "Review this plan.",
+            "--priority", "immediate",
+            "--user-prompt-json", prompt,
+        )
+        assert result.exit_code == 0, result.output
+
+        rows = _fetch_messages(db_path)
+        payload = json.loads(rows[0]["payload_json"])
+        assert payload["user_prompt"]["summary"] == (
+            "A full plan is ready for your review."
+        )
+
+    def test_user_prompt_json_invalid_json_exits_nonzero(self, db_path):
+        result = _invoke_notify(
+            db_path,
+            "Plan ready",
+            "Review this plan.",
+            "--user-prompt-json", "{not valid",
+        )
+        assert result.exit_code != 0
+        assert "not valid JSON" in (result.output + (result.stderr or ""))
+
+    def test_user_prompt_json_must_be_object_not_array(self, db_path):
+        result = _invoke_notify(
+            db_path,
+            "Plan ready",
+            "Review this plan.",
+            "--user-prompt-json", "[]",
+        )
+        assert result.exit_code != 0
+        assert "must decode to an object" in (
+            result.output + (result.stderr or "")
+        )
+
+    def test_user_prompt_json_empty_object_exits_nonzero(self, db_path):
+        """An empty user_prompt has nothing for the dashboard's Action
+        Needed card to render — that's a producer-side bug we should
+        catch immediately, not let it silently degrade to body
+        heuristics in the dashboard hours later."""
+        result = _invoke_notify(
+            db_path,
+            "Plan ready",
+            "Review this plan.",
+            "--user-prompt-json", "{}",
+        )
+        assert result.exit_code != 0
+        combined = result.output + (result.stderr or "")
+        assert "must include at least one of" in combined
+        assert "summary" in combined
+        assert "steps" in combined
+        assert "question" in combined
+
+    def test_user_prompt_json_steps_only_passes(self, db_path):
+        """Steps alone is enough — the dashboard renders 'What to do'
+        from steps even without summary."""
+        prompt = json.dumps(
+            {"steps": ["Open the plan review surface", "Approve"]}
+        )
+        result = _invoke_notify(
+            db_path,
+            "Plan ready",
+            "Review this plan.",
+            "--priority", "immediate",
+            "--user-prompt-json", prompt,
+        )
+        assert result.exit_code == 0, result.output
+
     def test_labels_are_attached(self, db_path):
         result = _invoke_notify(
             db_path,
