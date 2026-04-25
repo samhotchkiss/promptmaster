@@ -384,8 +384,8 @@ def _fleet_section(config, roster_rows: list, task_counts: dict[str, int],
     flight_tone = "alert" if blocked else ("ok" if in_progress else "muted")
     rows.append(
         ("Tasks in flight",
-         f"{queued} queued · {in_progress} in_progress · {review} review · "
-         f"{blocked} blocked · {on_hold} on_hold",
+         f"{queued} queued · {in_progress} in progress · {review} review · "
+         f"{blocked} blocked · {on_hold} on hold",
          flight_tone),
     )
 
@@ -396,7 +396,8 @@ def _fleet_section(config, roster_rows: list, task_counts: dict[str, int],
     inbox_tone = "warn" if (action or unread or plan_review or blocked) else "ok"
     rows.append(
         ("Inbox",
-         f"{action} action · {unread} unread · {plan_review} plan_review · {blocked} blocked",
+         f"{action} action · {unread} unread · {plan_review} plan review · "
+         f"{blocked} blocked",
          inbox_tone),
     )
     return MetricsSection(key="fleet", title="Fleet", rows=rows)

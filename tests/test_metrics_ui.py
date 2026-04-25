@@ -117,10 +117,10 @@ def _make_snapshot(
             ("Workers", "1 working · 0 idle · 0 stuck · 0 offline", "ok"),
             (
                 "Tasks in flight",
-                "0 queued · 1 in_progress · 0 review · 0 blocked · 0 on_hold",
+                "0 queued · 1 in progress · 0 review · 0 blocked · 0 on hold",
                 "ok",
             ),
-            ("Inbox", "0 action · 0 unread · 0 plan_review · 0 blocked", "ok"),
+            ("Inbox", "0 action · 0 unread · 0 plan review · 0 blocked", "ok"),
         ]),
         resources=_mk("resources", "Resources", resource_rows or [
             ("state.db", "1.0 MB · freelist 0.0%", "ok"),
@@ -194,16 +194,18 @@ def test_fleet_section_reflects_synthetic_roster_and_tasks() -> None:
     assert "1 stuck" in worker_row[1]
     assert worker_row[2] == "alert"
     # Tasks row — blocked count present, tone alert.
+    # Cycle 83: status names render with spaces (``in progress`` /
+    # ``on hold``) instead of the underscored python keys.
     tif = next(r for r in section.rows if r[0] == "Tasks in flight")
-    assert "3 in_progress" in tif[1]
+    assert "3 in progress" in tif[1]
     assert "1 blocked" in tif[1]
-    assert "2 on_hold" in tif[1]
+    assert "2 on hold" in tif[1]
     assert tif[2] == "alert"
     # Inbox row — non-zero fields produce a warn tone.
     ibx = next(r for r in section.rows if r[0] == "Inbox")
     assert "6 action" in ibx[1]
     assert "4 unread" in ibx[1]
-    assert "1 plan_review" in ibx[1]
+    assert "1 plan review" in ibx[1]
     assert "2 blocked" in ibx[1]
     assert ibx[2] == "warn"
 
