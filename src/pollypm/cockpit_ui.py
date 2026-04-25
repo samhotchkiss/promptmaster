@@ -1636,11 +1636,19 @@ class PollyDashboardApp(App[None]):
 
     def _render_dashboard(self, config, data) -> None:
         # ── Header ──
-        parts = [f"[b]{len(config.projects)}[/b] projects", f"[b]{len(config.sessions)}[/b] agents"]
+        n_projects = len(config.projects)
+        n_sessions = len(config.sessions)
+        project_word = "project" if n_projects == 1 else "projects"
+        agent_word = "agent" if n_sessions == 1 else "agents"
+        parts = [
+            f"[b]{n_projects}[/b] {project_word}",
+            f"[b]{n_sessions}[/b] {agent_word}",
+        ]
         if data.inbox_count:
             parts.append(f"[#d29922][b]{data.inbox_count}[/b] inbox[/#d29922]")
         if data.alert_count:
-            parts.append(f"[#f85149][b]{data.alert_count}[/b] alerts[/#f85149]")
+            alert_word = "alert" if data.alert_count == 1 else "alerts"
+            parts.append(f"[#f85149][b]{data.alert_count}[/b] {alert_word}[/#f85149]")
         header_text = "  " + "  \u00b7  ".join(parts)
         if data.briefing:
             header_text += f"\n\n  [#58a6ff]{data.briefing}[/#58a6ff]"

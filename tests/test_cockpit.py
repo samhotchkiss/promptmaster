@@ -339,6 +339,76 @@ def test_dashboard_done_body_pluralises_singular_counts(tmp_path: Path) -> None:
     assert "3[/b] issues completed" in body
 
 
+def test_dashboard_header_pluralises_projects_agents_alerts(tmp_path: Path) -> None:
+    """Header line must read ``1 project · 1 agent · 1 alert`` at count=1.
+
+    The very first line of the polly-dashboard header used bare-plural
+    ``projects`` / ``agents`` / ``alerts``. A new install with one
+    project + one worker + one open alert read ``1 projects · 1 agents
+    · … · 1 alerts`` — three copy bugs on the most-seen line in the
+    cockpit. Mirrors cycles 57/58/59 across the same surface.
+    """
+    app = PollyDashboardApp(tmp_path / "pollypm.toml")
+    app.header_w = _CaptureWidget()
+    app.now_body = _CaptureWidget()
+    app.messages_body = _CaptureWidget()
+    app.done_body = _CaptureWidget()
+    app.chart_body = _CaptureWidget()
+    app.footer_w = _CaptureWidget()
+
+    # Path A: count=1 for each → singular forms.
+    config = SimpleNamespace(projects={"only": object()}, sessions={"only": object()})
+    data = DashboardData(
+        active_sessions=[],
+        recent_commits=[],
+        completed_items=[],
+        recent_messages=[],
+        daily_tokens=[],
+        today_tokens=0,
+        total_tokens=0,
+        sweep_count_24h=0,
+        message_count_24h=0,
+        recovery_count_24h=0,
+        inbox_count=0,
+        alert_count=1,
+        briefing="",
+    )
+    app._render_dashboard(config, data)
+    header = app.header_w.value
+    assert "[/b] project " in header
+    assert "[/b] projects" not in header
+    assert "[/b] agent " in header
+    assert "[/b] agents" not in header
+    assert "[/b] alert[/" in header
+    assert "[/b] alerts[/" not in header
+
+    # Path B: plural cases stay plural.
+    config = SimpleNamespace(
+        projects={"a": object(), "b": object(), "c": object()},
+        sessions={"x": object(), "y": object()},
+    )
+    data = DashboardData(
+        active_sessions=[],
+        recent_commits=[],
+        completed_items=[],
+        recent_messages=[],
+        daily_tokens=[],
+        today_tokens=0,
+        total_tokens=0,
+        sweep_count_24h=0,
+        message_count_24h=0,
+        recovery_count_24h=0,
+        inbox_count=0,
+        alert_count=4,
+        briefing="",
+    )
+    app._render_dashboard(config, data)
+    header = app.header_w.value
+    assert "[/b] projects" in header
+    assert "[/b] agents" in header
+    assert "[/b] alerts[/" in header
+
+
 def test_cockpit_router_session_state_ignores_silent_alerts(tmp_path: Path) -> None:
     config_path = tmp_path / "pollypm.toml"
     config_path.write_text(
