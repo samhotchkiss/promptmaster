@@ -547,15 +547,26 @@ def _heuristic_understanding(
             config_entries.append(entry)
 
     # Overview from doc files and git history
+    def _plural(n: int, sing: str, plur: str | None = None) -> str:
+        return f"{n} {sing if n == 1 else (plur or sing + 's')}"
+
     overview_parts: list[str] = []
     if doc_entries:
-        overview_parts.append(f"Project has {len(doc_entries)} documentation file(s).")
+        overview_parts.append(
+            f"Project has {_plural(len(doc_entries), 'documentation file')}."
+        )
     if git_commits:
-        overview_parts.append(f"Git history contains {len(git_commits)} commit(s).")
+        overview_parts.append(
+            f"Git history contains {_plural(len(git_commits), 'commit')}."
+        )
     if jsonl_events:
-        overview_parts.append(f"Found {len(jsonl_events)} transcript event(s).")
+        overview_parts.append(
+            f"Found {_plural(len(jsonl_events), 'transcript event')}."
+        )
     if config_entries:
-        overview_parts.append(f"Found {len(config_entries)} configuration file(s).")
+        overview_parts.append(
+            f"Found {_plural(len(config_entries), 'configuration file')}."
+        )
     understanding.overview = " ".join(overview_parts) or f"{project_name} project."
 
     # History from git commits
