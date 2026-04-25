@@ -9040,6 +9040,7 @@ def _dashboard_inbox(
     top = [
         {
             "task_id": item.get("task_id"),
+            "primary_ref": item.get("primary_ref"),
             "title": item.get("title"),
             "updated_at": item.get("updated_at"),
             "triage_label": item.get("triage_label", ""),
@@ -9819,11 +9820,12 @@ class PollyProjectDashboardApp(App[None]):
         if count == 0 and not data.action_items and not blocked_total and not on_hold_total:
             return "[dim]Inbox is clear for this project.[/dim]"
         lines: list[str] = []
-        action_ids = {
-            str(item.get("task_id") or "")
-            for item in data.action_items
-            if item.get("task_id")
-        }
+        action_ids: set[str] = set()
+        for item in data.action_items:
+            for key in ("task_id", "primary_ref"):
+                value = str(item.get(key) or "")
+                if value:
+                    action_ids.add(value)
         if data.action_items:
             lines.append("[#f85149][b]To move this project forward[/b][/]")
             for item in data.action_items[:2]:
@@ -9903,6 +9905,7 @@ class PollyProjectDashboardApp(App[None]):
         preview_items = [
             item for item in data.inbox_top
             if str(item.get("task_id") or "") not in action_ids
+            and str(item.get("primary_ref") or "") not in action_ids
         ]
         if count:
             lines.append(

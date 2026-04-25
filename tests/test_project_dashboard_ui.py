@@ -989,3 +989,82 @@ def _load_config_compatible_ghost(config_path: Path) -> bool:
         return "ghost" in getattr(cfg, "projects", {})
     except Exception:  # noqa: BLE001
         return False
+
+
+def test_other_open_items_skips_duplicates_of_action_cards(
+    dashboard_app,
+) -> None:
+    """Regression: ``Other open items`` must not list the underlying task
+    or the underlying message that an Action Needed card already
+    represents — that turns the dashboard into duplicate noise instead
+    of a clear list of distinct things waiting on the user."""
+    from types import SimpleNamespace
+
+    fake_data = SimpleNamespace(
+        inbox_count=3,
+        task_counts={},
+        task_buckets={},
+        action_items=[
+            {
+                # The inbox-row id of the action message
+                "task_id": "msg-42",
+                # The underlying linked task that the message points at
+                "primary_ref": "demo/3",
+                "title": "[Action] Plan ready for review: demo",
+                "plain_prompt": (
+                    "A full project plan is ready for your review."
+                ),
+                "decision_question": "Approve the plan?",
+                "unblock_steps": ["Open the plan."],
+            },
+        ],
+        inbox_top=[
+            # Duplicate via primary_ref: the architect task that produced
+            # the plan — task_id matches the action card's primary_ref.
+            {
+                "task_id": "demo/3",
+                "primary_ref": "demo/3",
+                "title": "Plan project demo",
+                "updated_at": "",
+                "triage_label": "task assigned",
+                "source": "task",
+            },
+            # Duplicate via task_id: the same message that became the
+            # action card.
+            {
+                "task_id": "msg-42",
+                "primary_ref": "demo/3",
+                "title": "[Action] Plan ready for review: demo",
+                "updated_at": "",
+                "triage_label": "plan review",
+                "source": "message",
+            },
+            # Duplicate via primary_ref alone: a *different* notification
+            # message (different inbox row id) that points at the same
+            # underlying task.
+            {
+                "task_id": "msg-99",
+                "primary_ref": "demo/3",
+                "title": "[Action] Plan ready for review: demo (re-ping)",
+                "updated_at": "",
+                "triage_label": "plan review",
+                "source": "message",
+            },
+            # Genuinely different inbox item — must remain.
+            {
+                "task_id": "demo/9",
+                "primary_ref": "demo/9",
+                "title": "Different thing waiting on you",
+                "updated_at": "",
+                "triage_label": "needs review",
+                "source": "task",
+            },
+        ],
+    )
+    rendered = dashboard_app._render_inbox_body(fake_data)
+    other_section = rendered.split("Other open items", 1)[-1]
+    assert "Plan project demo" not in other_section
+    assert "[Action] Plan ready for review: demo" not in other_section
+    assert "re-ping" not in other_section
+    # A genuinely-different inbox item must still surface.
+    assert "Different thing waiting on you" in other_section
