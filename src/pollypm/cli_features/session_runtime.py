@@ -147,8 +147,9 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
             return
         if not force:
             names = ", ".join(sessions_to_kill)
+            session_word = "session" if len(sessions_to_kill) == 1 else "sessions"
             typer.confirm(
-                f"This will kill all PollyPM sessions ({names}). Continue?",
+                f"This will kill the PollyPM {session_word} ({names}). Continue?",
                 abort=True,
             )
         supervisor.shutdown_tmux()
