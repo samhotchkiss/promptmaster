@@ -90,8 +90,15 @@ def _format_activity_relative(timestamp: str) -> str:
         return timestamp[:16]
 
 
-def _truncate_summary(text: str, *, width: int = 80) -> str:
-    """Tail-truncate a summary line so wide rows stay one cell tall."""
+def _truncate_summary(text: str, *, width: int = 140) -> str:
+    """Tail-truncate a summary line so wide rows stay one cell tall.
+
+    Default width was 80 \u2014 too aggressive for typical alert payloads
+    that pack ``<context>. <fix_hint>`` into the message; the
+    ``Try: pm task claim X`` action hint at the end was getting cut
+    to ``T\u2026``, hiding the most actionable part of the row. 140
+    keeps the actionable tail visible on standard 200-col terminals.
+    """
     if not text:
         return ""
     cleaned = text.replace("\n", " ").strip()
