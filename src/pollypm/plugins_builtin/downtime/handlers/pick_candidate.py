@@ -37,7 +37,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Sequence
 
 from pollypm.atomic_io import atomic_write_text
 from pollypm.plugins_builtin.downtime.settings import (

@@ -24,11 +24,10 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
-from zoneinfo import ZoneInfo
+from typing import Any
 
 from pollypm.atomic_io import atomic_write_text
 from pollypm.plugins_builtin.morning_briefing.handlers.synthesize import BriefingDraft

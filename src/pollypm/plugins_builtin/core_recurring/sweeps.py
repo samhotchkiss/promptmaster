@@ -8,7 +8,6 @@ from typing import Any
 
 from .shared import (
     _close_msg_store,
-    _load_config,
     _load_config_and_store,
     _open_alert_exists,
     _open_msg_store,

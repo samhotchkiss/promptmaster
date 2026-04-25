@@ -47,7 +47,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pollypm.review_notify import notify_requires_review_hold
 from pollypm.work.models import ActorType, WorkStatus
 from pollypm.work.task_assignment import (
     SessionRoleIndex,
@@ -60,7 +59,6 @@ from pollypm.plugins_builtin.project_planning.plan_presence import (
     task_bypasses_plan_gate,
 )
 from pollypm.plugins_builtin.task_assignment_notify.resolver import (
-    DEDUPE_WINDOW_SECONDS,
     SWEEPER_COOLDOWN_SECONDS,
     load_runtime_services,
     notify,

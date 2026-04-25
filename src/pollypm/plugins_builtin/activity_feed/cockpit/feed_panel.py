@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable

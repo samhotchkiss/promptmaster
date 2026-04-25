@@ -35,9 +35,7 @@ from pollypm.plugins_builtin.morning_briefing.handlers.gather_yesterday import (
 )
 from pollypm.plugins_builtin.morning_briefing.handlers.identify_priorities import (
     PriorityList,
-    identify_priorities,
 )
-from pollypm.plugins_builtin.morning_briefing.state import BriefingState
 
 
 logger = logging.getLogger(__name__)

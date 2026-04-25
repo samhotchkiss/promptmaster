@@ -14,9 +14,9 @@ data-gathering surface.
 from __future__ import annotations
 
 import logging
-from datetime import date as _date, datetime
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from pollypm.plugins_builtin.morning_briefing.settings import (

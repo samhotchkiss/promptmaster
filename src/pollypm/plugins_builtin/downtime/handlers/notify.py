@@ -27,15 +27,6 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from typing import Any, Protocol
 
-from pollypm.plugins_builtin.downtime.handlers.security_scan import (
-    SecurityScanResult,
-)
-from pollypm.plugins_builtin.downtime.handlers.spec_feature import (
-    SpecFeatureResult,
-)
-from pollypm.plugins_builtin.downtime.handlers.try_alt_approach import (
-    TryAltApproachResult,
-)
 
 
 NOTIFICATION_MARKER = "inbox_notification_sent"

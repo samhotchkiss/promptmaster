@@ -24,7 +24,6 @@ import re
 from datetime import date as _date, datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import typer
 

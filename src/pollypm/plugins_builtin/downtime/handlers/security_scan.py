@@ -18,9 +18,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date as _date, datetime
+from datetime import date as _date
 from pathlib import Path
-from typing import Any
 
 from pollypm.plugins_builtin.downtime.handlers.spec_feature import slugify
 

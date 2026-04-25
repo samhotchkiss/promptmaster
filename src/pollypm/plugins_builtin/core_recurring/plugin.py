@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from pollypm.plugin_api.v1 import Capability, JobHandlerAPI, PollyPMPlugin, RosterAPI
@@ -21,7 +20,7 @@ from .maintenance import (
     notification_staging_prune_handler,
     transcript_ingest_handler,
 )
-from .shared import (
+from .shared import (  # noqa: F401  (re-exported for migration test)
     _close_msg_store,
     _ephemeral_alert_type,
     _load_config_and_store,

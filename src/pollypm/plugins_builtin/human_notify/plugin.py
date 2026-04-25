@@ -21,7 +21,6 @@ from pollypm.plugins_builtin.human_notify.cockpit import CockpitNotifyAdapter
 from pollypm.plugins_builtin.human_notify.dispatcher import dispatch
 from pollypm.plugins_builtin.human_notify.macos import MacOsNotifyAdapter
 from pollypm.plugins_builtin.human_notify.webhook import (
-    WebhookNotifyAdapter,
     from_config as _webhook_from_config,
 )
 from pollypm.work import task_assignment as _task_assignment_bus

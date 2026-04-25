@@ -29,7 +29,7 @@ import json
 import logging
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -37,7 +37,6 @@ from typing import Any
 from pollypm.atomic_io import atomic_write_text
 from pollypm.plugins_builtin.advisor.handlers.detect_changes import (
     ChangeReport,
-    TaskTransitionRecord,
 )
 from pollypm.plugins_builtin.advisor.handlers.history_log import (
     HistoryEntry,

@@ -20,7 +20,6 @@ applies, so re-pings inside the 30-minute window are suppressed.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from pollypm.plugin_api.v1 import (
     Capability,

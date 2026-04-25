@@ -27,7 +27,7 @@ the new entry is skipped (planner reruns don't duplicate history).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 

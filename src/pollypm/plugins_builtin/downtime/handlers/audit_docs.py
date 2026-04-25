@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from pollypm.plugins_builtin.downtime.handlers.spec_feature import (
     _current_branch,

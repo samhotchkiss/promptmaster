@@ -24,10 +24,9 @@ callables so tests can swap them in without touching the tick logic.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from pollypm.plugins_builtin.downtime.settings import (
     DowntimeSettings,

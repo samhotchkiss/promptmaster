@@ -30,7 +30,6 @@ from pollypm.plugins_builtin.advisor.settings import (
     load_advisor_settings,
 )
 from pollypm.plugins_builtin.advisor.state import (
-    AdvisorState,
     ProjectAdvisorState,
     is_paused,
     iso_utc_now,

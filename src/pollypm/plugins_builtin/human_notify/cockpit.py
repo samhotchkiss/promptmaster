@@ -16,7 +16,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pollypm.storage.state import StateStore
+    pass
 
 logger = logging.getLogger(__name__)
 
