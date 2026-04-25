@@ -1910,6 +1910,55 @@ def test_approve_button_warns_when_task_is_not_in_an_approvable_state(
 # ---------------------------------------------------------------------------
 
 
+def test_now_body_calls_out_on_hold_when_no_worker_active() -> None:
+    """When a project has only on_hold tasks and no worker, the
+    "Now" section used to fall through to ``Idle. No tasks in flight``
+    — misleading, because on_hold tasks ARE in flight, just paused.
+    Surface the on-hold state explicitly so the operator knows where
+    to look (the Task pipeline carries the hold reason).
+    """
+    from types import SimpleNamespace
+    from pollypm.cockpit_ui import PollyProjectDashboardApp
+
+    app = PollyProjectDashboardApp.__new__(PollyProjectDashboardApp)
+    fake_data = SimpleNamespace(
+        active_worker=None,
+        action_items=[],
+        task_buckets={
+            "queued": [], "in_progress": [], "review": [],
+            "blocked": [], "on_hold": [], "done": [],
+        },
+        task_counts={"on_hold": 2},
+    )
+    rendered = app._render_now_body(fake_data)
+    assert "Idle" not in rendered
+    assert "on hold" in rendered
+    assert "Task pipeline" in rendered
+
+
+def test_now_body_idle_when_no_tasks_at_all() -> None:
+    """Confirmation: a truly empty project still hits the Idle line —
+    no on-hold/review/blocked/queued counts → Idle is the right
+    message.
+    """
+    from types import SimpleNamespace
+    from pollypm.cockpit_ui import PollyProjectDashboardApp
+
+    app = PollyProjectDashboardApp.__new__(PollyProjectDashboardApp)
+    fake_data = SimpleNamespace(
+        active_worker=None,
+        action_items=[],
+        task_buckets={
+            "queued": [], "in_progress": [], "review": [],
+            "blocked": [], "on_hold": [], "done": [],
+        },
+        task_counts={},
+    )
+    rendered = app._render_now_body(fake_data)
+    assert "Idle" in rendered
+    assert "no user action needed" in rendered
+
+
 def test_recent_activity_strips_in_project_task_prefix_and_action_tag(
     dashboard_env, dashboard_app, monkeypatch,
 ) -> None:

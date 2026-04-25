@@ -9727,6 +9727,11 @@ class PollyProjectDashboardApp(App[None]):
                 "[dim]No worker active right now.[/dim]\n"
                 "  Work is waiting for review/approval."
             )
+        if data.task_counts.get("on_hold", 0):
+            return (
+                "[dim]No worker active right now.[/dim]\n"
+                "  Work is on hold — see Task pipeline for the hold reason."
+            )
         return "[dim]Idle. No tasks in flight and no user action needed.[/dim]"
 
     def _render_pipeline_body(self, data: ProjectDashboardData) -> str:
