@@ -588,7 +588,8 @@ def _build_widget_classes():
             try:
                 from pollypm.state_epoch import mtime
             except Exception:  # noqa: BLE001
-                mtime = lambda: 0.0  # type: ignore[assignment]
+                def mtime() -> float:
+                    return 0.0
             current = mtime()
             if current and current == self._last_epoch:
                 return

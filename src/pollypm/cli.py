@@ -515,7 +515,8 @@ def up(
     router = CockpitRouter(config_path)
     try:
         router.ensure_cockpit_layout()
-        import time; time.sleep(0.3)  # let tmux settle after the split
+        import time
+        time.sleep(0.3)  # let tmux settle after the split
         supervisor.start_cockpit_tui(session_name)
     except Exception:  # noqa: BLE001
         pass  # layout will be fixed on next cockpit launch
