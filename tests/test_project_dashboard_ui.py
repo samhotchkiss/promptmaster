@@ -601,6 +601,148 @@ def test_user_prompt_payload_drives_dashboard_copy_and_buttons(
     _run(body())
 
 
+def test_user_prompt_action_kinds_preserve_underscores(
+    dashboard_env, dashboard_app,
+) -> None:
+    """Action ``kind`` values are dispatch identifiers (``approve_task``,
+    ``review_plan``, ``open_inbox`` …). The dashboard's plain-text
+    sanitizer strips underscores as markdown decorations, which until
+    this cycle silently turned ``approve_task`` into ``approvetask`` —
+    no branch in ``_perform_dashboard_action`` matched, so every
+    structured user_prompt button fell through to the generic
+    record-response fallback. The underscore must survive intact."""
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    in_progress_id = dashboard_env["task_ids"]["in_progress"]
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        store.enqueue_message(
+            type="notify",
+            tier="immediate",
+            recipient="user",
+            sender="architect",
+            subject=f"Need decision on {in_progress_id}",
+            body="Decision required.",
+            scope="demo",
+            labels=["project:demo"],
+            payload={
+                "actor": "architect",
+                "project": "demo",
+                "task_id": in_progress_id,
+                "user_prompt": {
+                    "summary": "Approve or reroute?",
+                    "steps": ["Review the work"],
+                    "question": "Approve or send to review?",
+                    "actions": [
+                        {
+                            "label": "Approve it",
+                            "kind": "approve_task",
+                            "task_id": in_progress_id,
+                        },
+                        {
+                            "label": "Open inbox",
+                            "kind": "open_inbox",
+                        },
+                    ],
+                },
+            },
+            state="open",
+        )
+    finally:
+        store.close()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            assert dashboard_app.data is not None
+            assert dashboard_app.data.action_items
+            primary = dashboard_app.data.action_items[0]["primary_action"]
+            secondary = dashboard_app.data.action_items[0]["secondary_action"]
+            assert primary["kind"] == "approve_task", (
+                f"underscore stripped from kind: {primary['kind']!r}"
+            )
+            assert secondary["kind"] == "open_inbox", (
+                f"underscore stripped from kind: {secondary['kind']!r}"
+            )
+
+    _run(body())
+
+
+def test_approve_button_warns_when_task_is_not_in_an_approvable_state(
+    dashboard_env, dashboard_app,
+) -> None:
+    """When the user clicks 'Approve it anyway' but the underlying
+    task isn't in a state PollyPM can auto-approve from (e.g.
+    in_progress, blocked), the toast must explicitly tell the user
+    that the task stayed where it was — not the misleading
+    'Decision recorded.' which suggested the click moved the project."""
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    in_progress_id = dashboard_env["task_ids"]["in_progress"]
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        store.enqueue_message(
+            type="notify",
+            tier="immediate",
+            recipient="user",
+            sender="architect",
+            subject=f"[Action] {in_progress_id} — code ready",
+            body="Code is in but acceptance is blocked on infra.",
+            scope="demo",
+            labels=["project:demo"],
+            payload={
+                "actor": "architect",
+                "project": "demo",
+                "task_id": in_progress_id,
+                "user_prompt": {
+                    "summary": "Code is in but acceptance is blocked on infra.",
+                    "steps": ["Stand up the infra"],
+                    "question": "Approve now or wait?",
+                    "actions": [
+                        {
+                            "label": "Approve it anyway",
+                            "kind": "approve_task",
+                            "task_id": in_progress_id,
+                        },
+                        {"label": "Wait", "kind": "record_response"},
+                    ],
+                },
+            },
+            state="open",
+        )
+    finally:
+        store.close()
+
+    captured: list[tuple[str, str | None]] = []
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            assert dashboard_app.data is not None
+            assert dashboard_app.data.action_items
+            dashboard_app.notify = (  # type: ignore[assignment]
+                lambda message, *, severity="information", **_: captured.append(
+                    (str(message), str(severity)),
+                )
+            )
+            dashboard_app._perform_dashboard_action(0, "primary")
+            await pilot.pause()
+
+    _run(body())
+
+    # The user clicked the primary 'approve' button, but the task is
+    # in_progress — not 'review' — so the approve helper can't act.
+    # The toast must say so explicitly, not blandly claim 'Decision
+    # recorded.'
+    severities = [sev for _, sev in captured]
+    messages = [msg for msg, _ in captured]
+    assert any(
+        "stayed at 'in_progress'" in msg for msg in messages
+    ), f"expected explicit stayed-at toast, got {messages!r}"
+    assert "warning" in severities, (
+        "an unapproved click must surface as a warning so the user "
+        "doesn't think the project moved"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. Task pipeline — counts + top-N per bucket
 # ---------------------------------------------------------------------------

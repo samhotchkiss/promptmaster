@@ -8674,7 +8674,16 @@ def _dashboard_inbox(
             if not isinstance(raw_action, dict):
                 continue
             label = _plain_text(raw_action.get("label"))
-            kind = _plain_text(raw_action.get("kind"))
+            # ``kind`` is a structured dispatch identifier — values like
+            # ``approve_task``, ``review_plan``, ``open_inbox``. We MUST
+            # NOT route it through ``_plain_text`` because that strips
+            # the underscores out of markdown-decoration tokens, leaving
+            # ``approvetask`` / ``reviewplan`` etc., which then fail to
+            # match every branch in ``_perform_dashboard_action``. That
+            # was the silent root cause of "buttons record replies but
+            # don't drive the underlying task transition" — every
+            # custom action fell through to the generic record path.
+            kind = str(raw_action.get("kind") or "").strip()
             if not label or not kind:
                 continue
             action = dict(raw_action)
@@ -10047,6 +10056,13 @@ class PollyProjectDashboardApp(App[None]):
             self.notify(f"Could not load task service: {exc}", severity="error")
             return
         db_path = data.project_path / ".pollypm" / "state.db"
+        approved_task = None
+        # Track the post-action status so the toast can tell the user
+        # whether their click actually moved the task or just left a
+        # reply. "Decision recorded." was misleading when the underlying
+        # task stayed parked at blocked/on_hold/etc. — the user thought
+        # they had pushed the project forward.
+        final_status = ""
         try:
             with SQLiteWorkService(
                 db_path=db_path, project_path=data.project_path,
@@ -10057,12 +10073,26 @@ class PollyProjectDashboardApp(App[None]):
                     if task.work_status.value == "on_hold":
                         task = svc.resume(task_id, "user")
                     if task.work_status.value == "review":
-                        approved = svc.approve(task_id, "user", response)
-                        notify_task_approved(approved, notify=self.notify)
+                        approved_task = svc.approve(task_id, "user", response)
+                final_status = svc.get(task_id).work_status.value
         except Exception as exc:  # noqa: BLE001
             self.notify(f"Could not record decision: {exc}", severity="error")
             return
-        self.notify("Decision recorded.", severity="information")
+        if approved_task is not None:
+            # notify_task_approved emits its own success toast — don't
+            # also double up with the generic "Decision recorded."
+            notify_task_approved(approved_task, notify=self.notify)
+        elif approve_if_possible and final_status:
+            # Approval was requested but the task wasn't in an approvable
+            # state. Be explicit so the user can decide what to do next
+            # rather than think the click moved the project forward.
+            self.notify(
+                f"Reply saved — task stayed at '{final_status}' "
+                "(not in a state PollyPM can auto-approve from here).",
+                severity="warning",
+            )
+        else:
+            self.notify("Decision recorded.", severity="information")
         self._refresh()
 
     def _perform_dashboard_action(self, index: int, slot: str) -> None:
