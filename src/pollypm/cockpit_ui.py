@@ -585,6 +585,16 @@ class RailItem(ListItem):
                     return presence.working_frame(self.spinner_index), "#3ddc84"
                 return "\u25c6", "#f0c45a"  # yellow diamond — active task
             return "\u25cb", "#4a5568"  # dim circle — idle
+        # Generic "<glyph> working" state — top-level rail rows
+        # (e.g. Workers when any worker is currently turning) used
+        # to fall through to the idle circle below, so a
+        # ``◆ working`` state from the state-provider was
+        # cosmetically indistinguishable from idle. Honour the
+        # state with the spinner / active diamond.
+        if self.item.state.endswith("working"):
+            if presence is not None:
+                return presence.working_frame(self.spinner_index), "#3ddc84"
+            return "\u25c6", "#f0c45a"
         return "\u25cb", "#4a5568"
 
     def _session_work_glyph(self, work_state: str) -> tuple[str, str]:
