@@ -75,8 +75,14 @@ def _read_budget_overrides(config: Any) -> dict[str, int]:
 
     # Direct-dict path — tests pass a dict.
     if isinstance(config, dict):
-        section = config.get("planner", {}).get("budgets", {})
-        return _normalise(section)
+        planner_section = config.get("planner", {})
+        # A user could write ``planner = "off"`` instead of a table —
+        # ``"off".get("budgets")`` would AttributeError. Guard the
+        # intermediate dict so a malformed config never crashes the
+        # planner; ``_normalise`` handles non-dict ``budgets`` already.
+        if not isinstance(planner_section, dict):
+            return {}
+        return _normalise(planner_section.get("budgets", {}))
 
     # Attribute path — PollyPMConfig with a future .planner.budgets.
     planner = getattr(config, "planner", None)
@@ -85,11 +91,13 @@ def _read_budget_overrides(config: Any) -> dict[str, int]:
         if isinstance(budgets, dict):
             return _normalise(budgets)
 
-    # Fallback: raw_toml.
+    # Fallback: raw_toml. Same intermediate-dict guard as above.
     raw = getattr(config, "raw_toml", None)
     if isinstance(raw, dict):
-        section = raw.get("planner", {}).get("budgets", {})
-        return _normalise(section)
+        planner_section = raw.get("planner", {})
+        if not isinstance(planner_section, dict):
+            return {}
+        return _normalise(planner_section.get("budgets", {}))
 
     return {}
 

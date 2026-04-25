@@ -975,6 +975,30 @@ def test_all_effective_budgets_merges_config_and_defaults() -> None:
     assert snapshot["research"] == DEFAULT_BUDGETS["research"]
 
 
+def test_effective_budget_handles_non_dict_planner_section() -> None:
+    """Cycle 98: a malformed config (``planner = "off"`` instead of a
+    table) used to AttributeError on
+    ``config.get("planner", {}).get("budgets", {})`` because the
+    intermediate value was a string. The fallback should now treat
+    a non-dict planner section as "no overrides" and use the
+    DEFAULT_BUDGETS rather than crashing.
+    """
+    from pollypm.plugins_builtin.project_planning.budgets import (
+        DEFAULT_BUDGETS, effective_budget,
+    )
+
+    # ``planner`` set to a scalar (TOML user wrote ``planner = "off"``).
+    config = {"planner": "off"}
+    assert effective_budget("research", config=config) == DEFAULT_BUDGETS["research"]
+
+    # Same shape on the raw_toml fallback — wrap in a SimpleNamespace so
+    # the attribute path takes over and lands at raw_toml.
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(planner=None, raw_toml={"planner": ["a", "b"]})
+    assert effective_budget("research", config=fake) == DEFAULT_BUDGETS["research"]
+
+
 def test_flow_engine_rejects_non_positive_budget(tmp_path: Path) -> None:
     import pytest
 
