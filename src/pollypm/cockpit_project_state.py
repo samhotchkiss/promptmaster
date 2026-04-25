@@ -120,28 +120,40 @@ def rollup_project_state(
         return _rollup(ProjectRailState.NONE, project_key=project_key)
 
     alert_ids = frozenset(actionable_task_alert_ids)
-    waiting = [
+    alerted = [
         task for task in active_tasks
-        if _is_waiting_on_user(task) or task_id_for(task) in alert_ids
+        if task_id_for(task) in alert_ids
+    ]
+    user_waiting = [
+        task for task in active_tasks
+        if _is_waiting_on_user(task)
     ]
     advanceable = [
         task for task in active_tasks
         if _can_independently_advance(task, plan_blocked=plan_blocked)
     ]
 
-    if waiting and len(waiting) == len(active_tasks):
+    # Red is reserved for true operational fault states — a worker
+    # detected as stuck, a missing session for an assignment, etc. A
+    # project where the user simply has decisions to make is *not* a
+    # fault: it is "user attention needed", which is yellow.
+    if alerted:
         return _rollup(
             ProjectRailState.RED,
             project_key=project_key,
-            task=_first_actionable_task(waiting),
-            reason="all tasks waiting on user",
+            task=_first_actionable_task(alerted),
+            reason="operational alert needs review",
         )
-    if waiting:
+    if user_waiting:
         return _rollup(
             ProjectRailState.YELLOW,
             project_key=project_key,
-            task=_first_actionable_task(waiting),
-            reason="some tasks waiting on user",
+            task=_first_actionable_task(user_waiting),
+            reason=(
+                "all tasks waiting on user"
+                if len(user_waiting) == len(active_tasks)
+                else "some tasks waiting on user"
+            ),
         )
     if all(_is_user_review(task) for task in active_tasks):
         return _rollup(

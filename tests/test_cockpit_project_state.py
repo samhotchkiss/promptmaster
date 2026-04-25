@@ -29,7 +29,11 @@ def _task(
     )
 
 
-def test_rollup_red_when_all_nonterminal_tasks_wait_on_user() -> None:
+def test_rollup_yellow_when_all_nonterminal_tasks_wait_on_user() -> None:
+    """Per the v1 dashboard contract, red is reserved for operational
+    fault states. A project where every active task is waiting on the
+    user has user-attention work to do, but nothing is *broken* — that
+    is yellow, not a false red alarm."""
     rollup = rollup_project_state(
         "demo",
         [
@@ -39,10 +43,27 @@ def test_rollup_red_when_all_nonterminal_tasks_wait_on_user() -> None:
         ],
     )
 
+    assert rollup.state is ProjectRailState.YELLOW
+    assert rollup.badge == "🟡"
+    assert rollup.actionable_key == "project:demo:issues"
+
+
+def test_rollup_red_only_when_operational_alert_present() -> None:
+    """A stuck-on-task or missing-session alert is a true fault state —
+    the system itself can't recover without user intervention. Those
+    must surface as red even when the rest of the project is moving."""
+    alerts = [SimpleNamespace(alert_type="stuck_on_task:demo/1")]
+    rollup = rollup_project_state(
+        "demo",
+        [_task(1, "in_progress"), _task(2, "in_progress")],
+        actionable_task_alert_ids=actionable_alert_task_ids(
+            alerts, project_key="demo",
+        ),
+    )
+
     assert rollup.state is ProjectRailState.RED
     assert rollup.badge == "🔴"
-    assert rollup.sort_rank == 0
-    assert rollup.actionable_key == "project:demo:issues"
+    assert rollup.reason == "operational alert needs review"
 
 
 def test_rollup_yellow_when_user_wait_is_mixed_with_automated_work() -> None:
@@ -138,7 +159,9 @@ def test_plan_blocked_project_allows_planner_task_to_advance() -> None:
     assert rollup.state is ProjectRailState.WORKING
 
 
-def test_actionable_alert_prefixes_contribute_to_waiting_rollup() -> None:
+def test_actionable_alert_prefixes_drive_red_state() -> None:
+    """Operational alert prefixes (``stuck_on_task:``, etc.) flag the
+    rail red — the system has detected a fault that needs the user."""
     alerts = [
         SimpleNamespace(alert_type="stuck_on_task:demo/1"),
         SimpleNamespace(alert_type="no_session_for_assignment:other/2"),
@@ -149,8 +172,8 @@ def test_actionable_alert_prefixes_contribute_to_waiting_rollup() -> None:
         actionable_task_alert_ids=actionable_alert_task_ids(alerts, project_key="demo"),
     )
 
-    assert rollup.state is ProjectRailState.YELLOW
-    assert rollup.badge == "🟡"
+    assert rollup.state is ProjectRailState.RED
+    assert rollup.badge == "🔴"
 
 
 def test_surfaceable_operational_alert_taxonomy_keeps_user_action_signals_visible() -> None:
