@@ -730,8 +730,8 @@ class PollyCockpitApp(App[None]):
         Binding("k,up", "cursor_up", "Up", show=False),
         Binding("g,home", "cursor_first", "First", show=False),
         Binding("G,end", "cursor_last", "Last", show=False),
-        Binding("ctrl+q,Q", "request_quit", "Quit", priority=True),
-        Binding("ctrl+w,W", "detach", "Detach", priority=True),
+        Binding("q,Q,ctrl+q", "request_quit", "Quit", priority=True),
+        Binding("w,W,ctrl+w", "detach", "Detach", priority=True),
     ]
 
     def action_open_command_palette(self) -> None:
@@ -1275,7 +1275,7 @@ class PollyCockpitApp(App[None]):
     def _update_hint(self) -> None:
         hint_text = (
             "j/k move \u00b7 \u21b5 open \u00b7 n new \u00b7 t activity "
-            "\u00b7 p pin \u00b7 W detach \u00b7 Q quit"
+            "\u00b7 p pin \u00b7 w detach \u00b7 q quit"
         )
         try:
             supervisor = self.router._load_supervisor()
