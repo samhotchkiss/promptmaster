@@ -68,6 +68,28 @@ def _make_worker_context(tmp_path: Path) -> tuple[AgentProfileContext, Path]:
     return context, project_root
 
 
+def test_reviewer_prompt_routes_escalations_to_polly_not_user() -> None:
+    """Russell's escalations are reviewer-jargon ('security concern',
+    'architectural drift') — they belong in Polly's inbox, where she
+    rewrites them into the user_prompt contract before anything
+    surfaces to Sam. Routing them to the user directly bypasses
+    that translation and floods the user inbox with low-signal
+    operations metadata.
+
+    The reviewer prompt must teach Russell to pass
+    ``--requester polly`` on the escalation and plan-review
+    misroute notify calls."""
+    from pollypm.plugins_builtin.core_agent_profiles.profiles import (
+        reviewer_prompt,
+    )
+
+    text = reviewer_prompt()
+    assert "--requester polly" in text
+    # The escalation block describes why we route to Polly so future
+    # editors can preserve the intent if they refactor the section.
+    assert "Polly" in text and "operator" in text
+
+
 def test_operator_guide_documents_user_prompt_json_contract() -> None:
     """The polly-operator-guide must teach Polly to send escalations
     with the structured ``--user-prompt-json`` contract — that is the

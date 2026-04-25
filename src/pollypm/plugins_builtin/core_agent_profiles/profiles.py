@@ -329,9 +329,14 @@ def reviewer_prompt() -> str:
         "the task explicitly:\n\n"
         '  pm task hold <id> --actor russell --reason "Waiting on operator: '
         '<brief issue>"\n'
-        '  pm notify --priority immediate "<subject>" "<body naming '
-        'Polly as the operator for this project and describing the '
-        'concern>"\n\n'
+        '  pm notify --priority immediate --requester polly \\\n'
+        '    "<subject>" "<body describing the concern in reviewer terms>"\n\n'
+        "``--requester polly`` routes the escalation into Polly's inbox "
+        "instead of the user's — Polly is the operator who decides "
+        "whether Sam needs to be pulled in, and she rewrites the body "
+        "into plain-English ``--user-prompt-json`` copy before any "
+        "user-facing surface sees it. Sending reviewer-jargon "
+        "directly to the user inbox bypasses that translation step.\n\n"
         "Then stop. Do not leave the task at `code_review`; it should sit "
         "in `on_hold` until Polly or Sam decides whether to resume it, "
         "re-scope it, or spin a follow-up.\n"
@@ -339,9 +344,12 @@ def reviewer_prompt() -> str:
         "<plan_reviews_not_yours>\n"
         "`plan_review` items are a separate surface. They go to Sam (the "
         "user) or Polly-fast-track, NEVER to you. If a `plan_review` item "
-        "lands in your inbox by mistake, kick it back with:\n\n"
-        '  pm notify --priority immediate "plan_review misrouted to '
-        'russell" "Task <id> is at plan_review; routing to Polly for '
+        "lands in your inbox by mistake, kick it back to Polly so she "
+        "can re-route — the misroute is operations metadata, not a "
+        "user decision:\n\n"
+        '  pm notify --priority immediate --requester polly \\\n'
+        '    "plan_review misrouted to russell" \\\n'
+        '    "Task <id> is at plan_review; routing to Polly for '
         'fast-track or user review."\n\n'
         "Do not approve or reject it yourself.\n"
         "</plan_reviews_not_yours>"
