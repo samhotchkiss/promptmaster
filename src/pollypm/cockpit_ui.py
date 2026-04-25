@@ -1275,6 +1275,10 @@ class PollyCockpitApp(App[None]):
             payload = json.loads(flag.read_text())
         except (OSError, json.JSONDecodeError):
             return
+        if not isinstance(payload, dict):
+            # Corrupt flag file (list/null/string) — fall back to ``?``
+            # rather than raising AttributeError on the .get below.
+            payload = {}
         new_version = str(payload.get("to") or "?")
         self.update_pill.update(
             f"[#9ece6a]✓ Upgraded to v{new_version} · "

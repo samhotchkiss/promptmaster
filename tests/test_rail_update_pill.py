@@ -184,3 +184,36 @@ def test_trigger_upgrade_emits_notification(fake_config, monkeypatch):
     app.action_trigger_upgrade()
     assert len(notices) == 1
     assert "pm upgrade" in notices[0]
+
+
+def test_check_post_upgrade_flag_handles_corrupt_non_dict_payload(
+    fake_config, tmp_path, monkeypatch,
+) -> None:
+    """Cycle 97: a corrupted ``post-upgrade.flag`` (parses to list/null/
+    string) must not crash the cockpit on startup. The pill should
+    fall back to ``Upgraded to v?`` rather than raising
+    ``AttributeError`` on the ``payload.get("to")`` call.
+    """
+    from pollypm.cockpit_ui import PollyCockpitApp
+
+    flag_dir = tmp_path / "fake_home" / ".pollypm"
+    flag_dir.mkdir(parents=True)
+    flag = flag_dir / "post-upgrade.flag"
+    flag.write_text("[1, 2, 3]")
+
+    app = PollyCockpitApp(fake_config)
+    monkeypatch.setattr(app, "_post_upgrade_flag_path", lambda: flag)
+    # Should not raise.
+    app._check_post_upgrade_flag()
+    rendered = str(app.update_pill.render())
+    assert "Upgraded to v?" in rendered
+
+    # Sanity check: a well-formed payload renders the actual version.
+    flag.write_text('{"to": "1.2.3", "from": "1.2.2", "at": 0}')
+    # Reset dismiss flag so the refresh fires.
+    app._update_pill_dismissed = False
+    app.update_pill.update("")
+    app.update_pill.display = False
+    app._check_post_upgrade_flag()
+    rendered = str(app.update_pill.render())
+    assert "Upgraded to v1.2.3" in rendered
