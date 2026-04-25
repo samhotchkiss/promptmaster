@@ -713,6 +713,41 @@ def test_render_human_includes_summary_and_failure_detail() -> None:
     assert "fix it: run x" in text
 
 
+def test_render_human_summary_pluralisation() -> None:
+    """The final ``Summary:`` line must not show ``warning(s)`` / ``error(s)``.
+
+    Every ``pm doctor`` invocation prints this line as the closing
+    summary — it's one of the most user-visible strings in the
+    install. Mirrors the doctor (s) cleanup from cycles 45/47/48/49/50
+    on individual check messages and locks the summary's plural
+    handling for both the warn-only (``1 warning``) and error-only
+    (``1 error``) cases.
+    """
+    def _warn() -> doctor.CheckResult:
+        return doctor._fail("warned", why="why-w", fix="fix-w", severity="warning")
+
+    def _err() -> doctor.CheckResult:
+        return doctor._fail("erred", why="why-e", fix="fix-e", severity="error")
+
+    one_each = doctor.run_checks([
+        doctor.Check("warn", _warn, "test"),
+        doctor.Check("err", _err, "test"),
+    ])
+    text = doctor.render_human(one_each)
+    assert "1 warning, 1 error," in text
+    assert "warning(s)" not in text
+    assert "error(s)" not in text
+
+    only_warn = doctor.run_checks([
+        doctor.Check("warn-a", _warn, "test"),
+        doctor.Check("warn-b", _warn, "test"),
+    ])
+    text = doctor.render_human(only_warn)
+    assert "2 warnings, 0 errors," in text
+    assert "warning(s)" not in text
+    assert "error(s)" not in text
+
+
 def test_render_json_is_parseable() -> None:
     def _pass() -> doctor.CheckResult:
         return doctor._ok("ok", data={"foo": 1})
