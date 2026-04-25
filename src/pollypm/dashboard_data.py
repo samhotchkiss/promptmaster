@@ -173,6 +173,22 @@ def _session_description(status: str, role: str, snapshot_path: str | None) -> s
                     continue
                 if "gpt-" in line.lower() or "default ·" in line:
                     continue
+                # Claude TUI bottom-bar boilerplate. ``⏵⏵`` is the
+                # bypass-permissions hint; the others are standing
+                # keybinding cues that appear on every snapshot when
+                # the session is idle at the prompt. Reporting them
+                # as "what's happening now" is misleading — the
+                # session isn't *doing* the bypass-permissions thing,
+                # it's idle waiting for input.
+                lower = line.lower()
+                if (
+                    "bypass permissions on" in lower
+                    or "ctrl+t to hide tasks" in lower
+                    or "ctrl+t to show tasks" in lower
+                    or "shift+tab to cycle" in lower
+                    or line.startswith("⏵⏵")
+                ):
+                    continue
                 return line[:70]
         except (FileNotFoundError, OSError):
             pass

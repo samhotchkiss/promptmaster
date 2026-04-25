@@ -44,3 +44,47 @@ def test_stuck_alert_already_user_waiting_handles_malformed_alert() -> None:
         "stuck_on_task:   ",
         frozenset({"polly_remote/12"}),
     )
+
+
+def test_session_description_skips_claude_tui_bottom_bar(tmp_path) -> None:
+    """The polly-dashboard "Now" section was rendering every idle
+    session as ``"⏵⏵ bypass permissions on (shift+tab to cycle)"`` —
+    the Claude TUI's standing keybinding hint, picked up from the
+    last line of the pane snapshot. The session isn't *doing* the
+    bypass-permissions thing; it's idle at the prompt.
+
+    Filter the standing TUI bar lines so the snapshot scan falls
+    through to the ``status``-based default ("idle").
+    """
+    from pollypm.dashboard_data import _session_description
+
+    snapshot = tmp_path / "snap.txt"
+    snapshot.write_text(
+        # Typical idle Claude TUI tail — the function scans bottom-up.
+        "Some real activity finished a while ago.\n"
+        "\n"
+        "⏵⏵ bypass permissions on (shift+tab to cycle) · ctrl+t to hide tasks\n"
+    )
+    desc = _session_description("healthy", "worker", str(snapshot))
+    # Either the meaningful line above bubbles up, or we fall through
+    # to the status-based default. Either way, the bypass-permissions
+    # boilerplate must not be the description.
+    assert "bypass permissions" not in desc.lower()
+    assert "shift+tab" not in desc.lower()
+
+
+def test_session_description_falls_through_when_only_tui_lines(
+    tmp_path,
+) -> None:
+    """When the entire snapshot is keybinding boilerplate, the
+    description must fall through to the status-based default
+    ("idle" for a healthy worker) rather than echoing the bar."""
+    from pollypm.dashboard_data import _session_description
+
+    snapshot = tmp_path / "snap.txt"
+    snapshot.write_text(
+        "⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+        "ctrl+t to hide tasks\n"
+    )
+    desc = _session_description("healthy", "worker", str(snapshot))
+    assert desc == "idle"
