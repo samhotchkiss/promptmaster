@@ -9442,16 +9442,27 @@ class PollyProjectDashboardApp(App[None]):
                 blocker_count=int(data.task_counts.get("blocked", 0)),
                 on_hold_count=int(data.task_counts.get("on_hold", 0)),
             )
+            # When more than one user-facing action is waiting, the
+            # banner prompt only shows the first; surface the rest as
+            # a "+N more action(s)" tag so the user doesn't read the
+            # banner, act on the first item, and miss the others.
+            extras = max(0, int(data.inbox_count) - 1)
+            extras_part = (
+                f" · +{extras} more action"
+                + ("s" if extras != 1 else "")
+                if extras
+                else ""
+            )
             if action_only_suffix.startswith("▸ Clear"):
                 # No other categories to mention — drop the suffix entirely
                 # so the banner stays a single clean sentence.
-                return f"Waiting on you: {prompt}"
+                return f"Waiting on you: {prompt}{extras_part}"
             suffix = (
                 action_only_suffix[2:]
                 if action_only_suffix.startswith("▸ ")
                 else action_only_suffix
             )
-            return f"Waiting on you: {prompt} · {suffix}"
+            return f"Waiting on you: {prompt}{extras_part} · {suffix}"
         if data.alert_count:
             return f"Alert: Polly needs to inspect a project issue{count_suffix}"
         if data.active_worker is not None:

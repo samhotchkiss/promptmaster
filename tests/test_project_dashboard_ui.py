@@ -1281,6 +1281,111 @@ def test_waiting_on_you_banner_drops_redundant_need_action_suffix(
     _run(body())
 
 
+def test_waiting_on_you_banner_surfaces_extra_actions(
+    dashboard_env, dashboard_app,
+) -> None:
+    """When more than one user-facing action is waiting, the banner
+    only shows the first prompt — surface the rest as a "+N more
+    action(s)" tag so the user doesn't read the banner, take action
+    on the first item, and miss the others."""
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    in_progress_id = dashboard_env["task_ids"]["in_progress"]
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        for label in ("alpha", "beta"):
+            store.enqueue_message(
+                type="notify",
+                tier="immediate",
+                recipient="user",
+                sender="architect",
+                subject=f"Need decision on {label}",
+                body=f"Decide {label}.",
+                scope="demo",
+                labels=["project:demo"],
+                payload={
+                    "actor": "architect",
+                    "project": "demo",
+                    "task_id": f"demo/{1000 if label == 'alpha' else 2000}",
+                    "user_prompt": {
+                        "summary": f"Need a call on {label}.",
+                        "steps": ["Review"],
+                        "question": "Approve?",
+                        "actions": [
+                            {"label": "Approve", "kind": "approve_task",
+                             "task_id": in_progress_id},
+                        ],
+                    },
+                },
+                state="open",
+            )
+    finally:
+        store.close()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            assert dashboard_app.data is not None
+            assert dashboard_app.data.inbox_count >= 2
+            rendered = str(dashboard_app.action_bar.render())
+            assert "Waiting on you:" in rendered
+            # The "+N more action" tag must surface so the user knows
+            # there's more than what the banner sentence shows.
+            assert "+1 more action" in rendered, (
+                f"banner missing extras tag: {rendered!r}"
+            )
+
+    _run(body())
+
+
+def test_waiting_on_you_banner_omits_extras_tag_for_single_action(
+    dashboard_env, dashboard_app,
+) -> None:
+    """With exactly one action item the banner already says
+    everything — no '+0 more' tag should appear."""
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    in_progress_id = dashboard_env["task_ids"]["in_progress"]
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        store.enqueue_message(
+            type="notify",
+            tier="immediate",
+            recipient="user",
+            sender="architect",
+            subject=f"Need decision on {in_progress_id}",
+            body="Decide.",
+            scope="demo",
+            labels=["project:demo"],
+            payload={
+                "actor": "architect",
+                "project": "demo",
+                "task_id": in_progress_id,
+                "user_prompt": {
+                    "summary": "Just one.",
+                    "steps": ["Review"],
+                    "question": "Approve?",
+                    "actions": [
+                        {"label": "Approve", "kind": "approve_task",
+                         "task_id": in_progress_id},
+                    ],
+                },
+            },
+            state="open",
+        )
+    finally:
+        store.close()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            rendered = str(dashboard_app.action_bar.render())
+            assert "Waiting on you:" in rendered
+            assert "more action" not in rendered, (
+                f"banner printed extras tag for single action: {rendered!r}"
+            )
+
+    _run(body())
+
+
 def test_user_prompt_action_kinds_preserve_underscores(
     dashboard_env, dashboard_app,
 ) -> None:
