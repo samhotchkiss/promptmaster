@@ -528,6 +528,52 @@ def test_event_type_colour_renders_in_table(
     _run(body())
 
 
+def test_message_column_blank_when_summary_equals_event_verb(
+    activity_env, activity_app,
+) -> None:
+    """Regression: when an event has no body, the projector falls back
+    to ``summary = <kind>`` — which made the activity feed render
+    every such row as ``silent_worker_prompt | silent_worker_prompt``
+    (Event column repeated in Message column). Blank the Message
+    cell when it would just echo the verb so the feed scans cleanly.
+    """
+    async def body() -> None:
+        entries = [
+            _make_entry(
+                entry_id="evt:tautology",
+                kind="silent_worker_prompt",
+                verb="silent_worker_prompt",
+                summary="silent_worker_prompt",
+            ),
+            _make_entry(
+                entry_id="evt:real",
+                kind="alert",
+                verb="alerted",
+                summary="Disk full on host-A",
+            ),
+        ]
+        activity_app._gather = lambda: entries  # type: ignore[method-assign]
+        async with activity_app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            assert activity_app.table.row_count == 2
+
+            # Read back the Message column for both rows by iterating
+            # over the visible cells. The Message column is the 5th
+            # (index 4) in the order: Time, Project, Actor, Event,
+            # Message.
+            taut_idx = activity_app.table.get_row_index("evt:tautology")
+            real_idx = activity_app.table.get_row_index("evt:real")
+            tautology_msg = str(
+                activity_app.table.get_row_at(taut_idx)[4]
+            )
+            real_msg = str(activity_app.table.get_row_at(real_idx)[4])
+            # Tautological summary blanked.
+            assert tautology_msg.strip() == ""
+            # Genuine summary survives.
+            assert "Disk full on host-A" in real_msg
+    _run(body())
+
+
 # ---------------------------------------------------------------------------
 # 6. Enter expands a row.
 # ---------------------------------------------------------------------------

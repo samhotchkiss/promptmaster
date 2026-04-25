@@ -485,12 +485,23 @@ class PollyActivityFeedApp(App[None]):
                 project_text = Text(project_label, style="#5b8aff")
             else:
                 project_text = Text(project_label, style="#6b7a88")
+            verb_text = entry.verb or entry.kind or ""
+            # When the summary literally equals the verb/kind (the
+            # legacy ``_fallback_summary`` path picks the event's own
+            # name when a row has no body), the Message column just
+            # echoes the Event column \u2014 visual noise that buries any
+            # row whose summary actually carries information. Blank
+            # the Message cell so scanning the feed is a visual scan
+            # of the Event column.
+            summary_text = entry.summary or ""
+            if summary_text and summary_text == verb_text:
+                summary_text = ""
             self.table.add_row(
                 time_text,
                 project_text,
                 Text(entry.actor or "system", style="#d6dee5"),
-                Text(entry.verb or entry.kind or "", style=_activity_type_colour(entry.kind or "", entry.severity)),
-                Text(_truncate_summary(entry.summary or ""), style="#d6dee5"),
+                Text(verb_text, style=_activity_type_colour(entry.kind or "", entry.severity)),
+                Text(_truncate_summary(summary_text), style="#d6dee5"),
                 key=entry.id,
             )
 
