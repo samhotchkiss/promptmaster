@@ -755,6 +755,29 @@ def test_stale_dead_panes_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert doctor.check_no_stale_dead_panes().passed
 
 
+def test_stale_dead_panes_pluralisation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cycle 75: singular dead-pane warn drops the ``pane(s)`` parenthetical.
+
+    A single dead pane is the most common drift state — a single
+    crashed worker leaves one carcass. The previous text was
+    ``1 stale dead pane(s) in storage closet``.
+    """
+    monkeypatch.setattr(doctor, "_tool_path", lambda name: "/usr/bin/tmux")
+
+    def _run_cmd(cmd, **kw):
+        if "has-session" in cmd:
+            return (0, "")
+        if "list-panes" in cmd:
+            return (0, "0\n1\n0\n")  # exactly one dead pane
+        return (0, "")
+
+    monkeypatch.setattr(doctor, "_run_cmd", _run_cmd)
+    result = doctor.check_no_stale_dead_panes()
+    assert not result.passed
+    assert "1 stale dead pane in storage closet" in result.status
+    assert "pane(s)" not in result.status
+
+
 # --------------------------------------------------------------------- #
 # Network
 # --------------------------------------------------------------------- #

@@ -1006,8 +1006,9 @@ def check_no_stale_dead_panes() -> CheckResult:
         return (False, f"kill-pane failed: {msg}")
 
     if dead > 0:
+        pane_word = "pane" if dead == 1 else "panes"
         return _fail(
-            f"{dead} stale dead pane(s) in storage closet",
+            f"{dead} stale dead {pane_word} in storage closet",
             why=(
                 "Dead panes in pollypm-storage-closet mean a prior worker or "
                 "agent crashed and the carcass was not reaped. They clutter "
