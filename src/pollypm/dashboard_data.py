@@ -218,6 +218,15 @@ def _count_inbox_tasks(config: PollyPMConfig) -> int:
         return 0
     total = 0
     for project_key, project in getattr(config, "projects", {}).items():
+        # Same invariant as recovery_prompt._pending_inbox_section
+        # (cycle 85) and the doctor's sweeper-dbs check: only tracked
+        # projects' state.db files are PollyPM-owned. A registered-
+        # but-not-tracked project may have a stale .pollypm/state.db
+        # left over from a prior tracking run; counting its leftover
+        # inbox tasks inflates the morning-briefing count and the
+        # doctor's "open inbox items" check.
+        if not getattr(project, "tracked", False):
+            continue
         db_path = project.path / ".pollypm" / "state.db"
         if not db_path.exists():
             continue
@@ -246,6 +255,10 @@ def _user_waiting_task_ids_across_projects(
 
     out: set[str] = set()
     for project_key, project in getattr(config, "projects", {}).items():
+        # Same tracked-only invariant as _count_inbox_tasks (cycle 86)
+        # and _pending_inbox_section (cycle 85).
+        if not getattr(project, "tracked", False):
+            continue
         db_path = project.path / ".pollypm" / "state.db"
         if not db_path.exists():
             continue

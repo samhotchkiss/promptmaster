@@ -171,3 +171,122 @@ def test_briefing_pluralizes_counts_correctly(tmp_path) -> None:
     assert "2 session recoveries" in out2
     assert "(s)" not in out2
     assert "(ies)" not in out2
+
+
+# ---------------------------------------------------------------------------
+# Cycle 86: tracked-only filter on inbox-count + user-waiting helpers
+# ---------------------------------------------------------------------------
+
+
+def test_count_inbox_tasks_skips_non_tracked_projects(
+    tmp_path, monkeypatch,
+) -> None:
+    """``_count_inbox_tasks`` is the source of the morning-briefing
+    inbox count and the doctor's open-inbox check. A registered-but-
+    not-tracked project may still have a stale ``.pollypm/state.db``
+    from a prior tracking run; counting its leftover tasks would
+    inflate both surfaces.
+
+    Mirrors cycle 85's recovery-prompt fix (same shape of bug, four
+    different surfaces).
+    """
+    from types import SimpleNamespace
+
+    from pollypm.dashboard_data import _count_inbox_tasks
+
+    tracked_path = tmp_path / "tracked"
+    (tracked_path / ".pollypm").mkdir(parents=True)
+    (tracked_path / ".pollypm" / "state.db").write_text("")
+
+    ghost_path = tmp_path / "ghost"
+    (ghost_path / ".pollypm").mkdir(parents=True)
+    (ghost_path / ".pollypm" / "state.db").write_text("")
+
+    config = SimpleNamespace(projects={
+        "tracked": SimpleNamespace(path=tracked_path, tracked=True),
+        "ghost": SimpleNamespace(path=ghost_path, tracked=False),
+    })
+
+    called_with: list[str] = []
+
+    def fake_inbox_tasks(_svc, *, project):
+        called_with.append(project)
+        # Pretend each project has 5 inbox tasks.
+        return [object()] * 5
+
+    class _FakeSvc:
+        def __init__(self, *_a, **_kw) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "pollypm.work.inbox_view.inbox_tasks", fake_inbox_tasks,
+    )
+    monkeypatch.setattr(
+        "pollypm.work.sqlite_service.SQLiteWorkService", _FakeSvc,
+    )
+
+    total = _count_inbox_tasks(config)
+    # Only the tracked project's 5 tasks counted; ghost's 5 ignored.
+    assert total == 5
+    assert called_with == ["tracked"]
+
+
+def test_user_waiting_task_ids_skips_non_tracked_projects(
+    tmp_path, monkeypatch,
+) -> None:
+    """``_user_waiting_task_ids_across_projects`` docstring promised
+    "tracked" but didn't filter — same fix as ``_count_inbox_tasks``."""
+    import sqlite3
+    from types import SimpleNamespace
+
+    from pollypm.dashboard_data import _user_waiting_task_ids_across_projects
+
+    def _seed(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(
+                "CREATE TABLE work_tasks ("
+                "project TEXT, task_number INTEGER, work_status TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO work_tasks VALUES (?, ?, ?)",
+                ("ghost", 99, "blocked"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    tracked_path = tmp_path / "tracked"
+    tracked_db = tracked_path / ".pollypm" / "state.db"
+    _seed(tracked_db)
+    # Update seeded row to use the ``tracked`` project key.
+    conn = sqlite3.connect(tracked_db)
+    try:
+        conn.execute(
+            "UPDATE work_tasks SET project = ?, task_number = ? WHERE 1",
+            ("tracked", 1),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ghost_path = tmp_path / "ghost"
+    _seed(ghost_path / ".pollypm" / "state.db")
+
+    config = SimpleNamespace(projects={
+        "tracked": SimpleNamespace(path=tracked_path, tracked=True),
+        "ghost": SimpleNamespace(path=ghost_path, tracked=False),
+    })
+
+    waiting = _user_waiting_task_ids_across_projects(config)
+    # Tracked project's blocked task surfaces; ghost project's stale
+    # blocked task does NOT (would have leaked into stuck-alert dedup).
+    assert "tracked/1" in waiting
+    assert "ghost/99" not in waiting
