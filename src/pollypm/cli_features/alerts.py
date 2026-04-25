@@ -113,7 +113,14 @@ def heartbeat(
         )
 
 
-@alert_app.command("raise")
+@alert_app.command(
+    "raise",
+    help=(
+        "Manually raise a durable alert against a session. Useful "
+        "for surfacing problems that the heartbeat sweep can't "
+        "detect on its own."
+    ),
+)
 def alert_raise(
     alert_type: str = typer.Argument(..., help="Alert type."),
     session_name: str = typer.Argument(..., help="Session name from config."),
@@ -136,7 +143,7 @@ def alert_raise(
     typer.echo(f"Raised alert #{alert.alert_id} for {session_name}: {alert.alert_type}")
 
 
-@alert_app.command("clear")
+@alert_app.command("clear", help="Close one alert by id.")
 def alert_clear(
     alert_id: int = typer.Argument(..., help="Alert id."),
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
@@ -154,7 +161,10 @@ def alert_clear(
     typer.echo(f"Cleared alert #{alert_id}")
 
 
-@alert_app.command("list")
+@alert_app.command(
+    "list",
+    help="List currently-open alerts (newest first).",
+)
 def alert_list(
     json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
     config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
@@ -175,7 +185,13 @@ def alert_list(
         )
 
 
-@session_app.command("set-status")
+@session_app.command(
+    "set-status",
+    help=(
+        "Record a session's runtime status (working / idle / "
+        "stuck / etc.) with an optional reason."
+    ),
+)
 def session_set_status(
     session_name: str = typer.Argument(..., help="Session name from config."),
     status: str = typer.Argument(..., help="Runtime status label."),
