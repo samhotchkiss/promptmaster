@@ -8066,9 +8066,9 @@ def _dashboard_active_worker(
         # whether a worker or architect is alive.
         from pollypm.models import CONTROL_ROLES as _CONTROL_ROLES
         project_sessions = [
-            l.session for l in launches
-            if getattr(l.session, "project", None) == project_key
-            and getattr(l.session, "role", "") not in _CONTROL_ROLES
+            launch.session for launch in launches
+            if getattr(launch.session, "project", None) == project_key
+            and getattr(launch.session, "role", "") not in _CONTROL_ROLES
         ]
         alive_cutoff = datetime.now(UTC) - timedelta(minutes=5)
         for sess in project_sessions:

@@ -35,9 +35,9 @@ def _worker_presence(supervisor, project_key: str) -> str:
         return "\u2013 no supervisor"
 
     session_names = [
-        l.session.name for l in launches
-        if getattr(l.session, "project", None) == project_key
-        and getattr(l.session, "role", "") != "operator-pm"
+        launch.session.name for launch in launches
+        if getattr(launch.session, "project", None) == project_key
+        and getattr(launch.session, "role", "") != "operator-pm"
     ]
     if not session_names:
         return "\u2013 no worker"

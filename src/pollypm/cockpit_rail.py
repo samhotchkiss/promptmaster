@@ -1870,7 +1870,10 @@ class CockpitRouter:
 
         target: str | None = None
         if session_name is not None:
-            launch = next(l for l in launches if l.session.name == session_name)
+            launch = next(
+                item for item in launches
+                if item.session.name == session_name
+            )
             if launch.window_name not in storage_windows:
                 _launch, target = supervisor.create_session_window(session_name, on_status=on_status)
         else:
@@ -1883,7 +1886,10 @@ class CockpitRouter:
             launches = supervisor.plan_launches()
             session_name = self._project_session_map(launches).get(project_key)
             if session_name is not None:
-                launch = next(l for l in launches if l.session.name == session_name)
+                launch = next(
+                    item for item in launches
+                    if item.session.name == session_name
+                )
                 tmux_session = supervisor.tmux_session_for_launch(launch)
                 window_map = supervisor.window_map()
                 if launch.window_name in window_map:
@@ -1896,7 +1902,10 @@ class CockpitRouter:
 
         # Stabilize in the background (dismisses prompts, waits for ready)
         if target is not None and session_name is not None:
-            launch = next(l for l in supervisor.plan_launches() if l.session.name == session_name)
+            launch = next(
+                item for item in supervisor.plan_launches()
+                if item.session.name == session_name
+            )
             supervisor.stabilize_launch(launch, target, on_status=on_status)
 
     def _show_live_session(self, supervisor, session_name: str, window_target: str) -> None:

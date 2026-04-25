@@ -141,9 +141,9 @@ def _render_project_dashboard(
         project_alerts = [
             a for a in supervisor.store.open_alerts()
             if any(
-                l.session.project == project_key
-                and l.session.name == a.session_name
-                for l in supervisor.plan_launches()
+                launch.session.project == project_key
+                and launch.session.name == a.session_name
+                for launch in supervisor.plan_launches()
             )
             and not is_operational_alert(a.alert_type)
         ]
@@ -157,9 +157,9 @@ def _render_project_dashboard(
     system_events = [
         e for e in system_events
         if any(
-            l.session.project == project_key
-            and l.session.name == getattr(e, "session_name", None)
-            for l in (
+            launch.session.project == project_key
+            and launch.session.name == getattr(e, "session_name", None)
+            for launch in (
                 supervisor.plan_launches()
                 if hasattr(supervisor, "plan_launches")
                 else []

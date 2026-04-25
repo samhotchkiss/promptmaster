@@ -258,7 +258,9 @@ class GitHubTaskBackend(TaskBackend):
         )
         issue = json.loads(result.stdout)
         title = issue["title"]
-        current_labels = [l["name"] for l in issue.get("labels", [])]
+        current_labels = [
+            label["name"] for label in issue.get("labels", [])
+        ]
 
         # Find current polly state
         current_state = None

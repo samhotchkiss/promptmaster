@@ -170,8 +170,9 @@ def _build_cockpit_detail_dispatch(supervisor, config_path: Path, kind: str, tar
         project_alerts = [
             a for a in supervisor.store.open_alerts()
             if any(
-                l.session.project == target and l.session.name == a.session_name
-                for l in supervisor.plan_launches()
+                launch.session.project == target
+                and launch.session.name == a.session_name
+                for launch in supervisor.plan_launches()
             ) and not is_operational_alert(a.alert_type)
         ]
         if project_alerts:
