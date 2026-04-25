@@ -601,6 +601,62 @@ def test_user_prompt_payload_drives_dashboard_copy_and_buttons(
     _run(body())
 
 
+def test_inbox_section_omits_need_action_count_when_cards_show_full_set(
+    dashboard_env, dashboard_app,
+) -> None:
+    """When the Action Needed cards already render every action item
+    in the project's inbox, the trailing ``◆ N need action`` line
+    just restates what the user already counted in the cards above
+    — pure noise. Only print it when the inbox has *more* action
+    items than the rendered cards can show."""
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    in_progress_id = dashboard_env["task_ids"]["in_progress"]
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        store.enqueue_message(
+            type="notify",
+            tier="immediate",
+            recipient="user",
+            sender="architect",
+            subject=f"Decide on {in_progress_id}",
+            body="Decide.",
+            scope="demo",
+            labels=["project:demo"],
+            payload={
+                "actor": "architect",
+                "project": "demo",
+                "task_id": in_progress_id,
+                "user_prompt": {
+                    "summary": "One thing waiting.",
+                    "steps": ["Look at it"],
+                    "question": "Approve?",
+                    "actions": [
+                        {"label": "Approve", "kind": "approve_task",
+                         "task_id": in_progress_id},
+                        {"label": "Wait", "kind": "record_response"},
+                    ],
+                },
+            },
+            state="open",
+        )
+    finally:
+        store.close()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(160, 60)) as pilot:
+            await pilot.pause()
+            assert dashboard_app.data is not None
+            assert len(dashboard_app.data.action_items) == 1
+            rendered = str(dashboard_app.inbox_body.render())
+            # The single action card already enumerates the only item
+            # — the redundant overflow line must not print.
+            assert "need action" not in rendered, (
+                f"redundant 'need action' overflow line printed: {rendered!r}"
+            )
+
+    _run(body())
+
+
 def test_pipeline_in_progress_section_names_assignee_and_node() -> None:
     """In-progress rows must tell the operator which worker is
     carrying the task and which node they're at — without this, the

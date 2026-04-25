@@ -10076,7 +10076,14 @@ class PollyProjectDashboardApp(App[None]):
             if str(item.get("task_id") or "") not in action_ids
             and str(item.get("primary_ref") or "") not in action_ids
         ]
-        if count:
+        # Only print the \u25c6 N need action overflow line when the
+        # rendered Action Needed cards do *not* already enumerate the
+        # full set. When count == cards displayed, the user can see
+        # them above and saying "2 need action" under "2 cards" is
+        # noise. When count > cards displayed there's something off
+        # screen and the line tells Sam to jump to the inbox for more.
+        displayed_actions = len(data.action_items[:2])
+        if count and count > displayed_actions:
             lines.append(
                 f"[#f0c45a]\u25c6[/#f0c45a] [b]{count}[/b] "
                 f"[dim]need action[/dim]"
