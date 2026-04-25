@@ -67,3 +67,49 @@ def test_fetch_latest_demotes_unparseable_tags() -> None:
     with patch("subprocess.run", side_effect=fake_run):
         latest = _fetch_latest_version()
     assert latest == "1.1.0"
+
+
+def test_too_soon_to_check_handles_corrupt_non_dict_marker(tmp_path) -> None:
+    """Cycle 94: a marker file that parses to a non-dict (list, null, str)
+    must not raise — it should be treated as "no marker yet" so the
+    next version check still fires.
+    """
+    from pollypm.version_check import _too_soon_to_check
+
+    marker = tmp_path / "version_check.json"
+    marker.write_text('"this is a string, not a dict"')
+    assert _too_soon_to_check(tmp_path) is False
+
+    marker.write_text("[1, 2, 3]")
+    assert _too_soon_to_check(tmp_path) is False
+
+    marker.write_text("null")
+    assert _too_soon_to_check(tmp_path) is False
+
+
+def test_already_notified_handles_corrupt_non_dict_marker(tmp_path) -> None:
+    """Symmetric defense for ``_already_notified``."""
+    from pollypm.version_check import _already_notified
+
+    marker = tmp_path / "version_check.json"
+    marker.write_text("[1, 2, 3]")
+    assert _already_notified(tmp_path, "1.0.0") is False
+
+    marker.write_text('"oops"')
+    assert _already_notified(tmp_path, "1.0.0") is False
+
+
+def test_record_check_handles_corrupt_non_dict_marker(tmp_path) -> None:
+    """``_record_check`` must overwrite a corrupted marker rather than
+    raising ``TypeError`` on ``existing["checked_at"] = ...``."""
+    import json
+
+    from pollypm.version_check import _record_check
+
+    marker = tmp_path / "version_check.json"
+    marker.write_text("[1, 2, 3]")
+    _record_check(tmp_path)
+    # The file is now a fresh dict carrying just the checked_at field.
+    parsed = json.loads(marker.read_text())
+    assert isinstance(parsed, dict)
+    assert "checked_at" in parsed

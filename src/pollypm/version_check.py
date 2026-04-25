@@ -72,12 +72,17 @@ def _too_soon_to_check(state_dir: Path) -> bool:
         return False
     try:
         data = json.loads(marker.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    try:
         checked_at = data.get("checked_at", "")
         if checked_at:
             last = datetime.fromisoformat(checked_at)
             elapsed = (datetime.now(UTC) - last).total_seconds()
             return elapsed < _CHECK_COOLDOWN_SECONDS
-    except (json.JSONDecodeError, OSError, ValueError):
+    except ValueError:
         pass
     return False
 
@@ -89,9 +94,11 @@ def _already_notified(state_dir: Path, latest: str) -> bool:
         return False
     try:
         data = json.loads(marker.read_text())
-        return data.get("notified_version") == latest
     except (json.JSONDecodeError, OSError):
         return False
+    if not isinstance(data, dict):
+        return False
+    return data.get("notified_version") == latest
 
 
 def _record_check(state_dir: Path) -> None:
@@ -101,9 +108,14 @@ def _record_check(state_dir: Path) -> None:
     existing: dict[str, str] = {}
     if marker.exists():
         try:
-            existing = json.loads(marker.read_text())
+            parsed = json.loads(marker.read_text())
         except (json.JSONDecodeError, OSError):
-            pass
+            parsed = None
+        # Defend against a corrupted marker that parses to a non-dict
+        # (list, string, null). Without this the next line would raise
+        # ``TypeError`` and silently bury the version-check tick.
+        if isinstance(parsed, dict):
+            existing = parsed
     existing["checked_at"] = datetime.now(UTC).isoformat()
     marker.write_text(json.dumps(existing))
 
