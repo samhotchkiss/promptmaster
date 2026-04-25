@@ -1884,7 +1884,9 @@ def test_build_cockpit_detail_dashboard_shows_activity_and_tokens(monkeypatch, t
     assert "▲" in detail  # alert indicator appears somewhere
     # Activity section shows events
     assert "Activity" in detail
-    assert "1 commits" in detail or "1 messages" in detail
+    # Cycle 64: ``commits`` / ``messages`` pluralise per count, so the
+    # singular boundary now reads ``1 commit`` / ``1 message``.
+    assert "1 commit" in detail or "1 message" in detail
 
 
 def test_cockpit_router_ensure_layout_splits_when_missing_right_pane(tmp_path: Path) -> None:
