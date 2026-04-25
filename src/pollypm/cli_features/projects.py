@@ -51,7 +51,12 @@ def register_project_commands(app: typer.Typer) -> None:
         for key, project in config.projects.items():
             typer.echo(f"- {key}: {project.name or key} [{project.path}]")
 
-    @app.command()
+    @app.command(
+        help=(
+            "Walk a directory tree, find git repos PollyPM doesn't yet "
+            "track, and interactively register them."
+        ),
+    )
     def scan_projects(
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
         scan_root: Path = typer.Option(Path.home(), "--scan-root", help="Directory to scan for git repos."),
@@ -196,7 +201,13 @@ def register_project_commands(app: typer.Typer) -> None:
             for question in result.interview_questions[:5]:
                 typer.echo(f"  - {question}")
 
-    @app.command("init-tracker")
+    @app.command(
+        "init-tracker",
+        help=(
+            "Enable tracked-project mode for a registered project so "
+            "PollyPM auto-routes work to it."
+        ),
+    )
     def init_tracker(
         project: str = typer.Argument(..., help="Project key."),
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),

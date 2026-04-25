@@ -335,7 +335,7 @@ def main(
         up(config_path=config_path)
 
 
-@app.command()
+@app.command(help="Write the example PollyPM config to disk to bootstrap a new install.")
 def init(
     config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Path to write the example config."),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing config file."),
@@ -344,7 +344,7 @@ def init(
     typer.echo(f"Wrote config to {config_path}")
 
 
-@app.command()
+@app.command(help="Print the example PollyPM config template (TOML) to stdout.")
 def example_config() -> None:
     typer.echo(render_example_config())
 
@@ -416,7 +416,12 @@ def role_help(
     typer.echo(doc_text)
 
 
-@app.command()
+@app.command(
+    help=(
+        "Run the interactive onboarding flow to write a PollyPM "
+        "config and install the global ``pollypm`` / ``pm`` commands."
+    ),
+)
 def onboard(
     config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Path to write the onboarding config."),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing config file."),

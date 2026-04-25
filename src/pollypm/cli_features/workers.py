@@ -19,7 +19,14 @@ from pollypm.config import DEFAULT_CONFIG_PATH
 
 
 def register_worker_commands(app: typer.Typer) -> None:
-    @app.command("worker-start")
+    @app.command(
+        "worker-start",
+        help=(
+            "Spin up a long-running role session for a project (e.g. "
+            "the architect). Per-task workers are provisioned by "
+            "``pm task claim`` instead — see ``--help`` for details."
+        ),
+    )
     def worker_start(
         project_key: str = typer.Argument(..., help="Tracked project key."),
         prompt: str | None = typer.Option(None, "--prompt", help="Optional initial worker prompt."),

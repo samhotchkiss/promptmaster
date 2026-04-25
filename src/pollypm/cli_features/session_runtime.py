@@ -207,7 +207,13 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
         for error in payload["errors"]:
             typer.echo(f"- error: {error}")
 
-    @app.command()
+    @app.command(
+        help=(
+            "Print the launch plan PollyPM would execute for each "
+            "configured session — window name, log path, command — "
+            "without starting anything."
+        ),
+    )
     def plan(
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
@@ -220,7 +226,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
             typer.echo(f"command = {launch.command}")
             typer.echo("")
 
-    @app.command()
+    @app.command(help="List currently-open alerts (operator + session faults).")
     def alerts(
         json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
@@ -293,7 +299,12 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
         for event in events_list[:5]:
             typer.echo(f"  {event.created_at} {event.session_name}/{event.event_type}: {event.message}")
 
-    @app.command()
+    @app.command(
+        help=(
+            "Print recent supervisor events (heartbeat, send_input, "
+            "alerts, recoveries) ordered newest first."
+        ),
+    )
     def events(
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
         limit: int = typer.Option(20, "--limit", min=1, max=200, help="Maximum number of events to show."),
@@ -307,7 +318,12 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
         for event in items:
             typer.echo(f"- {event.created_at} {event.session_name}/{event.event_type}: {event.message}")
 
-    @app.command()
+    @app.command(
+        help=(
+            "Set a lease on a session so other actors won't auto-send "
+            "input. Pair with ``release`` when done."
+        ),
+    )
     def claim(
         session_name: str = typer.Argument(..., help="Session name from config."),
         owner: str = typer.Option("human", "--owner", help="Lease owner label."),
@@ -319,7 +335,7 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
         supervisor.claim_lease(session_name, owner, note)
         typer.echo(f"Lease set on {session_name} for {owner}")
 
-    @app.command()
+    @app.command(help="Release the lease set on a session by ``pm claim``.")
     def release(
         session_name: str = typer.Argument(..., help="Session name from config."),
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
