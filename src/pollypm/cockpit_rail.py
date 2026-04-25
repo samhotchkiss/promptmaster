@@ -1260,7 +1260,15 @@ class CockpitRouter:
         result: dict[str, str] = {}
         for project_key, values in buckets.items():
             if any(values):
-                result[project_key] = _spark_bar(values)
+                # ``_spark_bar`` uses U+0020 for the zero block. In the
+                # rail, where the spark line sits inline next to a
+                # project name, interleaved spaces between blocks read
+                # as padding instead of "no activity in that bucket"
+                # — e.g. ``PollyPM     █    █`` looked like a name
+                # followed by two stray glyphs. Substitute the
+                # all-zero fallback's dot glyph for in-line zeros so
+                # the spark line stays visually continuous.
+                result[project_key] = _spark_bar(values).replace(" ", "·")
             else:
                 result[project_key] = "·" * len(values)
         return result

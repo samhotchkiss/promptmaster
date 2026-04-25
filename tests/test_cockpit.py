@@ -760,6 +760,72 @@ def test_cockpit_router_caches_hidden_collapsed_and_grouped_registrations(monkey
     assert calls == {"hidden": 1, "collapsed": 1, "registry": 1}
 
 
+def test_project_activity_sparkline_uses_dots_for_inline_zero_buckets() -> None:
+    """Regression: when a project has activity in some 6-minute buckets
+    but not others, ``_spark_bar`` returns U+0020 for the empty
+    buckets — so the rail rendered ``PollyPM     █    █`` with the
+    interleaved spaces reading as padding rather than "no activity in
+    that bucket". The all-zero fallback at this layer already uses
+    ``·`` for empty; mirror that for in-line zeros so the spark line
+    stays visually continuous.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    router = CockpitRouter.__new__(CockpitRouter)
+
+    class _Event:
+        def __init__(self, session_name: str, created_at) -> None:
+            self.session_name = session_name
+            self.created_at = created_at
+
+    now = datetime.now(UTC)
+    # Activity in two distant buckets (most recent + ~50min ago) and
+    # nothing in between — exactly the pattern that produced the
+    # "█    █" rendering on the live PollyPM rail row.
+    recent_events = [
+        _Event("worker_pollypm", now - timedelta(minutes=2)),
+        _Event("worker_pollypm", now - timedelta(minutes=51)),
+    ]
+
+    def _iso_to_dt(value):
+        return value if hasattr(value, "tzinfo") else None
+
+    from pollypm.cockpit_sections.base import _spark_bar
+
+    result = router._project_activity_sparkline(
+        {"pollypm": "worker_pollypm"},
+        recent_events,
+        _iso_to_dt=_iso_to_dt,
+        _spark_bar=_spark_bar,
+    )
+    spark = result["pollypm"]
+    assert len(spark) == 10
+    # No literal ASCII spaces — those would render as padding gaps.
+    assert " " not in spark
+    # Empty buckets fall through to the dot glyph so the bar reads
+    # as one continuous string of dots and blocks.
+    assert "·" in spark
+    assert "█" in spark
+
+
+def test_project_activity_sparkline_all_zero_falls_back_to_all_dots() -> None:
+    """No activity → ten dots, unchanged from prior behaviour."""
+    router = CockpitRouter.__new__(CockpitRouter)
+
+    def _iso_to_dt(value):
+        return None
+
+    from pollypm.cockpit_sections.base import _spark_bar
+
+    result = router._project_activity_sparkline(
+        {"pollypm": "worker_pollypm"},
+        [],
+        _iso_to_dt=_iso_to_dt,
+        _spark_bar=_spark_bar,
+    )
+    assert result == {}  # empty events → empty dict (early return)
+
+
 def test_cockpit_router_decorates_project_items_with_sparkline_and_pin() -> None:
     router = CockpitRouter.__new__(CockpitRouter)
 
