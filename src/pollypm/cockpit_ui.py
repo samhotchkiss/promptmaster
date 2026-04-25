@@ -5629,15 +5629,18 @@ class PollyInboxApp(App[None]):
         )
         bits: list[str] = []
         if using_action_lens:
-            bits.append(f"{shown} need action")
+            verb = "needs" if shown == 1 else "need"
+            bits.append(f"{shown} {verb} action")
         elif (self._has_active_filters() or hidden_orphaned_n) and shown != total:
             bits.append(f"{shown} of {total} shown")
         else:
-            bits.append(f"{shown} messages")
+            msg_word = "message" if shown == 1 else "messages"
+            bits.append(f"{shown} {msg_word}")
         if unread_n:
             bits.append(f"{unread_n} unread")
         if actionable_n and not using_action_lens:
-            bits.append(f"{actionable_n} need action")
+            verb = "needs" if actionable_n == 1 else "need"
+            bits.append(f"{actionable_n} {verb} action")
         if hidden_fyi_n:
             bits.append(f"{hidden_fyi_n} FYI hidden")
             bits.append("m show all")

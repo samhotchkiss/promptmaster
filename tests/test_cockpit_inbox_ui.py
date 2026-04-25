@@ -1047,6 +1047,62 @@ def test_empty_state_message_when_no_inbox(tmp_path: Path) -> None:
     _run(body())
 
 
+def test_status_bar_pluralises_message_and_action_count(tmp_path: Path) -> None:
+    """Inbox status bar must read ``1 message`` (not ``1 messages``).
+
+    Cycle 57 dropped the bare-plural ``messages`` / ``need action``
+    in the status counter and replaced them with proper singular
+    forms (``1 message`` / ``1 needs action``). At the typical inbox
+    triage point — drained to one item — the old prose was ``1
+    messages``, which read as a copy bug.
+    """
+    project_path = tmp_path / "demo"
+    project_path.mkdir()
+    (project_path / ".git").mkdir()
+    config_path = tmp_path / "pollypm.toml"
+    _write_minimal_config(project_path, config_path)
+
+    db_path = project_path / ".pollypm" / "state.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    svc = SQLiteWorkService(db_path=db_path, project_path=project_path)
+    try:
+        svc.create(
+            title="Sole inbox item",
+            description="Only one waiting.",
+            type="task",
+            project="demo",
+            flow_template="chat",
+            roles={"requester": "user", "operator": "polly"},
+            priority="normal",
+            created_by="polly",
+        )
+    finally:
+        svc.close()
+
+    if not _load_config_compatible(config_path):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+
+    from pollypm.cockpit_ui import PollyInboxApp
+
+    async def body() -> None:
+        app = PollyInboxApp(config_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            status_text = str(app.status.render())
+            # The bare plural ``1 messages`` is the bug — assert it's
+            # absent and that the singular form is the one rendered.
+            # Either branch (action-lens or all-messages lens) must
+            # land on a clean ``1 …`` reading.
+            assert "1 messages" not in status_text
+            assert "1 need action" not in status_text
+            assert (
+                "1 message" in status_text
+                or "1 needs action" in status_text
+            )
+
+    _run(body())
+
+
 # ---------------------------------------------------------------------------
 # Feature 1 — jump to PM discussion (d)
 # ---------------------------------------------------------------------------
