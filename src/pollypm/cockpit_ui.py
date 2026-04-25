@@ -8323,6 +8323,15 @@ def _dashboard_gather_tasks(
                 if hasattr(updated_at, "isoformat"):
                     updated_at = updated_at.isoformat()
                 blocker_body = _dashboard_task_blocker_body(t)
+                hold_reason = ""
+                if status == "on_hold":
+                    # Surface the most recent on_hold transition's
+                    # reason so the pipeline pane can tell the operator
+                    # *why* a task is paused, not just that it is.
+                    for transition in reversed(getattr(t, "transitions", []) or []):
+                        if getattr(transition, "to_state", "") == "on_hold":
+                            hold_reason = (getattr(transition, "reason", "") or "").strip()
+                            break
                 buckets[status].append(
                     {
                         "task_id": t.task_id,
@@ -8333,6 +8342,7 @@ def _dashboard_gather_tasks(
                         "current_node_id": getattr(t, "current_node_id", None),
                         "summary": _dashboard_summary_from_body(blocker_body),
                         "steps": _dashboard_steps_from_body(blocker_body),
+                        "hold_reason": hold_reason,
                         "blocked_by": [
                             f"{proj}/{num}"
                             for proj, num in getattr(t, "blocked_by", [])
@@ -9841,6 +9851,14 @@ class PollyProjectDashboardApp(App[None]):
                         if len(blocked_by) > 3:
                             joined += f" (+{len(blocked_by) - 3} more)"
                         out.append(f"      [dim]waiting on: {joined}[/dim]")
+                # Symmetric surface for on_hold tasks: print the hold
+                # reason recorded with ``pm task hold --reason``. Without
+                # this the operator sees "Paused" with no signal about
+                # *why* the work is parked or what would unparked it.
+                if status == "on_hold":
+                    reason = str(t.get("hold_reason") or "").strip()
+                    if reason:
+                        out.append(f"      [dim]paused: {_escape(reason)}[/dim]")
             out.append("")
         # Drop trailing blank for tidy spacing
         while out and out[-1] == "":

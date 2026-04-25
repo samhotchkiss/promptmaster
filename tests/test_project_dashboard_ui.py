@@ -601,6 +601,52 @@ def test_user_prompt_payload_drives_dashboard_copy_and_buttons(
     _run(body())
 
 
+def test_pipeline_on_hold_section_surfaces_reason(
+    dashboard_env, dashboard_app,
+) -> None:
+    """The pipeline's On Hold section showed only title + age, leaving
+    the operator wondering *why* a task was paused. The hold reason is
+    recorded with the ``pm task hold --reason`` transition; surface it
+    so the operator can see at a glance what would unparked the task."""
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    with SQLiteWorkService(
+        db_path=db_path, project_path=dashboard_env["project_path"],
+    ) as svc:
+        held = svc.create(
+            title="Held feature",
+            description="Paused while we wait on a decision.",
+            type="task",
+            project="demo",
+            flow_template="standard",
+            roles={"worker": "pete", "reviewer": "russell"},
+            priority="normal",
+            created_by="polly",
+        )
+        svc.queue(held.task_id, "polly")
+        svc.claim(held.task_id, "worker")
+        svc.hold(
+            held.task_id, "polly",
+            "Waiting on Sam to confirm the API contract",
+        )
+    from pollypm import cockpit_ui as _cockpit_ui
+    _cockpit_ui._PROJECT_DASHBOARD_TASK_CACHE.clear()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(160, 60)) as pilot:
+            await pilot.pause()
+            assert dashboard_app.data is not None
+            on_hold = dashboard_app.data.task_buckets.get("on_hold", [])
+            assert any(
+                item.get("title") == "Held feature" for item in on_hold
+            ), f"expected held task in on_hold bucket: {on_hold!r}"
+            rendered = str(dashboard_app.pipeline_body.render())
+            assert "Held feature" in rendered
+            assert "paused:" in rendered
+            assert "Waiting on Sam to confirm the API contract" in rendered
+
+    _run(body())
+
+
 def test_pipeline_blocked_section_surfaces_dependencies(
     dashboard_env, dashboard_app,
 ) -> None:
