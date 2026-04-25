@@ -145,7 +145,12 @@ def register_maintenance_commands(app: typer.Typer) -> None:
             typer.echo(fix_summary)
         raise typer.Exit(code=0 if report.ok else 1)
 
-    @app.command()
+    @app.command(
+        help=(
+            "List configured provider accounts with login state, "
+            "isolation, and usage summary."
+        ),
+    )
     def accounts(
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
@@ -224,7 +229,14 @@ def register_maintenance_commands(app: typer.Typer) -> None:
             raise typer.Exit(code=proc2.wait())
         raise typer.Exit(code=_sp.call(cmd))
 
-    @app.command("account-doctor")
+    @app.command(
+        "account-doctor",
+        help=(
+            "Per-account health detail (provider, runtime, isolation, "
+            "auth storage). Use to debug why an account isn't picking "
+            "up sessions."
+        ),
+    )
     def account_doctor(
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
@@ -248,7 +260,10 @@ def register_maintenance_commands(app: typer.Typer) -> None:
                 )
             typer.echo("")
 
-    @app.command("refresh-usage")
+    @app.command(
+        "refresh-usage",
+        help="Probe one account's plan/usage and print the refreshed summary.",
+    )
     def refresh_usage(
         account: str = typer.Argument(..., help="Account key or email."),
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
@@ -259,7 +274,14 @@ def register_maintenance_commands(app: typer.Typer) -> None:
             f"usage={status.usage_summary}"
         )
 
-    @app.command("tokens-sync")
+    @app.command(
+        "tokens-sync",
+        help=(
+            "Walk transcripts and ingest token-usage samples into the "
+            "ledger. Used after relaunching from a backup or syncing "
+            "across machines."
+        ),
+    )
     def tokens_sync(
         account: str | None = typer.Option(None, "--account", help="Optional account key or email to limit scanning."),
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
@@ -268,7 +290,10 @@ def register_maintenance_commands(app: typer.Typer) -> None:
         count = service.sync_token_ledger(account=account)
         typer.echo(f"Synced {count} transcript token sample(s).")
 
-    @app.command("tokens")
+    @app.command(
+        "tokens",
+        help="List the most recent token-usage samples (one row per hour bucket).",
+    )
     def tokens(
         limit: int = typer.Option(10, "--limit", min=1, max=100, help="Maximum rows to show."),
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
@@ -331,7 +356,10 @@ def register_maintenance_commands(app: typer.Typer) -> None:
         cache_str = f" + {cache_all:,} cached" if cache_all else ""
         typer.echo(f"\n  Total: {total_all:,} tokens{cache_str}")
 
-    @app.command("worktrees")
+    @app.command(
+        "worktrees",
+        help="List per-task git worktrees PollyPM is tracking.",
+    )
     def worktrees(
         project: str | None = typer.Option(None, "--project", help="Optional project key filter."),
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
@@ -346,7 +374,12 @@ def register_maintenance_commands(app: typer.Typer) -> None:
                 f"{item.path} [{item.branch}] status={item.status}"
             )
 
-    @app.command()
+    @app.command(
+        help=(
+            "Authenticate a new provider account (Claude or Codex) "
+            "and register it in PollyPM."
+        ),
+    )
     def add_account(
         provider: str = typer.Argument(..., help="Provider to add: codex or claude."),
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
@@ -355,7 +388,12 @@ def register_maintenance_commands(app: typer.Typer) -> None:
         key, email = _add_account_via_login(config_path, provider_kind)
         typer.echo(f"Added {email} as {key}")
 
-    @app.command()
+    @app.command(
+        help=(
+            "Re-run provider login for an existing account so PollyPM "
+            "picks up a fresh session token."
+        ),
+    )
     def relogin(
         account: str = typer.Argument(..., help="Account key or email."),
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
@@ -363,7 +401,12 @@ def register_maintenance_commands(app: typer.Typer) -> None:
         key, email = _relogin_account(config_path, account)
         typer.echo(f"Re-authenticated {email} ({key})")
 
-    @app.command()
+    @app.command(
+        help=(
+            "Unregister a provider account from PollyPM. Optionally "
+            "wipes the isolated account home directory too."
+        ),
+    )
     def remove_account(
         account: str = typer.Argument(..., help="Account key or email."),
         delete_home: bool = typer.Option(False, "--delete-home", help="Also delete the isolated account home."),
