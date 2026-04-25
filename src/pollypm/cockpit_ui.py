@@ -8882,7 +8882,10 @@ def _strip_action_subject_prefix(subject: str) -> str:
 
 
 def _clean_hold_reason(
-    reason: str, title_map: dict[str, str] | None = None,
+    reason: str,
+    title_map: dict[str, str] | None = None,
+    *,
+    self_task_id: str | None = None,
 ) -> str:
     """Strip notification-routing artefacts from auto-generated hold
     reasons before rendering them on the dashboard.
@@ -8903,13 +8906,25 @@ def _clean_hold_reason(
     Task pipeline header rows. Operator-pms and architects often write
     hold reasons that name an upstream task by full ref; that form is
     internal jargon for non-technical operators.
+
+    When ``self_task_id`` is supplied AND the rewrite encounters that
+    same ref, drop the self-reference entirely. The held task's row
+    already shows its own number and title on the line above the hold
+    reason — repeating ``Waiting on operator: #12 (Title)`` is
+    tautological. After elision, also clean up the now-dangling
+    connector (``operator:  —`` becomes ``operator —``).
     """
     if not reason:
         return ""
     text = reason.replace("[Action] ", "").replace("[Action]", "")
+    elided_self = False
     if title_map:
         def _replace(match: _re.Match[str]) -> str:
+            nonlocal elided_self
             ref = match.group(0)
+            if self_task_id and ref == self_task_id:
+                elided_self = True
+                return ""
             title = (title_map.get(ref) or "").strip()
             if not title:
                 return ref
@@ -8918,6 +8933,12 @@ def _clean_hold_reason(
                 title = title[:27].rstrip() + "…"
             return f"#{num} ({title})"
         text = _re.sub(r"\b[a-z][a-z0-9_]*/\d+\b", _replace, text)
+        if elided_self:
+            # Drop the colon glued to the now-elided self-ref (so
+            # "operator:  — text" reads "operator — text") and
+            # collapse runs of whitespace the elision left behind.
+            text = _re.sub(r":\s+(?=[—\-,.;]\s|$)", " ", text)
+            text = _re.sub(r"\s{2,}", " ", text)
     return text.strip()
 
 
@@ -9748,6 +9769,7 @@ class PollyProjectDashboardApp(App[None]):
                     reason = _clean_hold_reason(
                         str(t.get("hold_reason") or ""),
                         title_map,
+                        self_task_id=str(t.get("task_id") or "") or None,
                     )
                     if reason:
                         out.append(f"      [dim]paused: {_escape(reason)}[/dim]")

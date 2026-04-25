@@ -1052,6 +1052,57 @@ def test_clean_hold_reason_leaves_unknown_refs_untouched() -> None:
     assert "other_project/9" in out
 
 
+def test_clean_hold_reason_elides_self_reference_in_held_row() -> None:
+    """When the held task's hold reason names the held task itself,
+    repeating ``#N (Title)`` on the row that already shows
+    ``#N <title>`` is tautological — strip the self-reference and
+    clean up the dangling colon so prose reads naturally.
+    """
+    from pollypm.cockpit_ui import _clean_hold_reason
+
+    title_map = {
+        "polly_remote/12": "Implement N-RC1: pollypm-reachability",
+        "polly_remote/3": "Implement N1: relay-core",
+    }
+    out = _clean_hold_reason(
+        "Waiting on operator: polly_remote/12 — same scope escalation "
+        "pattern as polly_remote/3",
+        title_map,
+        self_task_id="polly_remote/12",
+    )
+    # Self-reference must be gone, both raw and rewritten forms.
+    assert "polly_remote/12" not in out
+    assert "#12" not in out
+    # Cross-references still rewrite normally.
+    assert "#3 (Implement N1: relay-core)" in out
+    # Dangling "operator:  —" gets cleaned to "operator —".
+    assert "operator: " not in out
+    assert out.startswith("Waiting on operator")
+
+
+def test_clean_hold_reason_self_ref_elision_keeps_other_refs_intact() -> None:
+    """Self-ref elision must only drop the held-task's own ref; other
+    in-project refs in the hold reason still get the standard
+    ``#N (Title)`` rewrite."""
+    from pollypm.cockpit_ui import _clean_hold_reason
+
+    title_map = {
+        "polly_remote/3": "Implement N1: relay-core",
+        "polly_remote/9": "Implement N7: pollypm-http-shim",
+    }
+    out = _clean_hold_reason(
+        "Blocked by polly_remote/9 and polly_remote/3",
+        title_map,
+        self_task_id="polly_remote/3",
+    )
+    assert "polly_remote/3" not in out
+    assert "polly_remote/9" not in out
+    # Title is truncated past 28 chars per the existing rewrite contract.
+    assert "#9 (Implement N7: pollypm-http-" in out
+    # The self-ref was dropped; the surrounding conjunction may collapse.
+    assert "#3" not in out
+
+
 def test_clean_hold_reason_without_title_map_keeps_legacy_behavior() -> None:
     """Callers that pass no title_map must still get the existing
     [Action]-stripping behaviour with no surprise rewrites."""
