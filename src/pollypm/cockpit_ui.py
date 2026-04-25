@@ -1707,7 +1707,11 @@ class PollyDashboardApp(App[None]):
             done_lines.append("")
 
         if data.completed_items:
-            done_lines.append(f"[#3fb950]\u2713[/#3fb950] [b]{len(data.completed_items)}[/b] issues completed")
+            issue_word = "issue" if len(data.completed_items) == 1 else "issues"
+            done_lines.append(
+                f"[#3fb950]\u2713[/#3fb950] [b]{len(data.completed_items)}[/b] "
+                f"{issue_word} completed"
+            )
             for item in data.completed_items[:5]:
                 age = self._age_str(item.age_seconds)
                 done_lines.append(f"  [dim]\u2500[/dim] {item.title}  [dim]{age}[/dim]")
@@ -1716,11 +1720,20 @@ class PollyDashboardApp(App[None]):
         if not data.recent_commits and not data.completed_items:
             summary = []
             if data.sweep_count_24h:
-                summary.append(f"[#3fb950]{data.sweep_count_24h}[/#3fb950] sweeps")
+                sweep_word = "sweep" if data.sweep_count_24h == 1 else "sweeps"
+                summary.append(
+                    f"[#3fb950]{data.sweep_count_24h}[/#3fb950] {sweep_word}"
+                )
             if data.message_count_24h:
-                summary.append(f"[#58a6ff]{data.message_count_24h}[/#58a6ff] messages")
+                msg_word = "message" if data.message_count_24h == 1 else "messages"
+                summary.append(
+                    f"[#58a6ff]{data.message_count_24h}[/#58a6ff] {msg_word}"
+                )
             if data.recovery_count_24h:
-                summary.append(f"[#d29922]{data.recovery_count_24h}[/#d29922] recoveries")
+                rec_word = "recovery" if data.recovery_count_24h == 1 else "recoveries"
+                summary.append(
+                    f"[#d29922]{data.recovery_count_24h}[/#d29922] {rec_word}"
+                )
             if summary:
                 done_lines.append("  ".join(summary))
             else:

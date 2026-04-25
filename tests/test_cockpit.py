@@ -11,7 +11,7 @@ from pollypm.cockpit_rail import CockpitItem, CockpitPresence, CockpitRouter, PA
 from pollypm.cockpit_rail_routes import ProjectRoute
 from pollypm.cockpit_ui import PollyCockpitApp, PollyDashboardApp, PollySettingsPaneApp, RailItem
 from pollypm.config import write_config
-from pollypm.dashboard_data import DashboardData, SessionActivity
+from pollypm.dashboard_data import CompletedItem, DashboardData, SessionActivity
 from pollypm.models import (
     AccountConfig,
     KnownProject,
@@ -267,6 +267,76 @@ def test_dashboard_now_cases_cover_current_session_health_enum() -> None:
     assert [state.value for state in EXPECTED_SESSION_HEALTH_RENDER_STATES] == [
         state.value for state in SessionHealth
     ]
+
+
+def _dashboard_done_snapshot(
+    *,
+    completed_n: int = 0,
+    sweep: int = 0,
+    message: int = 0,
+    recovery: int = 0,
+) -> tuple[SimpleNamespace, DashboardData]:
+    """Build a dashboard snapshot tailored for the done-body section."""
+    config = SimpleNamespace(projects={}, sessions={})
+    completed = [
+        CompletedItem(title=f"Item {i}", kind="issue", project="demo", age_seconds=120.0)
+        for i in range(completed_n)
+    ]
+    return config, DashboardData(
+        active_sessions=[],
+        recent_commits=[],
+        completed_items=completed,
+        recent_messages=[],
+        daily_tokens=[],
+        today_tokens=0,
+        total_tokens=0,
+        sweep_count_24h=sweep,
+        message_count_24h=message,
+        recovery_count_24h=recovery,
+        inbox_count=0,
+        alert_count=0,
+        briefing="",
+    )
+
+
+def test_dashboard_done_body_pluralises_singular_counts(tmp_path: Path) -> None:
+    """Done section must not render ``1 issues completed`` / ``1 sweeps``.
+
+    The done-body summary printed bare plurals at every count
+    (``issues completed``, ``sweeps``, ``messages``, ``recoveries``).
+    At a typical end-of-day state — one issue closed, one sweep,
+    one message, one recovery — every line read as a copy bug.
+    Mirrors cycle 57 (inbox status bar) on the dashboard surface.
+    """
+    app = PollyDashboardApp(tmp_path / "pollypm.toml")
+    app.header_w = _CaptureWidget()
+    app.now_body = _CaptureWidget()
+    app.messages_body = _CaptureWidget()
+    app.done_body = _CaptureWidget()
+    app.chart_body = _CaptureWidget()
+    app.footer_w = _CaptureWidget()
+
+    # Path A: completed_items=1 → singular ``1 issue completed``.
+    config, data = _dashboard_done_snapshot(completed_n=1)
+    app._render_dashboard(config, data)
+    body = app.done_body.value
+    assert "1[/b] issue completed" in body
+    assert "issues completed" not in body
+
+    # Path B: no commits or completed → falls into the sweep/message/
+    # recovery summary branch. Singular for each.
+    config, data = _dashboard_done_snapshot(sweep=1, message=1, recovery=1)
+    app._render_dashboard(config, data)
+    body = app.done_body.value
+    assert "[/#3fb950] sweep" in body and "sweeps" not in body
+    assert "[/#58a6ff] message" in body and "messages" not in body
+    assert "[/#d29922] recovery" in body and "recoveries" not in body
+
+    # Path C: plural cases stay plural.
+    config, data = _dashboard_done_snapshot(completed_n=3)
+    app._render_dashboard(config, data)
+    body = app.done_body.value
+    assert "3[/b] issues completed" in body
 
 
 def test_cockpit_router_session_state_ignores_silent_alerts(tmp_path: Path) -> None:
