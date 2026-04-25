@@ -88,6 +88,42 @@ def test_inbox_show_accepts_msg_id_form(tmp_path: Path) -> None:
     assert "body:" in result.output
 
 
+def test_inbox_show_msg_strips_routing_tag_from_subject(
+    tmp_path: Path,
+) -> None:
+    """``enqueue_message`` decorates subjects with ``[Action]`` /
+    ``[Alert]`` routing tags by tier+type. The cockpit-pane inbox
+    detail strips those before rendering; ``pm inbox show`` should
+    do the same so the user-facing CLI matches the TUI surface.
+    JSON output keeps the raw subject for programmatic consumers.
+    """
+    db_path = tmp_path / "state.db"
+    msg_id = _seed_message(db_path, subject="Plan ready for review")
+
+    result = runner.invoke(
+        inbox_app, ["show", f"msg:{msg_id}", "--db", str(db_path)],
+    )
+    assert result.exit_code == 0, result.output
+    # Find the rendered subject line in human output.
+    subject_line = next(
+        line for line in result.output.splitlines()
+        if line.lstrip().startswith("subject:")
+    )
+    # ``enqueue_message`` writes ``[Action] Plan ready for review``;
+    # the human CLI should drop the leading ``[Action]`` tag.
+    assert "[Action]" not in subject_line
+    assert "Plan ready for review" in subject_line
+
+    # JSON output keeps the raw stored subject for programmatic use.
+    json_result = runner.invoke(
+        inbox_app, ["show", f"msg:{msg_id}", "--db", str(db_path), "--json"],
+    )
+    payload = _json.loads(json_result.output)
+    # The raw subject still contains the routing tag (no policy change
+    # at the data layer — strip is a render-time decision).
+    assert "Plan ready for review" in payload["subject"]
+
+
 def test_inbox_show_msg_json_roundtrip(tmp_path: Path) -> None:
     """JSON output should be parseable and contain the same fields."""
     db_path = tmp_path / "state.db"
