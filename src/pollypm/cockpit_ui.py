@@ -4459,11 +4459,8 @@ def _format_inbox_row(
     # already groups action-needed items under their own header, so
     # stamping every title with "[Action]" is redundant noise that
     # eats list-pane width and buries the actual subject.
-    if (
-        getattr(task, "triage_bucket", "") == "action"
-        and subject[:8].lower() == "[action]"
-    ):
-        subject = subject[8:].lstrip(" :-—")
+    if getattr(task, "triage_bucket", "") == "action":
+        subject = _strip_action_subject_prefix(subject)
     reply_suffix = ""
     if reply_count:
         noun = "reply" if reply_count == 1 else "replies"
@@ -5986,7 +5983,12 @@ class PollyInboxApp(App[None]):
         sender = _format_sender(item)
         _session, pm_label = _resolve_pm_target(self.config_path, item.project)
         sections: list[str] = []
-        sections.append(f"[b #eef2f4]{_escape(item.title or '(no subject)')}[/b #eef2f4]")
+        # Same routing-tag strip as the list rail — the focused message
+        # header should not lead with "[Action]" boilerplate.
+        subject = item.title or "(no subject)"
+        if _triage_bucket(item) == "action":
+            subject = _strip_action_subject_prefix(subject)
+        sections.append(f"[b #eef2f4]{_escape(subject)}[/b #eef2f4]")
         meta_bits = [f"[#5b8aff]{_escape(sender)}[/#5b8aff]"]
         if when:
             meta_bits.append(f"[#97a6b2]{_escape(when)}[/#97a6b2]")
@@ -6090,6 +6092,10 @@ class PollyInboxApp(App[None]):
         _session, pm_label = _resolve_pm_target(self.config_path, task.project)
         sections: list[str] = []
         subject = task.title or "(no subject)"
+        # Same routing-tag strip as the list rail — the focused message
+        # header should not lead with "[Action]" boilerplate.
+        if getattr(task, "triage_bucket", "") == "action":
+            subject = _strip_action_subject_prefix(subject)
         sections.append(f"[b #eef2f4]{_escape(subject)}[/b #eef2f4]")
         meta_bits = [f"[#5b8aff]{_escape(sender)}[/#5b8aff]"]
         if when:
@@ -8857,6 +8863,22 @@ def _action_card_click_hint(action_items: list[dict]) -> str:
     if has_thread and not has_task:
         return "Click any card to open its inbox thread."
     return "Click any card to open its source task or inbox thread."
+
+
+def _strip_action_subject_prefix(subject: str) -> str:
+    """Drop a leading ``[Action]`` routing tag from an inbox subject.
+
+    The ``[Action]`` prefix is a tier/recipient routing label added by
+    the notify CLI; it has no natural-language value for the operator
+    reading the subject. The inbox list rail already strips it for
+    action-bucket rows; the detail pane also needs to, so the focused
+    message header doesn't lead with the routing tag.
+    """
+    if not subject:
+        return subject
+    if subject[:8].lower() == "[action]":
+        return subject[8:].lstrip(" :-—")
+    return subject
 
 
 def _clean_hold_reason(
