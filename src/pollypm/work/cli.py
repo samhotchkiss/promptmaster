@@ -442,7 +442,6 @@ def _sync_commits_to_task_branch(task_id: str) -> None:
 
     task_slug = f"{project}-{number}"
     task_branch = f"task/{task_slug}"
-    cwd = os.getcwd()
 
     # Check if we're in a git repo
     result = subprocess.run(

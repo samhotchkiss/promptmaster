@@ -764,7 +764,6 @@ class Supervisor:
         def _stabilize_one(launch: SessionLaunchSpec, tgt: str) -> None:
             try:
                 # Only stabilize (dismiss trust/theme prompts), don't send input
-                name = launch.session.name
                 if launch.session.provider is ProviderKind.CLAUDE:
                     self._stabilize_claude_launch(tgt)
                 elif launch.session.provider is ProviderKind.CODEX:

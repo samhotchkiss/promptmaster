@@ -106,7 +106,6 @@ class FileSyncAdapter:
 
     def on_transition(self, task: Task, old_status: str, new_status: str) -> None:
         """Move the file between state directories based on new status."""
-        old_folder = self._folder_for_status(old_status)
         new_folder = self._folder_for_status(new_status)
 
         # Find and move the existing file

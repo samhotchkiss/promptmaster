@@ -986,9 +986,9 @@ class OnboardingApp(App[OnboardingResult | None]):
             self._set_message(f"Running: {item.label}…")
             try:
                 with self.suspend():
-                    success, detail = run_auto_fix(item.plan)
+                    _success, detail = run_auto_fix(item.plan)
             except Exception as exc:  # noqa: BLE001
-                success, detail = (False, str(exc))
+                detail = str(exc)
             self.state.statuses = _available_clis()
             self.refresh(repaint=True, layout=True)
             self._render_current_step()

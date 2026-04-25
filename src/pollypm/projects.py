@@ -476,7 +476,6 @@ def register_project(
     normalized_path = normalize_project_path(repo_path)
     if not normalized_path.exists() or not normalized_path.is_dir():
         raise typer.BadParameter(f"{normalized_path} is not a directory.")
-    existing_paths = {normalize_project_path(project.path) for project in config.projects.values()}
     for project in config.projects.values():
         if normalize_project_path(project.path) == normalized_path:
             return project

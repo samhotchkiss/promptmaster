@@ -439,7 +439,6 @@ def list_cached_account_statuses(config_path: Path) -> list[AccountStatus]:
 
 def add_account_via_login(config_path: Path, provider: ProviderKind) -> tuple[str, str]:
     config = load_config(config_path)
-    root_dir = config.project.root_dir
     tmux = create_tmux_client()
 
     existing = [account for account in config.accounts.values() if account.provider is provider]
@@ -447,7 +446,7 @@ def add_account_via_login(config_path: Path, provider: ProviderKind) -> tuple[st
     agent_homes = Path.home() / ".pollypm" / "agent_homes"
     agent_homes.mkdir(parents=True, exist_ok=True)
     home = agent_homes / f"{provider.value}_{next_index}"
-    pane_text = _run_login_window(
+    _run_login_window(
         tmux,
         provider=provider,
         home=home,

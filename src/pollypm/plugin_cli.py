@@ -466,7 +466,6 @@ def plugin_doctor(
     the override collision log.
     """
     host = _build_host()
-    plugins = host.plugins()
 
     # Force full validation pass — identical to load-time but surface
     # every per-plugin result so operators can see the counts.

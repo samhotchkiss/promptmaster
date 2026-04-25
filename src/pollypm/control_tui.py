@@ -642,6 +642,7 @@ class PollyPMApp(App[None]):
             f"tmux={session_name} running={'yes' if tmux_exists else 'no'}  "
             f"controller={controller_label}  operator={operator_label}  heartbeat={heartbeat_label}  "
             f"console={'yes' if console_running else 'no'}  "
+            f"failover={failover}  "
             f"alerts={len(alerts)}  leases={len(leases)}"
         )
         self._update_context_bar()

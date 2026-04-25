@@ -463,7 +463,6 @@ def up(
         start_transcript_ingestion(supervisor.config)
     session_name = supervisor.config.project.tmux_session
     current_tmux = supervisor.tmux.current_session_name()
-    created = False
 
     if not supervisor.tmux.has_session(session_name):
         storage_alive = supervisor.tmux.has_session(supervisor.storage_closet_session_name())
@@ -474,14 +473,12 @@ def up(
             supervisor.tmux.set_window_option(f"{session_name}:{supervisor.CONSOLE_WINDOW}", "allow-passthrough", "on")
             supervisor.tmux.set_window_option(f"{session_name}:{supervisor.CONSOLE_WINDOW}", "window-size", "latest")
             supervisor.tmux.set_window_option(f"{session_name}:{supervisor.CONSOLE_WINDOW}", "aggressive-resize", "on")
-            created = True
             typer.echo(f"Restored tmux session {session_name} (storage-closet still alive)")
         else:
             try:
                 controller_account = supervisor.bootstrap_tmux(skip_probe=True, on_status=_cli_status)
             except RuntimeError as exc:
                 raise typer.BadParameter(str(exc)) from exc
-            created = True
             controller = supervisor.config.accounts[controller_account]
             typer.echo(
                 f"Created tmux session {session_name} with controller "
