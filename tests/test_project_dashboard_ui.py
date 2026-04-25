@@ -690,6 +690,62 @@ def test_current_activity_calls_out_user_decision_when_only_architect_active(
     _run(body())
 
 
+def test_inbox_section_keeps_press_i_hint_when_inbox_has_spillover(
+    dashboard_env, dashboard_app,
+) -> None:
+    """The 'Press i to jump to the inbox' CTA must stay visible when
+    there are more inbox items than what the dashboard surfaces —
+    that's the case where the user needs to know there's more to
+    find. Suppressing it then would hide work."""
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    in_progress_id = dashboard_env["task_ids"]["in_progress"]
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        # Three distinct action-needed notifications. The dashboard
+        # only renders the first two as full cards, so the third
+        # creates spillover where the user needs the "press i" hint
+        # to find it.
+        for i, suffix in enumerate(("alpha", "beta", "gamma"), start=1):
+            store.enqueue_message(
+                type="notify",
+                tier="immediate",
+                recipient="user",
+                sender="architect",
+                subject=f"Decide on {suffix}",
+                body=f"Decide on {suffix}.",
+                scope="demo",
+                labels=["project:demo"],
+                payload={
+                    "actor": "architect",
+                    "project": "demo",
+                    "task_id": f"demo/{i + 100}",
+                    "user_prompt": {
+                        "summary": f"Need a call on {suffix}.",
+                        "steps": ["Look"],
+                        "question": "Approve?",
+                        "actions": [
+                            {"label": "Approve", "kind": "approve_task",
+                             "task_id": f"demo/{i + 100}"},
+                        ],
+                    },
+                },
+                state="open",
+            )
+    finally:
+        store.close()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(160, 60)) as pilot:
+            await pilot.pause()
+            assert dashboard_app.data is not None
+            rendered = str(dashboard_app.inbox_body.render())
+            # Spillover present → the inline CTA stays so the user
+            # knows where to look for the rest.
+            assert "Press i to jump to the inbox" in rendered
+
+    _run(body())
+
+
 def test_inbox_section_omits_need_action_count_when_cards_show_full_set(
     dashboard_env, dashboard_app,
 ) -> None:
@@ -741,6 +797,14 @@ def test_inbox_section_omits_need_action_count_when_cards_show_full_set(
             # — the redundant overflow line must not print.
             assert "need action" not in rendered, (
                 f"redundant 'need action' overflow line printed: {rendered!r}"
+            )
+            # And the "Press i to jump to the inbox" CTA is also
+            # redundant when there's no inbox spillover beyond what
+            # the cards already show — the screen footer already
+            # exposes the ``i`` keybinding.
+            assert "Press i to jump to the inbox" not in rendered, (
+                "redundant 'press i' hint printed when no inbox spillover: "
+                f"{rendered!r}"
             )
 
     _run(body())

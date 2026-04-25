@@ -9857,7 +9857,17 @@ class PollyProjectDashboardApp(App[None]):
                 lines.append(f"  \u00b7 {title}{label_part}{age_part}")
         if not count and not preview_items and not data.action_items:
             lines.append("[dim]No project inbox items are open.[/dim]")
-        if count or preview_items or data.action_items:
+        # Show the "press i" CTA only when the inbox actually has more
+        # to offer than what we just rendered. When every action item
+        # is already on screen as a card and there are no other open
+        # items, the line is redundant with the screen footer ("i
+        # inbox") and just adds vertical noise. Keep it when the
+        # inbox has spillover so the user knows where to look.
+        has_spillover = (
+            (count and count > displayed_actions)
+            or bool(preview_items)
+        )
+        if has_spillover:
             lines.append("")
             lines.append("[dim]Press [b]i[/b] to jump to the inbox[/dim]")
         return "\n".join(lines)
