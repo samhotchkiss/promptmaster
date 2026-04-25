@@ -53,14 +53,17 @@ class WaitForChildren:
                 )
 
         if unfinished:
+            unfinished_word = "task" if len(unfinished) == 1 else "tasks"
             return GateResult(
                 passed=False,
                 reason=(
-                    f"{len(unfinished)} child task(s) not terminal: "
+                    f"{len(unfinished)} child {unfinished_word} not terminal: "
                     + ", ".join(unfinished)
                 ),
             )
+        n_children = len(task.children)
+        children_word = "task" if n_children == 1 else "tasks"
         return GateResult(
             passed=True,
-            reason=f"All {len(task.children)} child task(s) terminal.",
+            reason=f"All {n_children} child {children_word} terminal.",
         )

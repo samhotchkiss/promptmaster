@@ -1582,7 +1582,8 @@ def task_sync(
     if output_json:
         typer.echo(json.dumps({"synced": synced}))
     else:
-        typer.echo(f"Synced {synced} task(s).")
+        task_word = "task" if synced == 1 else "tasks"
+        typer.echo(f"Synced {synced} {task_word}.")
 
 
 @task_app.command("migrate")

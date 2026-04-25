@@ -292,6 +292,36 @@ def test_wait_for_children_passes_when_all_children_terminal() -> None:
     assert result.passed is True
 
 
+def test_wait_for_children_pluralises_reason_at_count_one() -> None:
+    """Cycle 70: gate reason text uses ``task`` / ``tasks`` per count.
+
+    Both the unfinished-children failure and the all-children-done
+    success paths previously printed ``child task(s)``. With exactly
+    one child the parenthetical reads as a copy bug — and these
+    reasons surface verbatim through ``pm task validate-advance``.
+    """
+    from pollypm.work.gates import GateRegistry
+    from pollypm.work.models import WorkStatus
+
+    gate = GateRegistry().get("wait_for_children")
+
+    parent_one_unfinished = _make_task(children=[("demo", 2)])
+    in_progress = _make_task(task_number=2, work_status=WorkStatus.IN_PROGRESS)
+    fail = gate.check(
+        parent_one_unfinished,
+        get_task=lambda task_id: in_progress,
+    )
+    assert fail.passed is False
+    assert "1 child task not terminal" in fail.reason
+    assert "task(s)" not in fail.reason
+
+    parent_one_done = _make_task(children=[("demo", 2)])
+    done_child = _make_task(task_number=2, work_status=WorkStatus.DONE)
+    ok = gate.check(parent_one_done, get_task=lambda task_id: done_child)
+    assert ok.passed is True
+    assert "All 1 child task terminal." == ok.reason
+
+
 def test_output_present_blocks_with_no_executions() -> None:
     from pollypm.work.gates import GateRegistry
 
