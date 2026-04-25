@@ -8027,10 +8027,19 @@ def _dashboard_active_worker(
             launches = list(supervisor.plan_launches())
         except Exception:  # noqa: BLE001
             launches = []
+        # Skip control-plane roles (operator-pm, reviewer,
+        # heartbeat-supervisor, triage) — they're system-wide
+        # processes, not real work on this project. Counting them
+        # as active_worker makes the banner read "Moving now:
+        # heartbeat (heartbeat-supervisor) is active" or "Moving
+        # now: reviewer (reviewer) is active" when the project
+        # actually has nothing in flight; the genuine signal is
+        # whether a worker or architect is alive.
+        from pollypm.models import CONTROL_ROLES as _CONTROL_ROLES
         project_sessions = [
             l.session for l in launches
             if getattr(l.session, "project", None) == project_key
-            and getattr(l.session, "role", "") != "operator-pm"
+            and getattr(l.session, "role", "") not in _CONTROL_ROLES
         ]
         alive_cutoff = datetime.now(UTC) - timedelta(minutes=5)
         for sess in project_sessions:
