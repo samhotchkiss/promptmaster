@@ -559,10 +559,38 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
             if isinstance(raw_actions, list):
                 for idx, raw_action in enumerate(raw_actions):
                     if not isinstance(raw_action, dict):
-                        continue
+                        typer.echo(
+                            f"Error: --user-prompt-json action[{idx}] "
+                            f"must be an object with 'label' and 'kind' "
+                            f"keys, got {type(raw_action).__name__}.",
+                            err=True,
+                        )
+                        raise typer.Exit(code=1)
+                    label_value = str(raw_action.get("label") or "").strip()
                     kind_value = str(raw_action.get("kind") or "").strip()
+                    # An action without a label can't render a button, and
+                    # an action without a kind can't dispatch on click —
+                    # the dashboard's _user_prompt_decision drops both
+                    # silently and falls back to default copy. Producer
+                    # almost certainly meant to specify both.
+                    if not label_value:
+                        typer.echo(
+                            f"Error: --user-prompt-json action[{idx}] is "
+                            f"missing a non-empty 'label'. The dashboard "
+                            f"renders that as the button caption — "
+                            f"actions without one get silently dropped.",
+                            err=True,
+                        )
+                        raise typer.Exit(code=1)
                     if not kind_value:
-                        continue
+                        typer.echo(
+                            f"Error: --user-prompt-json action[{idx}] "
+                            f"('label': {label_value!r}) is missing a "
+                            f"non-empty 'kind'. Supported kinds: "
+                            f"{', '.join(sorted(_USER_PROMPT_ACTION_KINDS))}.",
+                            err=True,
+                        )
+                        raise typer.Exit(code=1)
                     if kind_value not in _USER_PROMPT_ACTION_KINDS:
                         typer.echo(
                             f"Error: --user-prompt-json action[{idx}] "

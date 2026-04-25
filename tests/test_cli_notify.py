@@ -270,6 +270,62 @@ class TestNotifyWritesToMessages:
         ):
             assert known in combined
 
+    def test_user_prompt_json_action_missing_label_rejected(self, db_path):
+        prompt = json.dumps(
+            {
+                "summary": "X",
+                "actions": [{"kind": "approve_task"}],  # no label
+            }
+        )
+        result = _invoke_notify(
+            db_path,
+            "Plan ready",
+            "Review.",
+            "--user-prompt-json", prompt,
+        )
+        assert result.exit_code != 0
+        assert "missing a non-empty 'label'" in (
+            result.output + (result.stderr or "")
+        )
+
+    def test_user_prompt_json_action_missing_kind_rejected(self, db_path):
+        prompt = json.dumps(
+            {
+                "summary": "X",
+                "actions": [{"label": "Approve"}],  # no kind
+            }
+        )
+        result = _invoke_notify(
+            db_path,
+            "Plan ready",
+            "Review.",
+            "--user-prompt-json", prompt,
+        )
+        assert result.exit_code != 0
+        combined = result.output + (result.stderr or "")
+        assert "missing a non-empty 'kind'" in combined
+        # The label is named so the producer can find which action
+        # tripped the validator without re-counting array indices.
+        assert "Approve" in combined
+
+    def test_user_prompt_json_action_must_be_object(self, db_path):
+        prompt = json.dumps(
+            {
+                "summary": "X",
+                "actions": ["not an object"],
+            }
+        )
+        result = _invoke_notify(
+            db_path,
+            "Plan ready",
+            "Review.",
+            "--user-prompt-json", prompt,
+        )
+        assert result.exit_code != 0
+        assert "must be an object" in (
+            result.output + (result.stderr or "")
+        )
+
     def test_user_prompt_json_known_kinds_pass(self, db_path):
         """All currently-supported action kinds must pass validation
         — guards against the kind set drifting from the dashboard's
