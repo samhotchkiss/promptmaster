@@ -88,13 +88,65 @@ def _session_state(ctx: RailContext, session_name: str) -> str:
         return "idle"
     try:
         return router._session_state(
-            session_name, _launches(ctx), _windows(ctx), _alerts(ctx), _spinner_index(ctx),
+            session_name,
+            _launches(ctx),
+            _windows(ctx),
+            _alerts(ctx),
+            _spinner_index(ctx),
+            user_waiting_task_ids=_user_waiting_task_ids(ctx),
         )
     except Exception:  # noqa: BLE001
         logger.exception("core_rail_items: _session_state(%s) raised", session_name)
         if _strict_rail_errors_enabled():
             raise
         return "idle"
+
+
+def _user_waiting_task_ids(ctx: RailContext) -> frozenset[str]:
+    """Return ``{project/N}`` ids for tasks in user-waiting status,
+    sourced from each tracked project's state.db.
+
+    Used to suppress redundant ``stuck_on_task:<id>`` alert glyphs on
+    the rail — when the task is already user-waiting, the session
+    being idle is the system doing what it should (waiting on the
+    user), not a fault to flag.
+    """
+    config = _config(ctx)
+    if config is None:
+        return frozenset()
+    cache = ctx.extras.setdefault("user_waiting_task_ids_cache", {})
+    out: set[str] = set()
+    import sqlite3 as _sqlite3
+    for project_key, project in getattr(config, "projects", {}).items():
+        db_path = project.path / ".pollypm" / "state.db"
+        try:
+            mtime = db_path.stat().st_mtime if db_path.exists() else 0.0
+        except OSError:
+            continue
+        cached = cache.get(project_key)
+        if cached is not None and cached[0] == mtime:
+            out.update(cached[1])
+            continue
+        ids: set[str] = set()
+        if mtime > 0.0:
+            try:
+                conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                try:
+                    rows = conn.execute(
+                        "SELECT task_number FROM work_tasks "
+                        "WHERE project = ? "
+                        "AND work_status IN ('blocked','on_hold','waiting_on_user')",
+                        (project_key,),
+                    ).fetchall()
+                finally:
+                    conn.close()
+                for (number,) in rows:
+                    ids.add(f"{project_key}/{number}")
+            except (_sqlite3.Error, OSError):
+                pass
+        cache[project_key] = (mtime, ids)
+        out.update(ids)
+    return frozenset(out)
 
 
 def _polly_state(ctx: RailContext) -> str:

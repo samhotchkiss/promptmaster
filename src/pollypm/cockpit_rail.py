@@ -240,6 +240,26 @@ class CockpitItem:
     heartbeat_at: str | None = None
 
 
+def _stuck_alert_already_user_waiting(
+    alert_type: str, user_waiting_task_ids: frozenset[str] | set[str],
+) -> bool:
+    """Return True for ``stuck_on_task:<id>`` alerts whose underlying
+    task is already in a user-waiting state.
+
+    The session sat idle because the user hasn't responded — the
+    rail's ⚠ glyph then tells the user "this is broken" when the
+    system is doing exactly what it should: waiting on them. The
+    project rollup already encodes this state via the 🟡 dot
+    (cockpit_project_state, cycle 53); the per-session glyph that
+    duplicates it is just noise.
+    """
+    prefix = "stuck_on_task:"
+    if not alert_type or not alert_type.startswith(prefix):
+        return False
+    task_id = alert_type[len(prefix):].strip()
+    return bool(task_id) and task_id in user_waiting_task_ids
+
+
 def _selected_project_key(selected: object) -> str | None:
     """Extract the project key from the ``selected`` cockpit state."""
     if not isinstance(selected, str) or not selected.startswith("project:"):
@@ -1261,10 +1281,23 @@ class CockpitRouter:
         "needs_followup",      # informational, handled by heartbeat
     })
 
-    def _session_state(self, session_name: str, launches, windows, alerts, spinner_index: int) -> str:
+    def _session_state(
+        self,
+        session_name: str,
+        launches,
+        windows,
+        alerts,
+        spinner_index: int,
+        *,
+        user_waiting_task_ids: frozenset[str] | set[str] = frozenset(),
+    ) -> str:
         actionable = [
             a for a in alerts
-            if a.session_name == session_name and a.alert_type not in self._SILENT_ALERT_TYPES
+            if a.session_name == session_name
+            and a.alert_type not in self._SILENT_ALERT_TYPES
+            and not _stuck_alert_already_user_waiting(
+                a.alert_type, user_waiting_task_ids,
+            )
         ]
         if actionable:
             # Include a short reason so the user knows what's wrong
