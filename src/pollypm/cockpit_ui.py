@@ -8818,13 +8818,24 @@ def _dashboard_inbox(
     return _action_count(items, action_items), top, action_items
 
 
-def _format_blocked_dep(ref: str, title_map: dict[str, str]) -> str:
+def _format_blocked_dep(
+    ref: str,
+    title_map: dict[str, str],
+    *,
+    current_project: str | None = None,
+) -> str:
     """Render a blocked-by dependency reference with its task title.
 
-    Returns ``"polly_remote/6 (Implement N4: notify-api)"`` when the
-    title is known, falling back to the bare ``ref`` when not (e.g.
-    cross-project dep, archived task). Titles are truncated to keep
-    the multi-dep line from blowing past the pane width.
+    Returns ``"#6 (Implement N4: notify-api)"`` for in-project deps —
+    the rest of the project dashboard already uses ``#N`` form, so
+    leaving the raw ``project/N`` here was a jarring jargon
+    inconsistency. Cross-project refs keep the full
+    ``other_project/6 (Title)`` form so the operator can tell the dep
+    is in another project.
+
+    Falls back to the bare ``ref`` when the title is unknown (archived
+    task, cross-project ref we don't have visibility into). Titles are
+    truncated to keep the multi-dep line from blowing past pane width.
     """
     title = (title_map.get(ref) or "").strip()
     if not title:
@@ -8833,6 +8844,10 @@ def _format_blocked_dep(ref: str, title_map: dict[str, str]) -> str:
     # forcing a wrap; longer titles get an ellipsis.
     if len(title) > 28:
         title = title[:27].rstrip() + "…"
+    if "/" in ref and current_project:
+        ref_project, _, ref_number = ref.partition("/")
+        if ref_project == current_project and ref_number:
+            return f"#{_escape(ref_number)} ({_escape(title)})"
     return f"{_escape(ref)} ({_escape(title)})"
 
 
@@ -9782,7 +9797,10 @@ class PollyProjectDashboardApp(App[None]):
                     ]
                     if blocked_by:
                         joined = ", ".join(
-                            _format_blocked_dep(ref, title_map)
+                            _format_blocked_dep(
+                                ref, title_map,
+                                current_project=self.project_key,
+                            )
                             for ref in blocked_by[:3]
                         )
                         if len(blocked_by) > 3:

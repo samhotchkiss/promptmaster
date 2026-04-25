@@ -958,6 +958,59 @@ def test_format_blocked_dep_falls_back_to_bare_ref_when_unknown() -> None:
     )
 
 
+def test_format_blocked_dep_rewrites_in_project_refs_to_hash_form() -> None:
+    """When the dependency lives in the same project as the dashboard
+    we're rendering, the ``project_key/N`` prefix is jargon — the
+    rest of the dashboard already uses ``#N`` form. Drop the project
+    prefix for in-project refs so the "waiting on:" line speaks the
+    same task-number language as the row above.
+    """
+    from pollypm.cockpit_ui import _format_blocked_dep
+
+    title_map = {
+        "polly_remote/6": "Implement N4: notify-api",
+        "polly_remote/9": "Implement N7: pollypm-http-shim",
+    }
+    assert (
+        _format_blocked_dep(
+            "polly_remote/6", title_map, current_project="polly_remote",
+        )
+        == "#6 (Implement N4: notify-api)"
+    )
+
+
+def test_format_blocked_dep_keeps_full_ref_for_cross_project_deps() -> None:
+    """Cross-project deps must keep the full ``other_proj/N`` form so
+    the operator can tell the dep lives in a different project —
+    bare ``#N`` would be ambiguous with the rendering project's own
+    task numbers.
+    """
+    from pollypm.cockpit_ui import _format_blocked_dep
+
+    title_map = {
+        "other_proj/3": "Cross-project gating work",
+    }
+    assert (
+        _format_blocked_dep(
+            "other_proj/3", title_map, current_project="polly_remote",
+        )
+        == "other_proj/3 (Cross-project gating work)"
+    )
+
+
+def test_format_blocked_dep_legacy_call_keeps_project_prefix() -> None:
+    """Calls without ``current_project`` must keep the existing
+    ``project/N (Title)`` rendering — that's the form the older tests
+    and direct callers expect."""
+    from pollypm.cockpit_ui import _format_blocked_dep
+
+    title_map = {"polly_remote/6": "Implement N4: notify-api"}
+    assert (
+        _format_blocked_dep("polly_remote/6", title_map)
+        == "polly_remote/6 (Implement N4: notify-api)"
+    )
+
+
 def test_format_blocked_dep_truncates_long_titles() -> None:
     """Some plans produce verbose task titles. Three deps × verbose
     titles can blow past the dashboard pane width; truncate the
@@ -1482,7 +1535,12 @@ def test_pipeline_blocked_section_surfaces_dependencies(
             rendered = str(dashboard_app.pipeline_body.render())
             assert "Blocked downstream feature" in rendered
             assert "waiting on:" in rendered
-            assert upstream.task_id in rendered
+            # In-project deps render as #N (Title) — the project_key
+            # prefix is dropped because we're already on that project's
+            # dashboard, matching the rest of the dashboard's task
+            # numbering. Cross-project deps would keep the full ref.
+            _, _, upstream_n = upstream.task_id.partition("/")
+            assert f"#{upstream_n}" in rendered
 
     _run(body())
 
