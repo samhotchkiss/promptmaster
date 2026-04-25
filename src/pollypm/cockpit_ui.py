@@ -8859,7 +8859,9 @@ def _action_card_click_hint(action_items: list[dict]) -> str:
     return "Click any card to open its source task or inbox thread."
 
 
-def _clean_hold_reason(reason: str) -> str:
+def _clean_hold_reason(
+    reason: str, title_map: dict[str, str] | None = None,
+) -> str:
     """Strip notification-routing artefacts from auto-generated hold
     reasons before rendering them on the dashboard.
 
@@ -8872,13 +8874,28 @@ def _clean_hold_reason(reason: str) -> str:
     hold reason the user reads "[Action]" and has to mentally parse
     the brackets. Strip it; preserve the rest verbatim so attribution
     ("Waiting on operator:") and content ("Done: <subject>") survive.
+
+    When ``title_map`` is supplied, also rewrite raw ``project_key/N``
+    task references into ``#N (Title)`` form so the dashboard speaks
+    the same task-number language the user already sees in the
+    Task pipeline header rows. Operator-pms and architects often write
+    hold reasons that name an upstream task by full ref; that form is
+    internal jargon for non-technical operators.
     """
     if not reason:
         return ""
-    # Remove "[Action]" wherever it appears, plus any ":" / "-" / " " left
-    # immediately after — the prefix "[Action] " consistently runs into
-    # the next token without natural-language separation.
     text = reason.replace("[Action] ", "").replace("[Action]", "")
+    if title_map:
+        def _replace(match: _re.Match[str]) -> str:
+            ref = match.group(0)
+            title = (title_map.get(ref) or "").strip()
+            if not title:
+                return ref
+            num = ref.split("/", 1)[1]
+            if len(title) > 28:
+                title = title[:27].rstrip() + "…"
+            return f"#{num} ({title})"
+        text = _re.sub(r"\b[a-z][a-z0-9_]*/\d+\b", _replace, text)
     return text.strip()
 
 
@@ -9707,7 +9724,8 @@ class PollyProjectDashboardApp(App[None]):
                 # *why* the work is parked or what would unparked it.
                 if status == "on_hold":
                     reason = _clean_hold_reason(
-                        str(t.get("hold_reason") or "")
+                        str(t.get("hold_reason") or ""),
+                        title_map,
                     )
                     if reason:
                         out.append(f"      [dim]paused: {_escape(reason)}[/dim]")

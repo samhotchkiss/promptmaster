@@ -1007,6 +1007,61 @@ def test_clean_hold_reason_strips_action_routing_tag() -> None:
     assert _clean_hold_reason("   ") == ""
 
 
+def test_clean_hold_reason_rewrites_known_task_refs_to_hash_form() -> None:
+    """Architects and operator-pms sometimes write hold reasons that
+    name an upstream task by full ``project_key/N`` ref:
+
+        ``Waiting on operator: polly_remote/12 — same scope escalation
+        pattern as polly_remote/3``
+
+    For a non-technical operator that reads as a path, not a task
+    number. The rest of the project dashboard already refers to
+    in-project tasks as ``#12``/``#3``, so leaving the raw form here
+    is a jarring jargon mismatch. With a title_map provided, the
+    helper rewrites known refs to ``#N (Title)`` form.
+    """
+    from pollypm.cockpit_ui import _clean_hold_reason
+
+    title_map = {
+        "polly_remote/12": "Implement N-RC1: pollypm-reachability",
+        "polly_remote/3": "Implement N1: deploy-bootstrap",
+    }
+    out = _clean_hold_reason(
+        "Waiting on operator: polly_remote/12 — same scope escalation "
+        "pattern as polly_remote/3",
+        title_map,
+    )
+    assert "polly_remote/12" not in out
+    assert "polly_remote/3" not in out
+    # Titles longer than 28 chars are truncated to keep prose readable.
+    assert "#12 (Implement N-RC1: pollypm-re" in out
+    assert "#3 (Implement N1: deploy-bootst" in out
+
+
+def test_clean_hold_reason_leaves_unknown_refs_untouched() -> None:
+    """Refs absent from the title_map (cross-project, archived, or
+    just unrecognised) must not be silently rewritten — collapsing
+    ``other_project/3`` to ``#3`` would mislead the operator into
+    thinking the rest of *this* dashboard's #3 is the upstream."""
+    from pollypm.cockpit_ui import _clean_hold_reason
+
+    out = _clean_hold_reason(
+        "Waiting on cross-project work: other_project/9 to land",
+        {"polly_remote/12": "Some title"},
+    )
+    assert "other_project/9" in out
+
+
+def test_clean_hold_reason_without_title_map_keeps_legacy_behavior() -> None:
+    """Callers that pass no title_map must still get the existing
+    [Action]-stripping behaviour with no surprise rewrites."""
+    from pollypm.cockpit_ui import _clean_hold_reason
+
+    assert _clean_hold_reason(
+        "Waiting on operator: polly_remote/12 to land"
+    ) == "Waiting on operator: polly_remote/12 to land"
+
+
 def test_stuck_alert_covers_action_dedupes_user_waiting_alerts() -> None:
     """A ``stuck_on_task:<id>`` alert is mechanically fired when a
     session sits idle waiting on the user. When the dashboard already
