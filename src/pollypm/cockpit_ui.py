@@ -7995,7 +7995,10 @@ def _dashboard_gather_tasks(
 
 
 def _dashboard_active_worker(
-    config_path: Path, project_key: str,
+    config_path: Path,
+    project_key: str,
+    *,
+    action_items: list[dict] | None = None,
 ) -> tuple[dict | None, int]:
     """Inspect supervisor state for a live worker on this project.
 
@@ -8004,6 +8007,12 @@ def _dashboard_active_worker(
     counts actionable alerts scoped to this project's sessions so the
     top bar can render the yellow "needs attention" light even when the
     worker is idle.
+
+    When ``action_items`` is supplied, ``stuck_on_task:<task_id>``
+    alerts whose task is already represented by an Action Needed card
+    are excluded from the count — the user can already see the work
+    needs their input, and the mechanically-derived "stuck" alert is
+    just the same fact in different words.
     """
     from datetime import UTC, datetime, timedelta
 
@@ -8050,10 +8059,18 @@ def _dashboard_active_worker(
 
             project_session_names = {s.name for s in project_sessions}
             open_alerts = supervisor.store.open_alerts()
+            covered_task_ids = {
+                str(item.get("primary_ref"))
+                for item in (action_items or [])
+                if item.get("primary_ref")
+            }
             alert_count = sum(
                 1 for a in open_alerts
                 if getattr(a, "session_name", None) in project_session_names
                 and not is_operational_alert(getattr(a, "alert_type", ""))
+                and not _stuck_alert_covers_action(
+                    getattr(a, "alert_type", ""), covered_task_ids,
+                )
             )
         except Exception:  # noqa: BLE001
             alert_count = 0
@@ -8786,6 +8803,24 @@ def _dashboard_inbox(
     return _action_count(items, action_items), top, action_items
 
 
+def _stuck_alert_covers_action(
+    alert_type: str, covered_task_ids: set[str],
+) -> bool:
+    """Return True when ``alert_type`` is ``stuck_on_task:<task>`` and the
+    task is already represented by an Action Needed card.
+
+    Stuck alerts fire mechanically when a session sits idle waiting on
+    user input. If the dashboard is *already* showing a user_prompt
+    card for that same task, counting the alert separately just inflates
+    the banner number without telling the user anything new.
+    """
+    prefix = "stuck_on_task:"
+    if not alert_type or not alert_type.startswith(prefix):
+        return False
+    task_id = alert_type[len(prefix):].strip()
+    return bool(task_id) and task_id in covered_task_ids
+
+
 def _action_count(items: list[dict], action_items: list[dict]) -> int:
     """Count distinct user actions across task and message inbox sources.
 
@@ -8916,7 +8951,7 @@ def _gather_project_dashboard(
         activity_entries = []
 
     active_worker, alert_count = _dashboard_active_worker(
-        config_path, project_key,
+        config_path, project_key, action_items=action_items,
     )
     blocker_count = int(counts.get("blocked", 0))
     on_hold_count = int(counts.get("on_hold", 0))

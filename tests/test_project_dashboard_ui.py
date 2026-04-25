@@ -280,7 +280,7 @@ def test_status_green_when_worker_heartbeat_alive(
             "last_heartbeat": datetime.now(UTC).isoformat(),
         }
 
-        def _fake_active_worker(config_path, project_key):
+        def _fake_active_worker(config_path, project_key, *, action_items=None):
             return fake_worker, 0
 
         from pollypm import cockpit_ui
@@ -617,7 +617,7 @@ def test_current_activity_calls_out_user_decision_when_only_architect_active(
         "last_heartbeat": datetime.now(UTC).isoformat(),
     }
 
-    def _fake_active_worker(config_path, project_key):
+    def _fake_active_worker(config_path, project_key, *, action_items=None):
         return fake_worker, 0
 
     from pollypm import cockpit_ui as _cockpit_ui
@@ -770,6 +770,37 @@ def test_action_count_dedupes_review_task_and_matching_message() -> None:
     ]
 
     assert _action_count(items, action_items) == 1
+
+
+def test_stuck_alert_covers_action_dedupes_user_waiting_alerts() -> None:
+    """A ``stuck_on_task:<id>`` alert is mechanically fired when a
+    session sits idle waiting on the user. When the dashboard already
+    shows a user_prompt card for that same task, the stuck alert is
+    just the same fact in different words — don't inflate the banner.
+    """
+    from pollypm.cockpit_ui import _stuck_alert_covers_action
+
+    covered = {"polly_remote/12"}
+    # Same task → covered.
+    assert _stuck_alert_covers_action(
+        "stuck_on_task:polly_remote/12", covered,
+    )
+    # Different task → not covered.
+    assert not _stuck_alert_covers_action(
+        "stuck_on_task:polly_remote/9", covered,
+    )
+    # Non-stuck alert types must never be filtered by this helper.
+    assert not _stuck_alert_covers_action(
+        "no_session_for_assignment:polly_remote/12", covered,
+    )
+    assert not _stuck_alert_covers_action("", covered)
+    # Empty / malformed body keeps the alert visible.
+    assert not _stuck_alert_covers_action(
+        "stuck_on_task:", covered,
+    )
+    assert not _stuck_alert_covers_action(
+        "stuck_on_task:   ", covered,
+    )
 
 
 def test_action_count_keeps_distinct_task_actions() -> None:
@@ -1015,7 +1046,7 @@ def test_status_pill_prefers_user_attention_over_active_worker(
         "last_heartbeat": datetime.now(UTC).isoformat(),
     }
 
-    def _fake_active_worker(config_path, project_key):
+    def _fake_active_worker(config_path, project_key, *, action_items=None):
         return fake_worker, 0
 
     from pollypm import cockpit_ui as _cockpit_ui
