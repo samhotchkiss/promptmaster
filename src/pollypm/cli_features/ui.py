@@ -35,7 +35,7 @@ def _enforce_migration_gate(config_path: Path) -> None:
 
 
 def register_ui_commands(app: typer.Typer) -> None:
-    @app.command()
+    @app.command(help="Launch the standalone Accounts management TUI.")
     def accounts_ui(
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
@@ -43,7 +43,7 @@ def register_ui_commands(app: typer.Typer) -> None:
 
         AccountsApp(config_path).run()
 
-    @app.command()
+    @app.command(help="Launch the legacy control TUI (predecessor to ``cockpit``).")
     def ui(
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
@@ -51,7 +51,13 @@ def register_ui_commands(app: typer.Typer) -> None:
 
         PollyPMApp(config_path).run()
 
-    @app.command()
+    @app.command(
+        help=(
+            "Launch the cockpit TUI — the main interactive surface "
+            "(left rail + scoped right pane) for inspecting projects, "
+            "inbox, workers, and activity."
+        ),
+    )
     def cockpit(
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
@@ -75,7 +81,14 @@ def register_ui_commands(app: typer.Typer) -> None:
                 traceback.print_exc(file=debug_handle)
             raise
 
-    @app.command("cockpit-pane")
+    @app.command(
+        "cockpit-pane",
+        help=(
+            "Launch a single cockpit panel (inbox, project, workers, "
+            "metrics, activity, settings) standalone — the same screen "
+            "the cockpit's right pane embeds, but full-window."
+        ),
+    )
     def cockpit_pane(
         kind: str = typer.Argument(..., help="Pane type: inbox, settings, workers, metrics, activity, or project."),
         target: str | None = typer.Argument(None, help="Optional project key for project panes."),
