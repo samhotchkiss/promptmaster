@@ -331,6 +331,13 @@ def test_dashboard_done_body_pluralises_singular_counts(tmp_path: Path) -> None:
     assert "[/#3fb950] sweep" in body and "sweeps" not in body
     assert "[/#58a6ff] message" in body and "messages" not in body
     assert "[/#d29922] recovery" in body and "recoveries" not in body
+    # Cycle 61: the bottom dashboard footer (separate from done_body)
+    # also depends on sweep_count / message_count and used bare plurals.
+    footer = app.footer_w.value
+    assert "1 sweep today" in footer
+    assert "1 sweeps today" not in footer
+    assert "1 message" in footer
+    assert "1 messages" not in footer
 
     # Path C: plural cases stay plural.
     config, data = _dashboard_done_snapshot(completed_n=3)

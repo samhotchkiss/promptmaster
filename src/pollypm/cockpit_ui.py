@@ -1782,10 +1782,12 @@ class PollyDashboardApp(App[None]):
             self.chart_body.update("[dim]No token data yet[/dim]")
 
         # ── Footer ──
+        sweep_word = "sweep" if data.sweep_count_24h == 1 else "sweeps"
+        msg_word = "message" if data.message_count_24h == 1 else "messages"
         footer = (
             "[dim]Click Polly to connect  \u00b7  "
-            f"{data.sweep_count_24h} sweeps today  \u00b7  "
-            f"{data.message_count_24h} messages"
+            f"{data.sweep_count_24h} {sweep_word} today  \u00b7  "
+            f"{data.message_count_24h} {msg_word}"
         )
         if self._refresh_error:
             footer += "  \u00b7  stale cache"
