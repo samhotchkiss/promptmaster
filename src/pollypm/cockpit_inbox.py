@@ -123,6 +123,12 @@ def _inbox_db_sources(config) -> list[tuple[str | None, Path, Path]]:
     don't belong to any one project (#271). Duplicates are dropped so a
     project whose path happens to equal the workspace root is scanned once.
 
+    Note: this helper INCLUDES non-tracked projects on purpose — the
+    inbox cockpit panel and rail badge surface all registered projects
+    so a user can triage messages even before running ``pm init-tracker``.
+    The recovery prompt + morning-briefing surfaces filter to tracked
+    only; they have a different invariant (cycles 85/86/87).
+
     ``project_key`` is ``None`` for the workspace-root source; callers that
     need a project filter treat ``None`` as "no filter".
     """
