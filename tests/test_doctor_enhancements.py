@@ -896,10 +896,11 @@ def test_render_human_includes_section_headers_and_footer() -> None:
     assert "-- Pipeline --" in text
     assert "-- Resources --" in text
     assert "-- Sessions --" in text
-    # Compact footer: "<total> checks · <passed> passed · <warnings> warnings · <errors> errors"
+    # Compact footer: "<total> checks · <passed> passed · <warnings> warning(s) · <errors> error(s)"
+    # — warning/error words pluralise per count (cycle 52).
     assert "3 checks" in text
     assert "2 passed" in text
-    assert "1 warnings" in text
+    assert "1 warning" in text
     assert "0 errors" in text
 
 
@@ -922,7 +923,8 @@ def test_summary_counts_are_accurate() -> None:
     ]
     report = doctor.run_checks(checks)
     text = doctor.render_human(report)
-    assert "4 checks · 2 passed · 1 warnings · 1 errors" in text
+    # Per cycle 52, warning/error words pluralise per count.
+    assert "4 checks · 2 passed · 1 warning · 1 error" in text
 
 
 def test_render_human_labels_guide_drift_section() -> None:
