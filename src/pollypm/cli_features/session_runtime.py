@@ -21,7 +21,6 @@ from pathlib import Path
 import typer
 
 from pollypm.config import DEFAULT_CONFIG_PATH
-from pollypm.review_notify import notify_requires_review_hold
 
 _TASK_ID_PATTERN = re.compile(r"\b([A-Za-z0-9_.-]+/\d+)\b")
 

@@ -8,7 +8,6 @@ import subprocess
 from typing import Callable
 
 from rich.columns import Columns
-from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -34,13 +33,7 @@ from pollypm.control_tui_routes import (
     resolve_tab_shortcut,
 )
 from pollypm.models import ProviderKind
-from pollypm.projects import (
-    discover_git_repositories,
-    enable_tracked_project,
-    register_project,
-    remove_project,
-    set_workspace_root,
-)
+from pollypm.projects import discover_git_repositories
 from pollypm.service_api import PollyPMService
 from pollypm.task_backends import get_task_backend
 from pollypm.worktrees import list_worktrees
