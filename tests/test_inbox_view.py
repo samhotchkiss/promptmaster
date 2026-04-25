@@ -266,8 +266,50 @@ class TestInboxCLI:
         result = runner.invoke(inbox_app, ["--db", db_path])
         assert result.exit_code == 0, result.output
         # #341 rewrote the header to reflect the messages+tasks UNION.
+        # Cycle 62: zero stays plural (``0 items``) — the singular boundary
+        # is exactly count=1, exercised by the next test.
         assert "Inbox: 0 items" in result.output
         assert "No messages waiting for you." in result.output
+
+    def test_inbox_header_singular_at_count_one(self, db_path):
+        """``pm inbox`` header reads ``1 item`` (not ``1 items``).
+
+        Cycle 62 pluralised the ``Inbox: N items`` header — at the
+        typical end-of-triage state (drained to one) the old prose was
+        ``1 items``. Drive a single task to the human-review node and
+        verify the header drops the bare plural.
+        """
+        _create_user_review_task(db_path, "Sole reviewer", priority="high")
+        assert runner.invoke(
+            task_app, ["queue", "proj/1", "--db", db_path],
+        ).exit_code == 0
+        assert runner.invoke(
+            task_app,
+            ["claim", "proj/1", "--actor", "agent-1", "--db", db_path],
+        ).exit_code == 0
+        wo = json.dumps(
+            {
+                "type": "code_change",
+                "summary": "done",
+                "artifacts": [
+                    {"kind": "commit", "description": "abc123", "ref": "abc123"},
+                ],
+            }
+        )
+        assert runner.invoke(
+            task_app,
+            [
+                "done", "proj/1",
+                "--output", wo,
+                "--actor", "agent-1",
+                "--db", db_path,
+            ],
+        ).exit_code == 0
+
+        result = runner.invoke(inbox_app, ["--db", db_path])
+        assert result.exit_code == 0, result.output
+        assert "Inbox: 1 item" in result.output
+        assert "Inbox: 1 items" not in result.output
 
     def test_json_output_when_empty(self, db_path):
         result = runner.invoke(inbox_app, ["--db", db_path, "--json"])

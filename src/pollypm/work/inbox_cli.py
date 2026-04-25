@@ -225,7 +225,8 @@ def inbox_root(
         return
 
     total = len(tasks) + len(display_messages)
-    typer.echo(f"Inbox: {total} items")
+    item_word = "item" if total == 1 else "items"
+    typer.echo(f"Inbox: {total} {item_word}")
     if total == 0:
         typer.echo("No messages waiting for you.")
         return
