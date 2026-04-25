@@ -737,6 +737,12 @@ def _format_token_total(total: int) -> str:
 
 _HANDOFF_NODES = frozenset({
     "code_review", "review", "user_approval", "review_handoff",
+    # ``human_review`` is the parking node in the user-review flow
+    # (``src/pollypm/work/flows/user-review.yaml``). The worker exits
+    # there cleanly to wait for the user — same handoff shape as
+    # ``user_approval`` in plan_project. Without it the gone session
+    # rendered as 🔴 unresponsive instead of ⚪ handed_off.
+    "human_review",
 })
 
 
