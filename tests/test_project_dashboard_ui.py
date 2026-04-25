@@ -601,6 +601,89 @@ def test_user_prompt_payload_drives_dashboard_copy_and_buttons(
     _run(body())
 
 
+def test_current_activity_calls_out_user_decision_when_only_architect_active(
+    dashboard_env, dashboard_app, monkeypatch,
+) -> None:
+    """When the only active worker is an architect (no in-flight
+    task) but the user has action items waiting, the Current
+    Activity section must say so. Otherwise '● architect_X
+    architect just now' alone implies work is happening when the
+    operator-facing reality is 'I have a decision to make.'"""
+    from datetime import UTC, datetime
+
+    fake_worker = {
+        "session_name": "architect_demo",
+        "role": "architect",
+        "last_heartbeat": datetime.now(UTC).isoformat(),
+    }
+
+    def _fake_active_worker(config_path, project_key):
+        return fake_worker, 0
+
+    from pollypm import cockpit_ui as _cockpit_ui
+    monkeypatch.setattr(
+        _cockpit_ui, "_dashboard_active_worker", _fake_active_worker,
+    )
+
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    in_progress_id = dashboard_env["task_ids"]["in_progress"]
+    # Drop the seeded in-flight task so the dashboard hits the
+    # "architect active, nothing actually running" branch — the real
+    # production scenario this test covers (Notesy has 0 in_progress
+    # tasks, all are blocked, and only the architect is alive).
+    with SQLiteWorkService(
+        db_path=db_path, project_path=dashboard_env["project_path"],
+    ) as svc:
+        svc.cancel(in_progress_id, "polly", reason="test setup")
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        store.enqueue_message(
+            type="notify",
+            tier="immediate",
+            recipient="user",
+            sender="architect",
+            subject="Need a call",
+            body="Please decide.",
+            scope="demo",
+            labels=["project:demo"],
+            payload={
+                "actor": "architect",
+                "project": "demo",
+                "task_id": in_progress_id,
+                "user_prompt": {
+                    "summary": "The deploy work is ready, but we need your call.",
+                    "steps": ["Approve or wait"],
+                    "question": "Approve now or wait?",
+                    "actions": [
+                        {"label": "Approve", "kind": "approve_task",
+                         "task_id": in_progress_id},
+                    ],
+                },
+            },
+            state="open",
+        )
+    finally:
+        store.close()
+    _cockpit_ui._PROJECT_DASHBOARD_TASK_CACHE.clear()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(160, 60)) as pilot:
+            await pilot.pause()
+            assert dashboard_app.data is not None
+            assert dashboard_app.data.active_worker is not None
+            assert dashboard_app.data.action_items
+            assert not dashboard_app.data.task_buckets.get("in_progress")
+            rendered = str(dashboard_app.now_body.render())
+            assert "architect_demo" in rendered
+            # Critically: the section also surfaces the user-facing
+            # decision so the operator can see "I have a decision to
+            # make" alongside "the architect is online".
+            assert "Waiting for your response" in rendered
+            assert "deploy work is ready" in rendered
+
+    _run(body())
+
+
 def test_inbox_section_omits_need_action_count_when_cards_show_full_set(
     dashboard_env, dashboard_app,
 ) -> None:

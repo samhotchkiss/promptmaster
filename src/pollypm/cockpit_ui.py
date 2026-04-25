@@ -9765,6 +9765,22 @@ class PollyProjectDashboardApp(App[None]):
                     f"  [dim]@ {_escape(str(node))}[/dim]" if node else ""
                 )
                 lines.append(f"  {num_part}{title}{node_part}")
+            elif data.action_items:
+                # No task in flight but the user has decisions waiting:
+                # the operator-facing reality is "I have something to do
+                # here." Saying just "<architect> active" while the
+                # banner reads "Waiting on you" hides that fact in the
+                # very section meant to explain what's happening now.
+                item = data.action_items[0]
+                prompt = _escape(
+                    item.get("plain_prompt")
+                    or item.get("decision_question")
+                    or "This project is waiting for your response."
+                )
+                lines.append(
+                    f"  [#f0c45a]\u25c6[/#f0c45a] Waiting for your "
+                    f"response.\n    [dim]{prompt}[/dim]"
+                )
             return "\n".join(lines)
         if data.action_items:
             item = data.action_items[0]
