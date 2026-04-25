@@ -296,6 +296,95 @@ def check_workspace_messages(config: Any) -> list[Finding]:
     return findings
 
 
+def _message_action_requires_user_prompt(row: sqlite3.Row) -> bool:
+    """An open notify/alert routed to the user at immediate priority is
+    a user-blocking call to action — the dashboard contract requires
+    a structured user_prompt payload so the Action Needed card can
+    render plain summary, steps, decision, and contextual actions
+    instead of a heuristic guess against the raw body."""
+    if str(row["recipient"] or "") != "user":
+        return False
+    if str(row["type"] or "") not in {"notify", "alert"}:
+        return False
+    if str(row["tier"] or "") != "immediate":
+        return False
+    payload = _json_dict(row["payload_json"])
+    # Blocker-summary events emit their structured copy through
+    # ``required_actions`` instead of ``user_prompt`` and are already
+    # exercised by the dashboard's blocker-summary path.
+    if payload.get("event_type") == "project_blocker_summary":
+        return False
+    return True
+
+
+def _user_prompt_complete(payload: dict[str, Any]) -> bool:
+    prompt = payload.get("user_prompt")
+    if not isinstance(prompt, dict):
+        return False
+    summary = str(prompt.get("summary") or "").strip()
+    question = str(prompt.get("question") or "").strip()
+    steps = prompt.get("steps") or prompt.get("required_actions") or []
+    if not isinstance(steps, list):
+        steps = []
+    return bool(summary or question or steps)
+
+
+def _check_user_prompt_in_db(
+    db: Path, *, project_key: str | None = None,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    try:
+        conn = _connect(db)
+    except sqlite3.Error:
+        return findings
+    with conn:
+        if not _table_exists(conn, "messages"):
+            return findings
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE state='open' AND recipient='user' "
+            "AND tier='immediate' AND type IN ('notify','alert')"
+        ).fetchall()
+    for row in rows:
+        if not _message_action_requires_user_prompt(row):
+            continue
+        payload = _json_dict(row["payload_json"])
+        if _user_prompt_complete(payload):
+            continue
+        scope = str(row["scope"] or "")
+        scope_part = f" [{scope}]" if scope else ""
+        owner = f"{project_key}:" if project_key else ""
+        findings.append(
+            Finding(
+                "warn",
+                "user_action_message_missing_user_prompt",
+                f"{owner}message {row['id']}{scope_part}: "
+                f"open immediate-priority {row['type']} to user has no "
+                "user_prompt payload (dashboard falls back to body heuristics)",
+            )
+        )
+    return findings
+
+
+def check_user_prompt_contract(config: Any) -> list[Finding]:
+    """Surface high-priority action messages that lack a structured
+    user_prompt payload. As senders migrate to ``--user-prompt-json``
+    the warning count should trend toward zero."""
+    findings: list[Finding] = []
+    workspace_root = getattr(config.project, "workspace_root", None)
+    if workspace_root is not None:
+        ws_db = Path(workspace_root) / ".pollypm" / "state.db"
+        if ws_db.exists():
+            findings.extend(_check_user_prompt_in_db(ws_db))
+    for project_key, project in (getattr(config, "projects", {}) or {}).items():
+        db = _project_db(project)
+        if db is None:
+            continue
+        findings.extend(
+            _check_user_prompt_in_db(db, project_key=str(project_key))
+        )
+    return findings
+
+
 def check_cockpit_tmux(config: Any) -> list[Finding]:
     findings: list[Finding] = []
     session = config.project.tmux_session
@@ -365,6 +454,7 @@ def run_checks(config_path: Path) -> list[Finding]:
             )
         )
     findings.extend(check_workspace_messages(config))
+    findings.extend(check_user_prompt_contract(config))
     findings.extend(check_cockpit_tmux(config))
     return findings
 
