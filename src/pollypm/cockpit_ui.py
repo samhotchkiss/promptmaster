@@ -9521,9 +9521,13 @@ class PollyProjectDashboardApp(App[None]):
     def _render(self) -> None:
         data = self.data
         if data is None:
+            # Friendlier text + matching 3-space gap so the error
+            # case doesn't look subtly different from the regular
+            # ``<Project>   PM: <label>`` topbar.
             self.topbar.update(
-                f"[b]{_escape(self.project_key)}[/b]  "
-                f"[dim]not found in config[/dim]"
+                f"[b]{_escape(self.project_key)}[/b]   "
+                f"[dim]is not a tracked project — "
+                f"check ``pm projects`` for the list.[/dim]"
             )
             return
 
