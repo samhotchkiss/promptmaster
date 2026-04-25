@@ -214,6 +214,76 @@ def test_inbox_triage_completion_beats_generic_action_marker() -> None:
     assert item.triage_label == "completed update"
 
 
+def test_replayed_plan_review_notifications_collapse_to_most_recent() -> None:
+    """Architects that re-fire ``[Action] Plan ready for review`` for the
+    same plan should not flood the inbox with duplicate rows — keep the
+    newest, drop the older replays."""
+    from datetime import datetime
+
+    from pollypm.cockpit_inbox_items import (
+        InboxEntry,
+        _dedupe_replayed_plan_reviews,
+    )
+
+    older = InboxEntry(
+        task_id="msg:booktalk:1",
+        title="[Action] Plan ready for review: booktalk",
+        project="booktalk",
+        labels=[
+            "plan_review",
+            "project:booktalk",
+            "plan_task:booktalk/3",
+        ],
+        created_at=datetime(2026, 4, 23, 16, 2, 58),
+        updated_at=datetime(2026, 4, 23, 16, 2, 58),
+    )
+    newer = InboxEntry(
+        task_id="msg:booktalk:2",
+        title="[Action] Plan ready for review: booktalk",
+        project="booktalk",
+        labels=[
+            "plan_review",
+            "project:booktalk",
+            "plan_task:booktalk/3",
+        ],
+        created_at=datetime(2026, 4, 23, 16, 6, 52),
+        updated_at=datetime(2026, 4, 23, 16, 6, 52),
+    )
+    different_plan = InboxEntry(
+        task_id="msg:polly_remote:9",
+        title="[Action] Plan ready for review: polly_remote",
+        project="polly_remote",
+        labels=[
+            "plan_review",
+            "project:polly_remote",
+            "plan_task:polly_remote/9",
+        ],
+        created_at=datetime(2026, 4, 20, 9, 0, 0),
+        updated_at=datetime(2026, 4, 20, 9, 0, 0),
+    )
+    other_action = InboxEntry(
+        task_id="msg:polly_remote:12",
+        title="[Action] N-RC1 review (polly_remote/12)",
+        project="polly_remote",
+        labels=["project:polly_remote"],
+        created_at=datetime(2026, 4, 23, 18, 53, 0),
+        updated_at=datetime(2026, 4, 23, 18, 53, 0),
+    )
+
+    deduped = _dedupe_replayed_plan_reviews(
+        [older, newer, different_plan, other_action]
+    )
+    deduped_ids = [
+        getattr(item, "task_id", None) for item in deduped
+    ]
+    # Older booktalk plan-review collapsed; newer kept.
+    assert "msg:booktalk:1" not in deduped_ids
+    assert "msg:booktalk:2" in deduped_ids
+    # Different plan + non-plan-review entries are untouched.
+    assert "msg:polly_remote:9" in deduped_ids
+    assert "msg:polly_remote:12" in deduped_ids
+
+
 def test_task_backed_inbox_entries_default_to_action() -> None:
     from types import SimpleNamespace
 

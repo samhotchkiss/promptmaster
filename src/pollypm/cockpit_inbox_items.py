@@ -272,6 +272,66 @@ def is_task_inbox_entry(item) -> bool:
     return getattr(item, "source", "task") == "task"
 
 
+def _entry_sort_value(item: InboxEntry) -> str:
+    """Best-effort timestamp string for ordering two inbox entries."""
+    for attr in ("updated_at", "created_at"):
+        value = getattr(item, attr, None)
+        if value is None:
+            continue
+        if hasattr(value, "isoformat"):
+            try:
+                return value.isoformat()
+            except Exception:  # noqa: BLE001
+                continue
+        return str(value)
+    return ""
+
+
+def _dedupe_replayed_plan_reviews(items: list[InboxEntry]) -> list[InboxEntry]:
+    """Collapse re-fired plan-review notifications.
+
+    Architects that resend "[Action] Plan ready for review: <project>" on
+    every retry — same plan, same labels, same recipient — pile up in
+    the inbox as duplicate rows that all point at the same plan task.
+    For the user, only the most recent matters: there is one plan to
+    look at, and the older notifications add no information.
+
+    Items not labelled ``plan_review`` or missing a ``plan_task:<ref>``
+    label pass through untouched, since we can't safely identify them
+    as duplicates of any other entry.
+    """
+    keep: dict[tuple[str, str], InboxEntry] = {}
+    drop_ids: set[str] = set()
+    for item in items:
+        labels = {str(lbl) for lbl in (getattr(item, "labels", []) or [])}
+        if "plan_review" not in labels:
+            continue
+        plan_task = ""
+        for label in labels:
+            if label.startswith("plan_task:"):
+                plan_task = label.split(":", 1)[1].strip()
+                break
+        if not plan_task:
+            continue
+        project = str(getattr(item, "project", "") or "")
+        key = (project, plan_task)
+        existing = keep.get(key)
+        if existing is None:
+            keep[key] = item
+            continue
+        if _entry_sort_value(item) > _entry_sort_value(existing):
+            drop_ids.add(str(getattr(existing, "task_id", "") or ""))
+            keep[key] = item
+        else:
+            drop_ids.add(str(getattr(item, "task_id", "") or ""))
+    if not drop_ids:
+        return items
+    return [
+        item for item in items
+        if str(getattr(item, "task_id", "") or "") not in drop_ids
+    ]
+
+
 def load_inbox_entries(
     config,
     *,
@@ -357,4 +417,5 @@ def load_inbox_entries(
                 svc.close()
             except Exception:  # noqa: BLE001
                 pass
+    items = _dedupe_replayed_plan_reviews(items)
     return items, unread, replies_by_task
