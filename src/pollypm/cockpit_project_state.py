@@ -45,7 +45,15 @@ _INACTIVE_STATUSES = frozenset({"draft"})
 _WAITING_STATUSES = frozenset({"waiting_on_user", "blocked", "on_hold"})
 _AUTOMATED_STATUSES = frozenset({"queued", "in_progress"})
 _PLAN_BYPASS_FLOWS = frozenset({"plan_project", "critique_flow"})
-_USER_NODE_MARKERS = ("human", "user")
+# Substring markers on ``current_node_id`` that indicate a human is
+# the actor at this node. The downtime explore flow's parking node is
+# ``awaiting_approval`` (actor_type: human, see
+# plugins_builtin/downtime/flows/downtime_explore.yaml) — without
+# ``approval`` here, a project where every task is parked at that
+# node fell through to ``WORKING`` (working wheel) instead of
+# ``GREEN`` (user review remaining), so the rail under-surfaced
+# decisions waiting on the user.
+_USER_NODE_MARKERS = ("human", "user", "approval")
 _AUTOREVIEW_NODE_MARKERS = ("auto", "russell", "reviewer")
 
 # Signal-bearing alert prefixes from #788. These must stay out of the

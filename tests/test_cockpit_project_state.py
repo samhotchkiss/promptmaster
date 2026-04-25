@@ -138,6 +138,27 @@ def test_rollup_green_when_only_user_review_remains() -> None:
     assert rollup.actionable_key == "project:demo:issues"
 
 
+def test_rollup_green_when_parked_at_downtime_awaiting_approval() -> None:
+    """Cycle 102 — the downtime explore flow parks at
+    ``awaiting_approval`` (actor_type: human) for the human
+    touchpoint. Tasks at that node are review-stage waiting on the
+    user, but the substring marker only knew about ``human`` /
+    ``user``, neither of which appears in ``awaiting_approval``.
+    The rollup fell through to WORKING (working wheel) instead of
+    GREEN, under-surfacing the decision waiting on the user.
+    """
+    rollup = rollup_project_state(
+        "demo",
+        [
+            _task(1, "review", node="awaiting_approval", flow="downtime_explore"),
+            _task(2, "done"),
+        ],
+    )
+
+    assert rollup.state is ProjectRailState.GREEN
+    assert rollup.badge == "🟢"
+
+
 def test_rollup_working_when_automated_work_can_advance() -> None:
     rollup = rollup_project_state(
         "demo",
