@@ -1081,16 +1081,17 @@ class Supervisor:
         # handler exists yet (post-v1 migration target).
         transcript_samples = sync_token_ledger_for_config(self.config)
         if transcript_samples:
+            samples_n = len(transcript_samples)
+            samples_word = "sample" if samples_n == 1 else "samples"
             self._msg_store.append_event(
                 scope="heartbeat",
                 sender="heartbeat",
                 subject="token_ledger",
                 payload={
                     "message": (
-                        f"Synced {len(transcript_samples)} transcript token "
-                        f"sample(s)"
+                        f"Synced {samples_n} transcript token {samples_word}"
                     ),
-                    "samples": len(transcript_samples),
+                    "samples": samples_n,
                 },
             )
 
