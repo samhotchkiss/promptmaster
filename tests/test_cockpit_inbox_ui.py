@@ -192,6 +192,26 @@ def _triaged_entry(*, title: str, body: str = "", project: str = "demo"):
     )
 
 
+def test_inbox_triage_blocker_label_says_needs_unblock_not_blocked() -> None:
+    """Action-bucket items keyed off blocker keywords used to be
+    labelled ``"blocked"``. The right-pane banner renders this as
+    ``"Action Required · blocked"`` — internally consistent but
+    contradictory to read: if the user has to act, the work is not
+    "blocked", *they* are the unblock.
+
+    The label now reads ``"needs unblock"`` so both the inbox row
+    and the banner communicate "this is on your plate to unblock"
+    without the mismatch.
+    """
+    item = _triaged_entry(
+        title="Deploy blocked on auth",
+        body="Worker is blocked waiting for credentials.",
+    )
+
+    assert item.triage_bucket == "action"
+    assert item.triage_label == "needs unblock"
+
+
 def test_inbox_triage_scores_compound_decision_ahead_of_blocker() -> None:
     item = _triaged_entry(
         title="Decision needed",

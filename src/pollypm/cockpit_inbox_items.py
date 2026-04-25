@@ -88,7 +88,12 @@ _TRIAGE_PATTERN_REGISTRY = (
         "kind": "blocker",
         "bucket": "action",
         "rank": 0,
-        "label": "blocked",
+        # Labelled "needs unblock" rather than "blocked" — when the
+        # triage bucket is "action", the user *is* the unblock, so
+        # "Action Required · blocked" reads contradictory in the
+        # right-pane banner. "Needs unblock" tells the user that
+        # they're the unblock without that mismatch.
+        "label": "needs unblock",
         "score": 3,
         "pattern": re.compile(
             r"\b(blocked|blocking|waiting on|on hold|stale review ping)\b",
