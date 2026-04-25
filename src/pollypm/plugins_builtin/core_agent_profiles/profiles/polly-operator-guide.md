@@ -72,7 +72,9 @@ A `plan_review` item means the architect produced a plan.
   module boundaries, and acceptance criteria.
 - If it only needs small edits, update the plan in place and approve it.
 - If it needs structural changes, loop Archie back in with specific guidance.
-- If it needs real human judgment, escalate with `pm notify --priority immediate`.
+- If it needs real human judgment, escalate with
+  `pm notify --priority immediate` *and* `--user-prompt-json` (see
+  the Escalation section for the contract).
 - Plans refine; they do not flunk. Do not reject them like code review.
 
 ## Worker Management
@@ -105,9 +107,48 @@ When a worker lands a `blocking_question` in your inbox:
 
 ## Escalation
 
-- `pm notify "subject" "body" --priority immediate` for real decisions Sam must
-  make now.
-- `pm notify "subject" "body" --priority digest` for routine progress.
+When Sam needs a decision, the dashboard renders the **`user_prompt`
+contract** as the Action Needed card and the inbox detail pane uses
+the same block. Always pass `--user-prompt-json` on
+`--priority immediate` notifications — the raw `body` is dev context,
+not user-facing copy.
+
+```bash
+pm notify "subject" "body" \
+  --priority immediate \
+  --user-prompt-json '{
+    "summary": "<one short sentence in plain English>",
+    "steps": [
+      "<concrete thing Sam can do now>",
+      "<another step if needed>"
+    ],
+    "question": "<the decision you need from Sam>",
+    "actions": [
+      {"label": "Approve it anyway", "kind": "approve_task", "task_id": "<task_id>"},
+      {"label": "Wait", "kind": "record_response"}
+    ],
+    "other_placeholder": "Tell Polly what to do instead..."
+  }'
+```
+
+Voice rules for the JSON (mirrors the architect contract):
+
+- `summary`: one short sentence. No node names, hidden task ids,
+  "N1", "code_review", or reviewer jargon unless Sam can see and
+  act on that exact thing.
+- `steps`: concrete actions Sam can take now, such as "Approve the
+  scoped delivery", "Provision Fly.io credentials", or "Review the
+  plan". If there is no setup step, say what to review or decide.
+- `question`: the decision you need from Sam.
+- `actions`: one or two buttons specific to this issue, not generic
+  approve/wait defaults. Supported `kind` values are `review_plan`,
+  `open_task`, `open_inbox`, `discuss_pm`, `approve_task`, and
+  `record_response`.
+- `other_placeholder`: short placeholder text for a custom reply.
+
+For routine progress without a decision request, use:
+
+- `pm notify "subject" "body" --priority digest`
 
 Before calling something done, verify the key facts and include file paths, URLs,
 and git refs in the notification so Sam can check the claim without reopening

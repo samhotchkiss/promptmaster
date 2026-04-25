@@ -68,6 +68,32 @@ def _make_worker_context(tmp_path: Path) -> tuple[AgentProfileContext, Path]:
     return context, project_root
 
 
+def test_operator_guide_documents_user_prompt_json_contract() -> None:
+    """The polly-operator-guide must teach Polly to send escalations
+    with the structured ``--user-prompt-json`` contract — that is the
+    payload the dashboard's Action Needed card and the inbox detail
+    pane render. A bare ``pm notify "subject" "body"`` produces no
+    user-facing summary and forces the operator to parse worker
+    jargon."""
+    from pollypm.plugins_builtin.core_agent_profiles.profiles import (
+        _POLLY_OPERATOR_GUIDE_PATH,
+    )
+
+    text = _POLLY_OPERATOR_GUIDE_PATH.read_text(encoding="utf-8")
+
+    # The escalation section must explicitly reference the JSON
+    # contract flag and explain its required keys.
+    assert "--user-prompt-json" in text
+    for required_key in ("summary", "steps", "question", "actions"):
+        assert f"`{required_key}`" in text, (
+            f"operator guide should describe the user_prompt key "
+            f"`{required_key}` so Polly knows the contract shape"
+        )
+    # And the dashboard contract is named so future readers can cross
+    # reference the architect / dashboard rendering.
+    assert "user_prompt" in text
+
+
 def test_worker_profile_explains_optional_overrides_and_missing_files(tmp_path: Path) -> None:
     context, project_root = _make_worker_context(tmp_path)
     profile = core_profiles.plugin.agent_profiles["worker"]()
