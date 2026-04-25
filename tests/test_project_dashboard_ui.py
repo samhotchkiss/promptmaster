@@ -428,12 +428,22 @@ def test_status_yellow_when_workspace_action_message_exists(
             assert dashboard_app.data.inbox_count >= 1
             assert dashboard_app.data.action_items
             assert dashboard_app.data.status_label == "needs attention"
+            assert "Waiting on you:" in str(dashboard_app.action_bar.render())
+            assert str(dashboard_app.inbox_title.render()) == "Action Needed"
             rendered = str(dashboard_app.inbox_body.render())
             assert "To move this project forward" in rendered
-            assert "Fly.io" in rendered
-            assert "deploy pipeline" in rendered
-            assert "Choose one:" in rendered
-            assert "Reopen the task with Fly-enabled access" in rendered
+            assert "Action Required" not in rendered
+            assert "Details" not in rendered
+            assert "What you need to set up" in rendered
+            assert "Set up the Fly.io app for this project" in rendered
+            assert "Give Polly deployment access" in rendered
+            assert "Decision" in rendered
+            assert "approve the code work now" in rendered
+            assert dashboard_app.action_primary_buttons[0].label.plain == "Approve it anyway"
+            assert (
+                dashboard_app.action_secondary_buttons[0].label.plain
+                == "Wait until environment is set"
+            )
 
             routed: list[str] = []
             dashboard_app._route_to_task = routed.append  # type: ignore[assignment]
@@ -446,6 +456,147 @@ def test_status_yellow_when_workspace_action_message_exists(
 
             dashboard_app.on_inbox_section_click(_Click())  # type: ignore[arg-type]
             assert routed == ["demo/3"]
+
+    _run(body())
+
+
+def test_project_overview_sections_are_clickable(
+    dashboard_env, dashboard_app,
+) -> None:
+    """Every dashboard card should behave like navigation, not static text."""
+    async def body() -> None:
+        plan_path = (
+            dashboard_env["project_path"] / "docs" / "plan" / "plan.md"
+        )
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text("# Plan\n\n## Next\n")
+
+        async with dashboard_app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+
+            class _Click:
+                def stop(self) -> None:
+                    pass
+
+            task_routes: list[str] = []
+            task_list_routes: list[str] = []
+            activity_routes: list[str] = []
+            dashboard_app._route_to_task = task_routes.append  # type: ignore[assignment]
+            dashboard_app._route_to_tasks = lambda: task_list_routes.append("tasks")  # type: ignore[assignment]
+            dashboard_app.action_jump_activity = lambda: activity_routes.append("activity")  # type: ignore[method-assign]
+
+            dashboard_app.on_now_section_click(_Click())  # type: ignore[arg-type]
+            assert task_routes == [dashboard_env["task_ids"]["in_progress"]]
+
+            dashboard_app.on_pipeline_section_click(_Click())  # type: ignore[arg-type]
+            assert task_list_routes == ["tasks"]
+
+            assert dashboard_app._plan_view_mode is False
+            dashboard_app.on_plan_section_click(_Click())  # type: ignore[arg-type]
+            assert dashboard_app._plan_view_mode is True
+
+            dashboard_app.on_activity_section_click(_Click())  # type: ignore[arg-type]
+            assert activity_routes == ["activity"]
+
+    _run(body())
+
+
+def test_plan_review_action_uses_contextual_review_plan_button(
+    dashboard_env, dashboard_app,
+) -> None:
+    """Plan review cards should not show generic approve/wait buttons."""
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        store.enqueue_message(
+            type="notify",
+            tier="immediate",
+            recipient="user",
+            sender="architect",
+            subject="Plan ready for review: demo",
+            body=(
+                f"Plan: {dashboard_env['project_path']}/docs/project-plan.md\n\n"
+                "A full project plan is ready. Press A to approve."
+            ),
+            scope="demo",
+            labels=["plan_review", "project:demo", "plan_task:demo/3"],
+            payload={"actor": "architect", "project": "demo"},
+            state="open",
+        )
+    finally:
+        store.close()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            rendered = str(dashboard_app.inbox_body.render())
+            assert "A full project plan is ready for your review" in rendered
+            assert "Open the plan review surface" in rendered
+            assert "Waiting on you:" in str(dashboard_app.action_bar.render())
+            assert dashboard_app.action_primary_buttons[0].label.plain == "Review plan"
+            assert dashboard_app.action_secondary_buttons[0].label.plain == "Open task"
+
+            routed: list[str] = []
+            dashboard_app.action_jump_inbox = lambda: routed.append("inbox")  # type: ignore[method-assign]
+            dashboard_app._perform_dashboard_action(0, "primary")
+            assert routed == ["inbox"]
+
+    _run(body())
+
+
+def test_user_prompt_payload_drives_dashboard_copy_and_buttons(
+    dashboard_env, dashboard_app,
+) -> None:
+    """Architect-authored user_prompt JSON is the source of truth when present."""
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        store.enqueue_message(
+            type="notify",
+            tier="immediate",
+            recipient="user",
+            sender="architect",
+            subject="Need user decision",
+            body="Internal details that should not drive the dashboard.",
+            scope="demo",
+            labels=["project:demo"],
+            payload={
+                "actor": "architect",
+                "project": "demo",
+                "task_id": "demo/2",
+                "user_prompt": {
+                    "summary": "The importer is ready, but needs your API key.",
+                    "steps": ["Add the Bookshop API key to project secrets"],
+                    "question": "Add the key now, or should Polly stub it?",
+                    "actions": [
+                        {
+                            "label": "Open task",
+                            "kind": "open_task",
+                            "task_id": "demo/2",
+                        },
+                        {
+                            "label": "Discuss",
+                            "kind": "discuss_pm",
+                        },
+                    ],
+                    "other_placeholder": "Tell Polly another path...",
+                },
+            },
+            state="open",
+        )
+    finally:
+        store.close()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            rendered = str(dashboard_app.inbox_body.render())
+            assert "needs your API key" in rendered
+            assert "Add the Bookshop API key" in rendered
+            assert "Internal details" not in rendered
+            assert "Waiting on you:" in str(dashboard_app.action_bar.render())
+            assert dashboard_app.action_primary_buttons[0].label.plain == "Open task"
+            assert dashboard_app.action_secondary_buttons[0].label.plain == "Discuss"
 
     _run(body())
 
@@ -786,8 +937,10 @@ def test_project_blocker_summary_lists_required_user_actions(
             assert dashboard_app.data is not None
             rendered = str(dashboard_app.inbox_body.render())
             assert "To move this project forward" in rendered
-            assert "Complete: Create the Fly.io app; Add the deploy token" in rendered
-            assert "Relay deployment is waiting on Fly.io setup" in rendered
+            assert "Action Required" not in rendered
+            assert "What you need to set up" in rendered
+            assert "Set up the Fly.io app for this project" in rendered
+            assert "Give Polly deployment access" in rendered
             assert "Create the Fly.io app" in rendered
             assert "Add the deploy token" in rendered
 

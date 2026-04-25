@@ -174,7 +174,21 @@ Press v to open the explainer, d to discuss with the PM, A to approve." \
   --label plan_review \
   --label "project:<project_key>" \
   --label "plan_task:<task_id>" \
-  --label "explainer:<abs path to plan-review.html>"
+  --label "explainer:<abs path to plan-review.html>" \
+  --user-prompt-json '{
+    "summary": "A full project plan is ready for your review.",
+    "steps": [
+      "Open the plan review surface.",
+      "Read the plan and any open decisions.",
+      "Approve the plan when it is ready, or discuss changes with the PM."
+    ],
+    "question": "Review the plan and decide whether it is ready to become implementation tasks.",
+    "actions": [
+      {"label": "Review plan", "kind": "review_plan"},
+      {"label": "Open task", "kind": "open_task", "task_id": "<task_id>"}
+    ],
+    "other_placeholder": "Reply with plan feedback..."
+  }'
 ```
 
 `<task_id>` is the `plan_project` task you've been driving (the one
@@ -194,3 +208,32 @@ user_approval. The flow engine will park at stage 7 and wait for either
 feedback). DO NOT also send a separate `pm notify` plan-ready message
 — the plan_review inbox item IS the notification.
 </plan_review_handoff>
+
+<waiting_on_user_handoff>
+Whenever a task or project is waiting on Sam/user input, do not emit a
+raw internal status dump. Before you stop, create exactly one user-facing
+handoff message with `pm notify --priority immediate` and include
+`--user-prompt-json`.
+
+The JSON is the dashboard contract. Write it like product copy:
+- `summary`: one short sentence in plain English. No node names, hidden
+  task ids, "N1", "code_review", or reviewer jargon unless the user can
+  see and act on that exact thing.
+- `steps`: concrete actions the user can take now, such as "Create the
+  Fly.io app", "Add the deploy token", or "Review the plan". If there is
+  no setup step, say what they should review or decide.
+- `question`: the decision you need from the user.
+- `actions`: one or two buttons. Choose buttons for this specific issue,
+  not generic approve/wait defaults. Supported `kind` values are
+  `review_plan`, `open_task`, `open_inbox`, `discuss_pm`, `approve_task`,
+  and `record_response`.
+- `other_placeholder`: short placeholder for a custom reply.
+
+Examples:
+
+Plan review:
+`{"summary":"A full project plan is ready for your review.","steps":["Open the plan review surface.","Read the plan and any open decisions."],"question":"Review the plan and decide whether it is ready to become implementation tasks.","actions":[{"label":"Review plan","kind":"review_plan"},{"label":"Open task","kind":"open_task","task_id":"<project>/<n>"}],"other_placeholder":"Reply with plan feedback..."}`
+
+Deployment blocked:
+`{"summary":"The code is done, but Polly cannot fully test it until deployment is set up.","steps":["Create the Fly.io app.","Add the deploy token.","Provision Postgres and Redis."],"question":"Approve the code work now with deployment testing as a follow-up, or wait until the environment is ready?","actions":[{"label":"Approve it anyway","kind":"approve_task","task_id":"<project>/<n>","response":"Approve this code now and create a follow-up for deployment testing."},{"label":"Wait for environment","kind":"record_response","task_id":"<project>/<n>","response":"Wait until the deployment environment is ready before approval."}],"other_placeholder":"Tell Polly what to do instead..."}`
+</waiting_on_user_handoff>

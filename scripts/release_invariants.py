@@ -228,7 +228,10 @@ def check_project_tasks(
                         f"{project_key}: blocked tasks but dashboard status is {status_label!r}",
                     )
                 )
-            if "action required" not in body_lower and "summary missing" not in body_lower:
+            if (
+                "to move this project forward" not in body_lower
+                and "summary missing" not in body_lower
+            ):
                 findings.append(
                     Finding(
                         "fail",

@@ -13,6 +13,7 @@ Contract:
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -409,6 +410,15 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
                 "inbox instead (fast-track plan_review)."
             ),
         ),
+        user_prompt_json: str = typer.Option(
+            "",
+            "--user-prompt-json",
+            help=(
+                "JSON contract for user-facing action cards. Shape: "
+                "{\"summary\": str, \"steps\": [str], \"question\": str, "
+                "\"actions\": [{\"label\": str, \"kind\": str, ...}]}."
+            ),
+        ),
         channel: str = typer.Option(
             "inbox", "--channel",
             help=(
@@ -481,6 +491,20 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
             if "channel:dev" not in label_list:
                 label_list.append("channel:dev")
         milestone_key = milestone.strip() or None
+        user_prompt_payload: dict[str, object] | None = None
+        if user_prompt_json.strip():
+            try:
+                parsed_prompt = json.loads(user_prompt_json)
+            except json.JSONDecodeError as exc:
+                typer.echo(f"Error: --user-prompt-json is not valid JSON: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            if not isinstance(parsed_prompt, dict):
+                typer.echo(
+                    "Error: --user-prompt-json must decode to an object.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            user_prompt_payload = parsed_prompt
 
         from pollypm.store import SQLAlchemyStore
         from pollypm.work.cli import _resolve_db_path
@@ -499,6 +523,8 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
             "milestone_key": milestone_key,
             "requester": requester_role,
         }
+        if user_prompt_payload is not None:
+            payload["user_prompt"] = user_prompt_payload
 
         try:
             message_id = store.enqueue_message(

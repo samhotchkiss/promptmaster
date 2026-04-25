@@ -8390,6 +8390,19 @@ def _dashboard_inbox(
         text = " ".join(part.strip() for part in text.splitlines() if part.strip())
         return _re.sub(r"^\([a-zA-Z]\)\s+", "", text)
 
+    def _labels_from_row(row: dict[str, object]) -> list[str]:
+        raw = row.get("labels") or []
+        if isinstance(raw, list):
+            return [str(label) for label in raw if str(label).strip()]
+        if isinstance(raw, str):
+            try:
+                loaded = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                loaded = []
+            if isinstance(loaded, list):
+                return [str(label) for label in loaded if str(label).strip()]
+        return []
+
     def _message_body(value: object | None) -> str:
         text = str(value or "")
         # Some PM handoff notes arrive through shell-escaped paths and
@@ -8576,6 +8589,232 @@ def _dashboard_inbox(
             return _trim(f"Next: {steps[0]}", limit=260)
         return ""
 
+    def _user_prompt_decision(
+        prompt: object, *, fallback_task_id: str | None = None,
+    ) -> dict[str, object] | None:
+        if not isinstance(prompt, dict):
+            return None
+        summary = _plain_text(prompt.get("summary"))
+        question = _plain_text(prompt.get("question"))
+        raw_steps = prompt.get("steps") or prompt.get("required_actions") or []
+        if not isinstance(raw_steps, list):
+            raw_steps = []
+        steps = [
+            _plain_text(step).rstrip(".") + "."
+            for step in raw_steps
+            if _plain_text(step)
+        ][:5]
+        raw_actions = prompt.get("actions") or []
+        if not isinstance(raw_actions, list):
+            raw_actions = []
+        actions: list[dict[str, object]] = []
+        for raw_action in raw_actions[:2]:
+            if not isinstance(raw_action, dict):
+                continue
+            label = _plain_text(raw_action.get("label"))
+            kind = _plain_text(raw_action.get("kind"))
+            if not label or not kind:
+                continue
+            action = dict(raw_action)
+            action["label"] = label
+            action["kind"] = kind
+            actions.append(action)
+        if not actions:
+            actions = [
+                {
+                    "label": "Open task",
+                    "kind": "open_task",
+                    "task_id": fallback_task_id,
+                }
+            ]
+        primary_action = actions[0]
+        secondary_action = actions[1] if len(actions) > 1 else {
+            "label": "Open task",
+            "kind": "open_task",
+            "task_id": fallback_task_id,
+        }
+        return {
+            "plain_prompt": summary or "Polly needs your input before this project can continue.",
+            "unblock_steps": steps,
+            "steps_heading": _plain_text(prompt.get("steps_heading")) or "What to do",
+            "decision_question": question or "Choose how Polly should proceed.",
+            "primary_label": str(primary_action.get("label") or "Open task"),
+            "secondary_label": str(secondary_action.get("label") or "Open task"),
+            "primary_action": primary_action,
+            "secondary_action": secondary_action,
+            "other_placeholder": _plain_text(prompt.get("other_placeholder"))
+            or "Tell Polly what to do instead...",
+        }
+
+    def _plan_review_decision(
+        labels: list[str], body: str, *, fallback_task_id: str | None = None,
+    ) -> dict[str, object] | None:
+        if "plan_review" not in labels:
+            return None
+        meta = _extract_plan_review_meta(labels)
+        plan_task_id = str(meta.get("plan_task_id") or fallback_task_id or "")
+        steps = [
+            "Open the plan review surface.",
+            "Read the plan and any open decisions.",
+            "Approve the plan when it is ready, or discuss changes with the PM.",
+        ]
+        return {
+            "plain_prompt": "A full project plan is ready for your review.",
+            "unblock_steps": steps[:5],
+            "steps_heading": "What to do",
+            "decision_question": (
+                "Review the plan and decide whether it is ready to become "
+                "implementation tasks."
+            ),
+            "primary_label": "Review plan",
+            "secondary_label": "Open task",
+            "primary_action": {
+                "label": "Review plan",
+                "kind": "review_plan",
+                "task_id": fallback_task_id,
+                "plan_task_id": plan_task_id,
+            },
+            "secondary_action": {
+                "label": "Open task",
+                "kind": "open_task",
+                "task_id": plan_task_id or fallback_task_id,
+            },
+            "other_placeholder": "Reply with plan feedback...",
+        }
+
+    def _deployment_decision(body: str, steps: list[str]) -> dict[str, object]:
+        lower = body.lower()
+        setup_steps: list[str] = []
+        if any(token in lower for token in ("fly.io", "fly ", "live fly")):
+            setup_steps.append("Set up the Fly.io app for this project.")
+        if any(token in lower for token in ("deploy token", "org cred", "credential", "creds", "fly-enabled", "access")):
+            setup_steps.append(
+                "Give Polly deployment access, including the Fly.io org/app credentials or deploy token."
+            )
+        if any(token in lower for token in ("postgres", "redis", "database")):
+            setup_steps.append("Provision the required Postgres and Redis services.")
+        if any(token in lower for token in ("pipeline", "fly deploy", "deploy can run", "live environment")):
+            setup_steps.append("Confirm the deployment pipeline can run against the live environment.")
+        if any(token in lower for token in ("rollback", "smoke", "/v1/ping", "walkthrough", "clean laptop")):
+            setup_steps.append("Make the live app reachable so Polly can run the smoke test and rollback walkthrough.")
+        for step in steps:
+            clean = _plain_text(step).rstrip(".")
+            if not clean:
+                continue
+            if not clean.lower().startswith(
+                (
+                    "add ",
+                    "create ",
+                    "grant ",
+                    "provision ",
+                    "set up ",
+                    "setup ",
+                    "provide ",
+                    "enable ",
+                    "configure ",
+                )
+            ):
+                continue
+            normalized = clean.casefold()
+            if any(normalized == existing.rstrip(".").casefold() for existing in setup_steps):
+                continue
+            setup_steps.append(clean + ".")
+        deduped_steps: list[str] = []
+        seen: set[str] = set()
+        for step in setup_steps:
+            key = step.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped_steps.append(step)
+        if not deduped_steps:
+            deduped_steps = [
+                "Set up the deployment environment Polly needs for end-to-end testing."
+            ]
+        return {
+            "plain_prompt": (
+                "The first batch of code is done, but Polly cannot fully test it "
+                "until the deployment environment exists."
+            ),
+            "unblock_steps": deduped_steps[:5],
+            "steps_heading": "What you need to set up",
+            "decision_question": (
+                "Do you want to approve the code work now and make deployment "
+                "testing a follow-up, or wait until the environment is set?"
+            ),
+            "primary_label": "Approve it anyway",
+            "secondary_label": "Wait until environment is set",
+            "primary_response": (
+                "Approve it anyway. Treat the code work as accepted now and create "
+                "a follow-up task for deployment, smoke testing, and rollback once "
+                "the environment is ready."
+            ),
+            "secondary_response": (
+                "Wait until the environment is set. Do not approve this work until "
+                "Polly can deploy and test it end to end."
+            ),
+            "other_placeholder": "Tell Polly what to do instead...",
+        }
+
+    def _plain_decision_from_body(
+        subject: str, body: str, steps: list[str],
+    ) -> dict[str, object]:
+        haystack = f"{subject}\n{body}".lower()
+        if any(token in haystack for token in ("reachability", "walkthrough")):
+            return {
+                "plain_prompt": (
+                    "The reachability work is ready, but Polly cannot walk through "
+                    "it end to end until the backend deployment exists."
+                ),
+                "unblock_steps": [
+                    "Make the backend deployment available to Polly.",
+                    "Give Polly any access needed to run the walkthrough.",
+                ],
+                "steps_heading": "What you need to set up",
+                "decision_question": (
+                    "Approve the work now with a follow-up walkthrough, or wait "
+                    "until the live environment is available?"
+                ),
+                "primary_label": "Approve it anyway",
+                "secondary_label": "Wait for live environment",
+                "primary_response": (
+                    "Approve it anyway. Accept the current work and create a "
+                    "follow-up task for the live walkthrough."
+                ),
+                "secondary_response": (
+                    "Wait for the live environment. Keep this work pending until "
+                    "Polly can complete the walkthrough."
+                ),
+                "other_placeholder": "Tell Polly what to do instead...",
+            }
+        if any(
+            token in haystack
+            for token in (
+                "fly.io",
+                "fly-enabled",
+                "deploy token",
+                "postgres",
+                "redis",
+                "deployment",
+                "deploy pipeline",
+                "rollback",
+                "/v1/ping",
+            )
+        ):
+            return _deployment_decision(body, steps)
+        prompt = _decision_prompt_from_body(subject, body, steps)
+        return {
+            "plain_prompt": prompt or "Polly needs your decision before this project can continue.",
+            "unblock_steps": steps[:4],
+            "steps_heading": "What to do",
+            "decision_question": "Choose how Polly should proceed.",
+            "primary_label": "Approve it anyway",
+            "secondary_label": "Wait",
+            "primary_response": "Approve it anyway and keep the project moving.",
+            "secondary_response": "Wait. Do not approve this yet.",
+            "other_placeholder": "Tell Polly what to do instead...",
+        }
+
     known_projects = set(getattr(config, "projects", {}).keys())
     items: list[dict] = []
     try:
@@ -8642,6 +8881,7 @@ def _dashboard_inbox(
                 payload = row.get("payload") or {}
                 if not isinstance(payload, dict):
                     payload = {}
+                labels = _labels_from_row(row)
                 is_blocker_summary = (
                     payload.get("event_type") == "project_blocker_summary"
                     or row.get("subject") == "project.blocker_summary"
@@ -8660,6 +8900,33 @@ def _dashboard_inbox(
                     owner = str(payload.get("owner") or "").strip().lower()
                     reason = str(payload.get("reason") or "").strip()
                     item_id = row.get("id")
+                    affected_tasks = payload.get("affected_tasks") or []
+                    if not isinstance(affected_tasks, list):
+                        affected_tasks = []
+                    primary_ref = (
+                        payload.get("task_id")
+                        or (affected_tasks[0] if affected_tasks else None)
+                        or f"blocker-summary:{item_id}"
+                    )
+                    clean_required_actions = [
+                        _plain_text(step)
+                        for step in required_actions
+                        if _plain_text(step)
+                    ][:4]
+                    blocker_body = "\n".join([reason, *clean_required_actions])
+                    decision = _plain_decision_from_body(
+                        "project blocker", blocker_body, clean_required_actions,
+                    )
+                    user_prompt_decision = _user_prompt_decision(
+                        payload.get("user_prompt"),
+                        fallback_task_id=(
+                            primary_ref
+                            if _PROJECT_TASK_REF_RE.fullmatch(str(primary_ref))
+                            else None
+                        ),
+                    )
+                    if user_prompt_decision is not None:
+                        decision = user_prompt_decision
                     items.append(
                         {
                             "task_id": f"blocker-summary:{item_id}",
@@ -8668,28 +8935,21 @@ def _dashboard_inbox(
                             "sort_value": _sort_value(updated_at),
                             "triage_label": "project blocker",
                             "triage_rank": 0,
-                            "needs_action": owner in {"user", "sam", "human"},
-                            "source": "blocker_summary",
+                        "needs_action": owner in {"user", "sam", "human"},
+                        "source": "blocker_summary",
+                        "has_user_prompt": user_prompt_decision is not None,
                         "summary": _trim(reason) if reason else "",
-                        "steps": [
-                            _plain_text(step)
-                            for step in required_actions
-                            if _plain_text(step)
-                        ][:4],
-                        "next_action": _trim(
-                            (
-                                "Complete: "
-                                + "; ".join(
-                                    _plain_text(step)
-                                    for step in required_actions
-                                    if _plain_text(step)
-                                )
-                            ),
-                            limit=260,
-                        ) if required_actions else "",
-                        "primary_ref": payload.get("task_id")
-                        or f"blocker-summary:{item_id}",
-                    }
+                            "steps": clean_required_actions,
+                            "next_action": _trim(
+                                (
+                                    "Complete: "
+                                    + "; ".join(clean_required_actions)
+                                ),
+                                limit=260,
+                            ) if clean_required_actions else "",
+                            "primary_ref": primary_ref,
+                            **decision,
+                        }
                     )
                     continue
                 entry = annotate_inbox_entry(
@@ -8713,6 +8973,35 @@ def _dashboard_inbox(
                     )
                     if match.group("project") == project_key
                 ]
+                plan_meta = _extract_plan_review_meta(labels)
+                plan_task_id = str(plan_meta.get("plan_task_id") or "")
+                if (
+                    plan_task_id
+                    and _PROJECT_TASK_REF_RE.fullmatch(plan_task_id)
+                    and plan_task_id not in task_refs
+                ):
+                    task_refs.insert(0, plan_task_id)
+                primary_ref = task_refs[0] if task_refs else payload.get("task_id")
+                decision = (
+                    _user_prompt_decision(
+                        payload.get("user_prompt"),
+                        fallback_task_id=(
+                            str(primary_ref)
+                            if _PROJECT_TASK_REF_RE.fullmatch(str(primary_ref or ""))
+                            else None
+                        ),
+                    )
+                    or _plan_review_decision(
+                        labels,
+                        body,
+                        fallback_task_id=(
+                            str(payload.get("task_id") or "")
+                            if payload.get("task_id")
+                            else None
+                        ),
+                    )
+                    or _plain_decision_from_body(subject, body, steps)
+                )
                 items.append(
                     {
                         "task_id": entry.task_id,
@@ -8723,12 +9012,15 @@ def _dashboard_inbox(
                         "triage_rank": int(getattr(entry, "triage_rank", 2) or 2),
                         "needs_action": bool(getattr(entry, "needs_action", False)),
                         "source": "message",
+                        "has_user_prompt": payload.get("user_prompt") is not None,
+                        "is_plan_review": "plan_review" in labels,
                         "summary": _summary_from_body(body),
                         "steps": steps,
                         "next_action": _decision_prompt_from_body(
                             subject, body, steps,
                         ),
-                        "primary_ref": task_refs[0] if task_refs else None,
+                        "primary_ref": primary_ref,
+                        **decision,
                     }
                 )
         finally:
@@ -8978,6 +9270,22 @@ class PollyProjectDashboardApp(App[None]):
     #proj-inbox-section.-hover {
         border: round #5b8aff;
     }
+    .proj-section.-hover {
+        border: round #5b8aff;
+    }
+    .proj-action-controls {
+        height: auto;
+        margin-top: 1;
+    }
+    .proj-action-controls Button {
+        margin-right: 1;
+    }
+    .proj-action-other {
+        width: 1fr;
+    }
+    .proj-action-controls.-hidden {
+        display: none;
+    }
     #proj-body {
         height: 1fr;
         padding: 1 0 0 0;
@@ -9118,11 +9426,45 @@ class PollyProjectDashboardApp(App[None]):
         self.inbox_body = Static(
             "", classes="proj-section-body", markup=True,
         )
+        self.action_control_rows: list[Horizontal] = []
+        self.action_primary_buttons: list[Button] = []
+        self.action_secondary_buttons: list[Button] = []
+        self.action_other_inputs: list[Input] = []
+        for idx in range(2):
+            primary = Button(
+                "Approve it anyway",
+                id=f"proj-action-{idx}-primary",
+                variant="success",
+                classes="proj-action-control",
+            )
+            secondary = Button(
+                "Wait until environment is set",
+                id=f"proj-action-{idx}-secondary",
+                variant="warning",
+                classes="proj-action-control",
+            )
+            other = Input(
+                placeholder="Tell Polly what to do instead...",
+                id=f"proj-action-{idx}-other",
+                classes="proj-action-other",
+            )
+            row = Horizontal(
+                primary,
+                secondary,
+                other,
+                id=f"proj-action-{idx}-row",
+                classes="proj-action-controls -hidden",
+            )
+            self.action_control_rows.append(row)
+            self.action_primary_buttons.append(primary)
+            self.action_secondary_buttons.append(secondary)
+            self.action_other_inputs.append(other)
         self.hint = Static(
             self._DEFAULT_HINT, id="proj-hint", markup=True,
         )
         self.data: ProjectDashboardData | None = None
         self._action_click_task_ids: list[str] = []
+        self._action_control_task_ids: list[str | None] = [None, None]
         # When True, the plan section takes over the whole body — other
         # sections are hidden via the ``proj-plan-focus`` screen class.
         self._plan_view_mode: bool = False
@@ -9140,6 +9482,8 @@ class PollyProjectDashboardApp(App[None]):
                 with Vertical(classes="proj-section", id="proj-inbox-section"):
                     yield self.inbox_title
                     yield self.inbox_body
+                    for row in self.action_control_rows:
+                        yield row
                 with Vertical(classes="proj-section", id="proj-now-section"):
                     yield self.now_title
                     yield self.now_body
@@ -9221,6 +9565,7 @@ class PollyProjectDashboardApp(App[None]):
             "[b]Action Needed[/b]" if data.action_items else "[b]Inbox[/b]"
         )
         self.inbox_body.update(self._render_inbox_body(data))
+        self._sync_action_controls(data)
 
         self.hint.update(self._DEFAULT_HINT)
 
@@ -9228,20 +9573,58 @@ class PollyProjectDashboardApp(App[None]):
         review_count = int(data.task_counts.get("review", 0))
         blocker_count = int(data.task_counts.get("blocked", 0))
         on_hold_count = int(data.task_counts.get("on_hold", 0))
-        summary = render_project_action_bar(
+        counts = render_project_action_bar(
             review_count=review_count,
             alert_count=data.alert_count,
             inbox_count=data.inbox_count,
             blocker_count=blocker_count,
             on_hold_count=on_hold_count,
         )
+        summary = self._render_project_state_banner(data, counts)
         self.action_bar.remove_class("-attention")
         self.action_bar.remove_class("-critical")
-        if blocker_count or data.alert_count:
+        if data.alert_count:
             self.action_bar.add_class("-critical")
-        elif review_count or data.inbox_count or on_hold_count:
+        elif data.action_items or review_count or data.inbox_count or on_hold_count:
             self.action_bar.add_class("-attention")
         self.action_bar.update(f"[b]{_escape(summary)}[/b]")
+
+    def _render_project_state_banner(
+        self, data: ProjectDashboardData, counts: str,
+    ) -> str:
+        count_suffix = f" · {counts[2:]}" if counts.startswith("▸ ") else f" · {counts}"
+        if data.action_items:
+            item = data.action_items[0]
+            prompt = str(
+                item.get("plain_prompt")
+                or item.get("decision_question")
+                or "This project needs your input."
+            ).strip()
+            return f"Waiting on you: {prompt}{count_suffix}"
+        if data.alert_count:
+            return f"Alert: Polly needs to inspect a project issue{count_suffix}"
+        if data.active_worker is not None:
+            worker = data.active_worker
+            role = str(worker.get("role") or "worker")
+            session = str(worker.get("session_name") or "a session")
+            return f"Moving now: {session} ({role}) is active{count_suffix}"
+        if blocker_count := int(data.task_counts.get("blocked", 0)):
+            label = "task is" if blocker_count == 1 else "tasks are"
+            return (
+                f"Waiting on dependencies: {blocker_count} {label} blocked, "
+                f"but no user action is currently requested{count_suffix}"
+            )
+        if review_count := int(data.task_counts.get("review", 0)):
+            label = "task" if review_count == 1 else "tasks"
+            return f"Waiting for review: {review_count} {label} ready for approval{count_suffix}"
+        if on_hold_count := int(data.task_counts.get("on_hold", 0)):
+            label = "task is" if on_hold_count == 1 else "tasks are"
+            return f"Paused: {on_hold_count} {label} on hold{count_suffix}"
+        queued_count = int(data.task_counts.get("queued", 0))
+        if queued_count:
+            label = "task" if queued_count == 1 else "tasks"
+            return f"Queued: {queued_count} {label} waiting for a worker{count_suffix}"
+        return "Clear: no active work, alerts, approvals, or user actions"
 
     # ------------------------------------------------------------------
     # Section renderers — all return Rich-markup strings, all handle
@@ -9273,7 +9656,38 @@ class PollyProjectDashboardApp(App[None]):
                 )
                 lines.append(f"  {num_part}{title}{node_part}")
             return "\n".join(lines)
-        return "[dim]Idle. No tasks in flight.[/dim]"
+        if data.action_items:
+            item = data.action_items[0]
+            prompt = _escape(
+                item.get("plain_prompt")
+                or item.get("decision_question")
+                or "This project is waiting for your response."
+            )
+            return (
+                "[#f0c45a]\u25c6[/#f0c45a] Waiting for your response.\n"
+                f"  {prompt}"
+            )
+        queued = data.task_buckets.get("queued", [])
+        if queued:
+            first = queued[0]
+            num = first.get("task_number")
+            num_part = f"#{num} " if num is not None else ""
+            title = _escape(first.get("title") or "")
+            return (
+                "[dim]No worker active right now.[/dim]\n"
+                f"  Next queued task: {num_part}{title}"
+            )
+        if data.task_counts.get("blocked", 0):
+            return (
+                "[dim]No worker active right now.[/dim]\n"
+                "  Work is waiting on upstream dependencies. No user action is requested here."
+            )
+        if data.task_counts.get("review", 0):
+            return (
+                "[dim]No worker active right now.[/dim]\n"
+                "  Work is waiting for review/approval."
+            )
+        return "[dim]Idle. No tasks in flight and no user action needed.[/dim]"
 
     def _render_pipeline_body(self, data: ProjectDashboardData) -> str:
         if not data.exists_on_disk:
@@ -9411,36 +9825,39 @@ class PollyProjectDashboardApp(App[None]):
             if item.get("task_id")
         }
         if data.action_items:
-            lines.append("[#f85149][b]Action Required: To move this project forward[/b][/]")
+            lines.append("[#f85149][b]To move this project forward[/b][/]")
             for item in data.action_items[:2]:
                 title = _escape(item.get("title") or "")
-                next_action = _escape(item.get("next_action") or "")
-                if next_action:
-                    lines.append(
-                        f"  [#f0c45a]\u25c6[/#f0c45a] {next_action}"
-                    )
-                    lines.append(f"    [dim]{title}[/dim]")
-                else:
-                    lines.append(
-                        f"  [#f0c45a]\u25c6[/#f0c45a] [b]{title}[/b]"
-                    )
-            lines.append("")
-            lines.append("[dim]Details[/dim]")
-            for item in data.action_items[:2]:
-                title = _escape(item.get("title") or "")
-                age = _format_relative_age(item.get("updated_at") or "")
-                age_part = f"  [dim]{_escape(age)}[/dim]" if age else ""
-                lines.append(
-                    f"  [#f0c45a]\u25c6[/#f0c45a] [b]{title}[/b]{age_part}"
+                prompt = _escape(
+                    item.get("plain_prompt")
+                    or item.get("next_action")
+                    or "Polly needs your decision before this project can continue."
                 )
-                summary = _escape(item.get("summary") or "")
-                if summary:
-                    lines.append(f"    {summary}")
-                for idx, step in enumerate(item.get("steps") or [], start=1):
-                    lines.append(
-                        f"    [dim]{idx}.[/dim] {_escape(str(step))}"
-                    )
-                lines.append("")
+                lines.append(f"  [#f0c45a]\u25c6[/#f0c45a] {prompt}")
+                unblock_steps = [
+                    str(step)
+                    for step in (item.get("unblock_steps") or item.get("steps") or [])
+                    if str(step).strip()
+                ]
+                if unblock_steps:
+                    heading = _escape(item.get("steps_heading") or "What to do")
+                    lines.append(f"    [b]{heading}[/b]")
+                    for idx, step in enumerate(unblock_steps[:5], start=1):
+                        lines.append(f"    [dim]{idx}.[/dim] {_escape(step)}")
+                question = _escape(
+                    item.get("decision_question")
+                    or "Choose how Polly should proceed."
+                )
+                lines.append(f"    [b]Decision[/b] {question}")
+                target_copy = (
+                    "the source task"
+                    if _PROJECT_TASK_REF_RE.fullmatch(str(item.get("primary_ref") or ""))
+                    else "the inbox thread"
+                )
+                lines.append(
+                    f"    [dim]Click this message to open {target_copy}.[/dim]"
+                )
+            lines.append("")
         elif blocked_total:
             lines.append("[#f0c45a][b]Blocked, but summary missing[/b][/]")
             lines.append(
@@ -9510,6 +9927,127 @@ class PollyProjectDashboardApp(App[None]):
             lines.append("")
             lines.append("[dim]Press [b]i[/b] to jump to the inbox[/dim]")
         return "\n".join(lines)
+
+    def _sync_action_controls(self, data: ProjectDashboardData) -> None:
+        """Show decision controls for the visible Action Needed cards."""
+        for idx, row in enumerate(self.action_control_rows):
+            item = data.action_items[idx] if idx < len(data.action_items) else None
+            if item is None:
+                row.add_class("-hidden")
+                self._action_control_task_ids[idx] = None
+                continue
+            row.remove_class("-hidden")
+            task_id = str(item.get("primary_ref") or "")
+            self._action_control_task_ids[idx] = (
+                task_id if _PROJECT_TASK_REF_RE.fullmatch(task_id) else None
+            )
+            self.action_primary_buttons[idx].label = str(
+                item.get("primary_label") or "Approve it anyway"
+            )
+            self.action_secondary_buttons[idx].label = str(
+                item.get("secondary_label") or "Wait"
+            )
+            self.action_other_inputs[idx].placeholder = str(
+                item.get("other_placeholder") or "Tell Polly what to do instead..."
+            )
+
+    def _action_item_at(self, index: int) -> dict | None:
+        data = self.data
+        if data is None or index < 0 or index >= len(data.action_items):
+            return None
+        return data.action_items[index]
+
+    def _record_action_response(
+        self, index: int, response: str, *, approve_if_possible: bool = False,
+    ) -> None:
+        item = self._action_item_at(index)
+        if item is None:
+            self.notify("That action is no longer available.", severity="warning")
+            return
+        task_id = str(item.get("primary_ref") or "")
+        if not _PROJECT_TASK_REF_RE.fullmatch(task_id):
+            self.notify(
+                "Saved decision locally, but this item is not linked to a task.",
+                severity="warning",
+            )
+            return
+        data = self.data
+        if data is None or data.project_path is None:
+            self.notify("Could not open project database.", severity="error")
+            return
+        try:
+            from pollypm.work.sqlite_service import SQLiteWorkService
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Could not load task service: {exc}", severity="error")
+            return
+        db_path = data.project_path / ".pollypm" / "state.db"
+        try:
+            with SQLiteWorkService(
+                db_path=db_path, project_path=data.project_path,
+            ) as svc:
+                svc.add_reply(task_id, response, actor="user")
+                if approve_if_possible:
+                    task = svc.get(task_id)
+                    if task.work_status.value == "on_hold":
+                        task = svc.resume(task_id, "user")
+                    if task.work_status.value == "review":
+                        approved = svc.approve(task_id, "user", response)
+                        notify_task_approved(approved, notify=self.notify)
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Could not record decision: {exc}", severity="error")
+            return
+        self.notify("Decision recorded.", severity="information")
+        self._refresh()
+
+    def _perform_dashboard_action(self, index: int, slot: str) -> None:
+        item = self._action_item_at(index)
+        if item is None:
+            self.notify("That action is no longer available.", severity="warning")
+            return
+        action = item.get(f"{slot}_action")
+        if not isinstance(action, dict):
+            response_key = f"{slot}_response"
+            response = str(item.get(response_key) or "")
+            self._record_action_response(
+                index,
+                response or ("Approve it anyway." if slot == "primary" else "Wait."),
+                approve_if_possible=(slot == "primary"),
+            )
+            return
+        kind = str(action.get("kind") or "").strip()
+        if kind == "review_plan":
+            self.action_jump_inbox()
+            return
+        if kind == "open_task":
+            task_id = str(action.get("task_id") or item.get("primary_ref") or "")
+            if _PROJECT_TASK_REF_RE.fullmatch(task_id):
+                self._route_to_task(task_id)
+                return
+            self.action_jump_inbox()
+            return
+        if kind == "open_inbox":
+            self.action_jump_inbox()
+            return
+        if kind == "discuss_pm":
+            self.action_chat_pm()
+            return
+        if kind == "approve_task":
+            response = str(
+                action.get("response")
+                or item.get(f"{slot}_response")
+                or "Approved from project dashboard."
+            )
+            self._record_action_response(
+                index, response, approve_if_possible=True,
+            )
+            return
+        response = str(
+            action.get("response")
+            or item.get(f"{slot}_response")
+            or action.get("label")
+            or ""
+        )
+        self._record_action_response(index, response)
 
     # ------------------------------------------------------------------
     # Actions — keybindings
@@ -9616,6 +10154,24 @@ class PollyProjectDashboardApp(App[None]):
             f"project:{match.group('project')}:issues:task:{match.group('number')}"
         )
 
+    def _route_to_tasks(self) -> None:
+        router = CockpitRouter(self.config_path)
+        router.route_selected(f"project:{self.project_key}:issues")
+
+    def _route_to_current_activity(self) -> None:
+        data = self.data
+        if data is None:
+            self._route_to_tasks()
+            return
+        in_flight = data.task_buckets.get("in_progress", [])
+        if in_flight:
+            first = in_flight[0]
+            task_number = first.get("task_number")
+            if task_number is not None:
+                self._route_to_task(f"{self.project_key}/{task_number}")
+                return
+        self._route_to_tasks()
+
     def _action_task_for_click(self, event: events.Click) -> str | None:
         ids = self._action_click_task_ids
         if not ids:
@@ -9643,6 +10199,36 @@ class PollyProjectDashboardApp(App[None]):
     # nothing, so the user had to discover the ``i`` keybinding. Bind
     # clicks on either surface to the same action that keyboard ``i``
     # triggers so mouse users land where they'd expect.
+    @on(Button.Pressed, ".proj-action-control")
+    def on_action_control_pressed(self, event: Button.Pressed) -> None:
+        control_id = str(event.button.id or "")
+        match = _re.fullmatch(r"proj-action-(\d+)-(primary|secondary)", control_id)
+        if match is None:
+            return
+        event.stop()
+        index = int(match.group(1))
+        action = match.group(2)
+        item = self._action_item_at(index)
+        if item is None:
+            return
+        if action == "primary":
+            self._perform_dashboard_action(index, "primary")
+            return
+        self._perform_dashboard_action(index, "secondary")
+
+    @on(Input.Submitted, ".proj-action-other")
+    def on_action_other_submitted(self, event: Input.Submitted) -> None:
+        input_id = str(event.input.id or "")
+        match = _re.fullmatch(r"proj-action-(\d+)-other", input_id)
+        if match is None:
+            return
+        event.stop()
+        response = (event.value or "").strip()
+        if not response:
+            return
+        self._record_action_response(int(match.group(1)), response)
+        event.input.value = ""
+
     @on(events.Click, "#proj-action-bar")
     def on_action_bar_click(self, _event: events.Click) -> None:
         self.action_jump_inbox()
@@ -9655,6 +10241,26 @@ class PollyProjectDashboardApp(App[None]):
             self._route_to_task(task_id)
             return
         self.action_jump_inbox()
+
+    @on(events.Click, "#proj-now-section")
+    def on_now_section_click(self, event: events.Click) -> None:
+        event.stop()
+        self._route_to_current_activity()
+
+    @on(events.Click, "#proj-pipeline-section")
+    def on_pipeline_section_click(self, event: events.Click) -> None:
+        event.stop()
+        self._route_to_tasks()
+
+    @on(events.Click, "#proj-plan-section")
+    def on_plan_section_click(self, event: events.Click) -> None:
+        event.stop()
+        self.action_open_plan()
+
+    @on(events.Click, "#proj-activity-section")
+    def on_activity_section_click(self, event: events.Click) -> None:
+        event.stop()
+        self.action_jump_activity()
 
     @on(events.Enter, "#proj-action-bar")
     def on_action_bar_enter(self, _event: events.Enter) -> None:
@@ -9675,6 +10281,26 @@ class PollyProjectDashboardApp(App[None]):
     def on_inbox_section_leave(self, _event: events.Leave) -> None:
         try:
             self.query_one("#proj-inbox-section").remove_class("-hover")
+        except Exception:  # noqa: BLE001
+            pass
+
+    @on(
+        events.Enter,
+        "#proj-now-section,#proj-pipeline-section,#proj-plan-section,#proj-activity-section",
+    )
+    def on_clickable_section_enter(self, event: events.Enter) -> None:
+        try:
+            event.control.add_class("-hover")
+        except Exception:  # noqa: BLE001
+            pass
+
+    @on(
+        events.Leave,
+        "#proj-now-section,#proj-pipeline-section,#proj-plan-section,#proj-activity-section",
+    )
+    def on_clickable_section_leave(self, event: events.Leave) -> None:
+        try:
+            event.control.remove_class("-hover")
         except Exception:  # noqa: BLE001
             pass
 
