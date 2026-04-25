@@ -355,6 +355,28 @@ def test_list_row_renders_title_on_line1_and_project_age_on_line2(
     _run(body())
 
 
+def test_completion_title_wins_over_body_review_keyword() -> None:
+    """Completion announcements like ``[Action] X CLI E2E complete``
+    must triage as info / completed-update even when the body
+    mentions 'approved by user' (the most common ship-summary
+    phrasing). Without this, the body's ``approve``/``review``
+    keyword wins the score-tie via kind-priority and the row gets
+    bucketed into the action lens — polluting the operator's
+    ``action needed`` view for days with stale ship reports."""
+    item = _triaged_entry(
+        title="[Action] Calculator CLI E2E complete",
+        body=(
+            "**calc_demo shipped** — 2 tasks done, 65 LOC, 7/7 pytest "
+            "green, zero sprawl.\n\nPipeline:\n- Plan (calc_demo/1) → "
+            "approved by user\n- T1 compute → 25 LOC, approved"
+        ),
+    )
+
+    assert item.triage_bucket == "info"
+    assert item.triage_rank == 2
+    assert item.triage_label == "completed update"
+
+
 def test_task_inbox_triage_reflects_work_status() -> None:
     """Task-source inbox items used to triage as the generic
     'task assigned' regardless of state, so a plan task waiting

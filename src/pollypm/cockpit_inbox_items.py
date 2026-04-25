@@ -174,6 +174,24 @@ def _triage_for_entry(
         if rule["pattern"].search(text)
     ]
     if matches:
+        # When the title already announces a completion ("X shipped",
+        # "Y complete", "Z done"), prefer the completion bucket even if
+        # the body mentions ``approve`` or ``review`` — the title is the
+        # user-visible summary and is a much stronger signal than a
+        # mention deep in the body. Without this, "[Action] Calculator
+        # CLI E2E complete" with body "approved by user" was bucketed as
+        # ``review needed`` and pollutes the action lens for days.
+        if any(
+            rule["kind"] == "completion" and rule["pattern"].search(title)
+            for rule in matches
+        ):
+            for rule in matches:
+                if rule["kind"] == "completion":
+                    return (
+                        str(rule["bucket"]),
+                        int(rule["rank"]),
+                        str(rule["label"]),
+                    )
         winner = min(
             matches,
             key=lambda rule: (
