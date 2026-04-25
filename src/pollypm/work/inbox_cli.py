@@ -480,7 +480,7 @@ def inbox_archive(
 ) -> None:
     """Archive an inbox task or message (mirrors the cockpit archive action).
 
-    Three modes:
+    Four modes:
 
     - ``pm inbox archive demo/1`` — archive a single work-service task
       (the original behavior).
