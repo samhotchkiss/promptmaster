@@ -1361,7 +1361,8 @@ def test_fix_dry_run_lists_manual_issues(monkeypatch: pytest.MonkeyPatch) -> Non
     result = runner.invoke(cli_mod.app, ["doctor", "--fix-dry-run"])
     # Error-severity failures flip exit to 1.
     assert result.exit_code == 1
-    assert "1 issue(s) require manual intervention" in result.stdout
+    # Cycle 56: pluralise the manual-intervention summary per count.
+    assert "1 issue requires manual intervention" in result.stdout
     assert "needs-hands" in result.stdout
 
 
@@ -1401,12 +1402,48 @@ def test_fix_summary_footer_counts_applied_and_remaining() -> None:
         ("plan-gate", False, "write failed: permission denied"),
     ]
     summary = doctor.render_fix_summary(fix_results, manual)
-    assert "Applied 2 fix(es)" in summary
+    # Cycle 56: pluralise fix/issue per count instead of fix(es)/issue(s).
+    assert "Applied 2 fixes" in summary
     assert "worktrees" in summary and "logs" in summary
-    assert "1 fix(es) failed" in summary
+    assert "1 fix failed" in summary
     assert "plan-gate" in summary
-    assert "2 issue(s) remain" in summary
+    assert "2 issues remain" in summary
     assert "needs-hands" in summary
+    assert "(es)" not in summary
+    assert "(s)" not in summary
+
+
+def test_fix_summary_footer_singular_pluralisation() -> None:
+    """At count=1 the footer must read ``1 fix`` / ``1 issue remains``."""
+    one_applied = doctor.render_fix_summary(
+        [("worktrees", True, "pruned 3")],
+        [("needs-hands", "edit config")],
+    )
+    assert "Applied 1 fix:" in one_applied
+    assert "1 issue remains" in one_applied
+    assert "(es)" not in one_applied
+    assert "(s)" not in one_applied
+
+
+def test_fix_dry_run_pluralisation() -> None:
+    """``--fix-dry-run`` output drops fix(es)/issue(s) parentheticals."""
+    one = doctor.render_fix_dry_run(
+        [("worktrees", "would prune merged worktrees")],
+        [("needs-hands", "edit config manually")],
+    )
+    assert "Would apply 1 fix:" in one
+    assert "1 issue requires manual intervention" in one
+    assert "(es)" not in one
+    assert "(s)" not in one
+
+    many = doctor.render_fix_dry_run(
+        [("a", "intent-a"), ("b", "intent-b"), ("c", "intent-c")],
+        [("m1", "do x"), ("m2", "do y")],
+    )
+    assert "Would apply 3 fixes:" in many
+    assert "2 issues require manual intervention" in many
+    assert "(es)" not in many
+    assert "(s)" not in many
 
 
 def test_fix_cli_prints_summary_footer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1436,9 +1473,10 @@ def test_fix_cli_prints_summary_footer(monkeypatch: pytest.MonkeyPatch) -> None:
     result = runner.invoke(cli_mod.app, ["doctor", "--fix"])
     assert result.exit_code == 0
     # Summary line appears; it names the applied fix and the remaining item.
-    assert "Applied 1 fix(es)" in result.stdout
+    # Cycle 56: pluralise per count instead of fix(es)/issue(s).
+    assert "Applied 1 fix:" in result.stdout
     assert "auto" in result.stdout
-    assert "1 issue(s) remain" in result.stdout
+    assert "1 issue remains" in result.stdout
     assert "byhand" in result.stdout
 
 

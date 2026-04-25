@@ -3215,6 +3215,14 @@ def manual_fixes(report: DoctorReport) -> list[tuple[str, str]]:
     return manual
 
 
+def _fix_word(n: int) -> str:
+    return "fix" if n == 1 else "fixes"
+
+
+def _issue_word(n: int) -> str:
+    return "issue" if n == 1 else "issues"
+
+
 def render_fix_summary(
     fix_results: list[tuple[str, bool, str]],
     manual: list[tuple[str, str]],
@@ -3222,24 +3230,33 @@ def render_fix_summary(
     """Render the post-``--fix`` summary footer.
 
     Format:
-        Applied N fix(es): [name, name, ...]. K issue(s) remain (require manual intervention).
+        Applied N fixes: [name, name, ...]. K issues remain (require manual intervention).
 
     When every fix succeeds and nothing manual is pending, the footer
-    collapses to a single "Applied N fix(es)" line.
+    collapses to a single ``Applied N fix(es)`` line, with ``fix`` /
+    ``fixes`` picked per count.
     """
     applied = [name for name, ok, _ in fix_results if ok]
     failed = [name for name, ok, _ in fix_results if not ok]
     parts: list[str] = []
     if applied:
-        parts.append(f"Applied {len(applied)} fix(es): [{', '.join(applied)}]")
+        parts.append(
+            f"Applied {len(applied)} {_fix_word(len(applied))}: "
+            f"[{', '.join(applied)}]"
+        )
     else:
         parts.append("Applied 0 fixes")
     if failed:
-        parts.append(f"{len(failed)} fix(es) failed: [{', '.join(failed)}]")
+        parts.append(
+            f"{len(failed)} {_fix_word(len(failed))} failed: "
+            f"[{', '.join(failed)}]"
+        )
     if manual:
         names = [n for n, _ in manual]
+        verb = "remains" if len(manual) == 1 else "remain"
         parts.append(
-            f"{len(manual)} issue(s) remain (require manual intervention): [{', '.join(names)}]"
+            f"{len(manual)} {_issue_word(len(manual))} {verb} "
+            f"(require manual intervention): [{', '.join(names)}]"
         )
     return ". ".join(parts) + "."
 
@@ -3252,13 +3269,15 @@ def render_fix_dry_run(planned: list[tuple[str, str]], manual: list[tuple[str, s
     scripts can diff the two outputs.
     """
     lines: list[str] = []
-    lines.append(f"Would apply {len(planned)} fix(es):")
+    lines.append(f"Would apply {len(planned)} {_fix_word(len(planned))}:")
     for name, intention in planned:
         lines.append(f"  [would fix] {name}: {intention}")
     if manual:
         lines.append("")
+        verb = "requires" if len(manual) == 1 else "require"
         lines.append(
-            f"{len(manual)} issue(s) require manual intervention (not auto-fixable):"
+            f"{len(manual)} {_issue_word(len(manual))} {verb} "
+            f"manual intervention (not auto-fixable):"
         )
         for name, hint in manual:
             first = (hint or "").splitlines()[0] if hint else ""
