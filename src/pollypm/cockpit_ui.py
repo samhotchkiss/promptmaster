@@ -498,7 +498,26 @@ class RailItem(ListItem):
         label = self.item.label
         max_label = 22  # 30 col pane - 2 prefix - 2 indicator - 2 padding
         if len(label) > max_label:
-            label = label[: max_label - 1] + "\u2026"
+            # Project rows decorate the label as "<emoji>? <name> <spark>".
+            # Truncating from the end clobbers the activity sparkline \u2014
+            # the highest-signal part. Detect the trailing 10-char spark
+            # and truncate the project name instead so the spark
+            # survives narrow rail widths.
+            from pollypm.cockpit_rail import _strip_trailing_spark
+            head, spark = _strip_trailing_spark(label)
+            if spark:
+                reserved = len(spark) + 1  # spark + separator space
+                head_budget = max_label - reserved - 1  # ellipsis
+                if head_budget > 3:
+                    label = (
+                        head[:head_budget].rstrip()
+                        + "\u2026 "
+                        + spark
+                    )
+                else:
+                    label = label[: max_label - 1] + "\u2026"
+            else:
+                label = label[: max_label - 1] + "\u2026"
         text.append(label)
         # Show alert reason as dim subtitle for items with alerts.
         # Wrap onto up to 3 lines (≈60 chars each, indented) instead of

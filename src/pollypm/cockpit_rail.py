@@ -89,6 +89,32 @@ PALETTE: dict[str, _C] = {
 
 ARC_SPINNER = ("◜", "◝", "◞", "◟")
 
+# Glyphs the activity-sparkline helper emits — the eight block heights
+# from ``_spark_bar`` plus the U+00B7 dot we substitute for in-line
+# zero buckets. Used by the rail row truncator to detect a trailing
+# spark line so it can prefer truncating the project name over
+# clobbering activity signal.
+_SPARK_GLYPHS = frozenset("·▁▂▃▄▅▆▇█ ")
+
+
+def _strip_trailing_spark(label: str) -> tuple[str, str]:
+    """Return ``(head, spark)`` if ``label`` ends with a 10-char activity
+    sparkline preceded by a space; otherwise ``(label, "")``.
+
+    The rail decorates project rows with a fixed-width activity spark
+    (``_project_activity_sparkline``) at the tail of the label. This
+    helper lets the row truncator preserve that spark when the row is
+    too narrow, by trimming the project name instead.
+    """
+    if len(label) < 11:
+        return label, ""
+    head, sep, tail = label.rpartition(" ")
+    if not sep or len(tail) != 10:
+        return label, ""
+    if not all(ch in _SPARK_GLYPHS for ch in tail):
+        return label, ""
+    return head, tail
+
 ASCII_POLLY = (
     "█▀█ █▀█ █   █   █▄█",
     "█▀▀ █▄█ █▄▄ █▄▄  █ ",
@@ -2508,7 +2534,22 @@ class PollyCockpitRail:
         indicator_width = max(1, len(indicator))
         max_label = width - (5 + indicator_width)
         if len(label) > max_label and max_label > 3:
-            label = label[: max_label - 1] + "\u2026"
+            # If the label ends with a 10-char activity sparkline (project
+            # rows decorate this onto the label), truncate the project
+            # name instead of the spark so the activity signal stays
+            # visible. Without this, ``polly-e2e-proj`` rendered as
+            # ``polly-e2e-proj \u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u2026`` and lost the trailing spark
+            # buckets \u2014 the worst part to truncate.
+            head, spark = _strip_trailing_spark(label)
+            if spark:
+                reserved = len(spark) + 1  # spark + separator space
+                head_budget = max_label - reserved - 1  # one char for ellipsis
+                if head_budget > 3:
+                    label = head[:head_budget].rstrip() + "\u2026 " + spark
+                else:
+                    label = label[: max_label - 1] + "\u2026"
+            else:
+                label = label[: max_label - 1] + "\u2026"
         text = f" {bar}{indicator} {label}"
         text = text[:width]
 

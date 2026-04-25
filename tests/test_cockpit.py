@@ -760,6 +760,35 @@ def test_cockpit_router_caches_hidden_collapsed_and_grouped_registrations(monkey
     assert calls == {"hidden": 1, "collapsed": 1, "registry": 1}
 
 
+def test_strip_trailing_spark_detects_decorated_project_row() -> None:
+    """Project rows are decorated as ``<emoji>? <name> <10-char-spark>``.
+    The truncator uses ``_strip_trailing_spark`` to keep the spark
+    visible when the row is narrow.
+    """
+    from pollypm.cockpit_rail import _strip_trailing_spark
+
+    head, spark = _strip_trailing_spark("polly-e2e-proj ··········")
+    assert head == "polly-e2e-proj"
+    assert spark == "··········"
+
+    head, spark = _strip_trailing_spark("PollyPM ···█·····█")
+    assert head == "PollyPM"
+    assert spark == "···█·····█"
+
+    # Non-spark labels return the label unchanged with empty spark.
+    head, spark = _strip_trailing_spark("Inbox (13)")
+    assert head == "Inbox (13)"
+    assert spark == ""
+
+    # Trailing token with the right length but wrong characters → no match.
+    head, spark = _strip_trailing_spark("project Wibble plain")
+    assert spark == ""
+
+    # Short label → no match.
+    head, spark = _strip_trailing_spark("X")
+    assert spark == ""
+
+
 def test_project_activity_sparkline_uses_dots_for_inline_zero_buckets() -> None:
     """Regression: when a project has activity in some 6-minute buckets
     but not others, ``_spark_bar`` returns U+0020 for the empty
