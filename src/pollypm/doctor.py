@@ -2080,8 +2080,9 @@ def check_task_assignment_sweeper_dbs() -> CheckResult:
             data={"missing": missing},
         )
     if missing:
+        missing_word = "project" if len(missing) == 1 else "projects"
         return _fail(
-            f"{len(missing)} tracked project(s) missing state.db: {', '.join(missing[:3])}",
+            f"{len(missing)} tracked {missing_word} missing state.db: {', '.join(missing[:3])}",
             why=(
                 "Projects without a state.db are silently skipped by the "
                 "task_assignment.sweep handler. Tasks queued against them "
@@ -2099,8 +2100,10 @@ def check_task_assignment_sweeper_dbs() -> CheckResult:
             fix_fn=_fix if missing_paths else None,
             data={"found": found, "missing": missing},
         )
+    found_word = "project" if found == 1 else "projects"
+    have_word = "has" if found == 1 else "have"
     return _ok(
-        f"{found} tracked project(s) have reachable state.db",
+        f"{found} tracked {found_word} {have_word} reachable state.db",
         data={"count": found},
     )
 

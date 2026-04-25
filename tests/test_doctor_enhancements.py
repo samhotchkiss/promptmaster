@@ -421,6 +421,56 @@ def test_task_assignment_sweeper_dbs_warn_all_missing(monkeypatch: pytest.Monkey
     assert "no tracked project" in result.status
 
 
+def test_task_assignment_sweeper_dbs_pluralisation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Singular and plural sweeper-dbs status must not show ``project(s)``.
+
+    Both the warn ("X missing state.db") and ok ("X have reachable
+    state.db") paths share the project pluralisation. The ok branch
+    also needs subject/verb agreement (``1 project has`` /
+    ``5 projects have``). Mirrors cycles 45/47/48/49 on other doctor
+    messages.
+    """
+    one_path = tmp_path / "proj-one"
+    db = one_path / ".pollypm" / "state.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("")
+    one_proj = type("P", (), {"path": one_path, "tracked": True})
+    monkeypatch.setattr(
+        doctor,
+        "_safe_load_config",
+        lambda: (Path("/tmp/x"), type("C", (), {"projects": {"proj-one": one_proj}})),
+    )
+    ok = doctor.check_task_assignment_sweeper_dbs()
+    assert ok.passed
+    assert "1 tracked project has reachable state.db" in ok.status
+    assert "project(s)" not in ok.status
+
+    # Mixed: one with state.db, two without — exercises the plural
+    # warn path (``2 tracked projects missing state.db``).
+    have_path = tmp_path / "have"
+    have_db = have_path / ".pollypm" / "state.db"
+    have_db.parent.mkdir(parents=True)
+    have_db.write_text("")
+    miss_a = tmp_path / "miss-a"
+    miss_a.mkdir()
+    miss_b = tmp_path / "miss-b"
+    miss_b.mkdir()
+    cfg = type(
+        "C", (), {"projects": {
+            "have": type("P", (), {"path": have_path, "tracked": True}),
+            "miss-a": type("P", (), {"path": miss_a, "tracked": True}),
+            "miss-b": type("P", (), {"path": miss_b, "tracked": True}),
+        }},
+    )
+    monkeypatch.setattr(doctor, "_safe_load_config", lambda: (Path("/tmp/x"), cfg))
+    warn = doctor.check_task_assignment_sweeper_dbs()
+    assert not warn.passed
+    assert "2 tracked projects missing state.db" in warn.status
+    assert "project(s)" not in warn.status
+
+
 def test_sessions_table_populated_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db = _make_state_db(tmp_path / "state.db", sessions=3)
     monkeypatch.setattr(doctor, "_primary_state_db", lambda: db)
