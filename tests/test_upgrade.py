@@ -155,6 +155,52 @@ def test_upgrade_check_only_does_not_install() -> None:
     assert "check-only" in result.message
 
 
+def test_upgrade_check_only_skips_when_release_check_current(monkeypatch) -> None:
+    monkeypatch.setattr(
+        upgrade_mod, "_available_upgrade", lambda channel: ("1.0.0rc2", False),
+    )
+    result = upgrade_mod.upgrade(
+        channel="stable",
+        check_only=True,
+        installer_overrides={"uv": True},
+    )
+    assert result.ok is True
+    assert result.old_version == result.new_version
+    assert "already up to date" in result.message
+
+
+def test_upgrade_same_version_install_reports_noop(monkeypatch) -> None:
+    monkeypatch.setattr(upgrade_mod, "_available_upgrade", lambda channel: None)
+    monkeypatch.setattr(
+        upgrade_mod,
+        "run_migration_check",
+        lambda: (True, "ok"),
+    )
+    monkeypatch.setattr(
+        upgrade_mod.subprocess,
+        "run",
+        lambda *a, **kw: type(
+            "Result",
+            (),
+            {"returncode": 0, "stdout": "", "stderr": ""},
+        )(),
+    )
+    monkeypatch.setattr(upgrade_mod, "_read_new_version", lambda: upgrade_mod.pollypm.__version__)
+    monkeypatch.setattr(
+        upgrade_mod,
+        "inject_notice",
+        lambda old, new: (_ for _ in ()).throw(AssertionError("no notice for noop")),
+    )
+    result = upgrade_mod.upgrade(
+        channel="stable",
+        installer_overrides={"uv": True},
+    )
+    assert result.ok is True
+    assert result.old_version == result.new_version
+    assert result.notified is False
+    assert "already up to date" in result.message
+
+
 def test_upgrade_aborts_when_migration_check_fails(monkeypatch) -> None:
     monkeypatch.setattr(
         upgrade_mod, "run_migration_check",
@@ -275,4 +321,7 @@ def test_cli_upgrade_check_only_succeeds(monkeypatch) -> None:
     result = runner.invoke(cli_app, ["upgrade", "--check-only", "--channel", "stable"])
     assert result.exit_code == 0
     assert "installer: uv" in result.stdout
+    assert "version:   " in result.stdout
+    assert "(current)" in result.stdout
+    assert "→" not in result.stdout
     assert "check-only" in result.stdout

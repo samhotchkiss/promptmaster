@@ -68,7 +68,10 @@ def register_upgrade_commands(app: typer.Typer) -> None:
 
         typer.echo("")
         typer.echo(f"installer: {result.installer}")
-        typer.echo(f"version:   {result.old_version} → {result.new_version}")
+        if result.old_version == result.new_version:
+            typer.echo(f"version:   {result.old_version} (current)")
+        else:
+            typer.echo(f"version:   {result.old_version} → {result.new_version}")
         typer.echo(f"migration: {'checked' if result.migration_checked else 'skipped'}")
         typer.echo(f"notified:  {'yes' if result.notified else 'no'}")
         typer.echo(f"status:    {result.message}")

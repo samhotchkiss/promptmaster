@@ -72,6 +72,25 @@ class Step:
         self._emit(f"[step] {text}")
 
 
+def _available_upgrade(channel: str) -> tuple[str, bool] | None:
+    """Return ``(latest_version, upgrade_available)`` when the release check works.
+
+    A quiet ``None`` keeps ``pm upgrade`` usable offline or before release
+    metadata exists. In that case the installer remains the source of truth.
+    """
+    try:
+        from pollypm.release_check import check_latest
+    except ImportError:
+        return None
+    try:
+        check = check_latest(channel, force_refresh=True)
+    except Exception:  # noqa: BLE001
+        return None
+    if check is None:
+        return None
+    return (check.latest, check.upgrade_available)
+
+
 def _runs_ok(cmd: list[str], *, timeout: float = 5.0) -> bool:
     """True iff ``cmd`` exits 0 within the timeout."""
     try:
@@ -352,6 +371,24 @@ def upgrade(
             message="migration check failed — upgrade aborted",
         )
 
+    available = _available_upgrade(plan.channel)
+    if available is not None:
+        latest_version, upgrade_available = available
+        if not upgrade_available:
+            step(f"already up to date: {old_version}")
+            return UpgradeResult(
+                ok=True,
+                installer=installer,
+                old_version=old_version,
+                new_version=old_version,
+                migration_checked=True,
+                notified=False,
+                stdout="",
+                stderr="",
+                message=f"already up to date on {old_version}",
+            )
+        step(f"latest available: {latest_version}")
+
     if check_only:
         step(f"check-only: would run `{' '.join(plan.command)}`")
         return UpgradeResult(
@@ -424,6 +461,18 @@ def upgrade(
 
     new_version = _read_new_version() or old_version
     step(f"installed {new_version}")
+    if new_version == old_version:
+        return UpgradeResult(
+            ok=True,
+            installer=installer,
+            old_version=old_version,
+            new_version=new_version,
+            migration_checked=True,
+            notified=False,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            message=f"already up to date on {old_version}",
+        )
 
     step("notifying live sessions")
     notify_ok, notify_detail = inject_notice(old_version, new_version)
