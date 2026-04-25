@@ -580,7 +580,8 @@ def register_maintenance_commands(app: typer.Typer) -> None:
                         continue
                     actions = repair_docs(project.path)
                     if actions:
-                        typer.echo(f"  [{key}] {len(actions)} doc(s) updated")
+                        doc_word = "doc" if len(actions) == 1 else "docs"
+                        typer.echo(f"  [{key}] {len(actions)} {doc_word} updated")
                 typer.echo("Done.")
             return
 
@@ -629,7 +630,8 @@ def register_maintenance_commands(app: typer.Typer) -> None:
                 continue
             actions = repair_docs(project.path)
             if actions:
-                typer.echo(f"  [{key}] {len(actions)} doc(s) updated")
+                doc_word = "doc" if len(actions) == 1 else "docs"
+                typer.echo(f"  [{key}] {len(actions)} {doc_word} updated")
         typer.echo(
             f"Upgrade to {latest} complete. Running sessions are unaffected — "
             "restart with `pm reset && pm up` when ready."
@@ -693,8 +695,10 @@ def register_maintenance_commands(app: typer.Typer) -> None:
             f"Archive size: {after}."
         )
         if result.pruned:
+            snap_word = "snapshot" if len(result.pruned) == 1 else "snapshots"
             typer.echo(
-                f"Pruned {len(result.pruned)} older snapshot(s) (keep={keep_value})."
+                f"Pruned {len(result.pruned)} older {snap_word} "
+                f"(keep={keep_value})."
             )
 
     @app.command("restore")

@@ -197,7 +197,9 @@ def register_project_commands(app: typer.Typer) -> None:
             f"  Provider transcripts copied: {result.provider_transcripts_copied}"
         )
         if result.interview_questions:
-            typer.echo(f"\nGenerated {len(result.interview_questions)} review question(s).")
+            n_questions = len(result.interview_questions)
+            question_word = "question" if n_questions == 1 else "questions"
+            typer.echo(f"\nGenerated {n_questions} review {question_word}.")
             for question in result.interview_questions[:5]:
                 typer.echo(f"  - {question}")
 

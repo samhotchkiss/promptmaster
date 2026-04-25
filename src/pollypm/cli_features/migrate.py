@@ -136,6 +136,9 @@ def _run_apply(db_path: Path) -> None:
     if outcome.already_up_to_date:
         typer.echo("All migrations up to date.")
         return
-    typer.echo(f"Applied {len(outcome.applied)} migration(s) to {db_path}:")
+    migration_word = "migration" if len(outcome.applied) == 1 else "migrations"
+    typer.echo(
+        f"Applied {len(outcome.applied)} {migration_word} to {db_path}:"
+    )
     for item in outcome.applied:
         typer.echo(f"  [{item.namespace}] v{item.version}: {item.description}")
