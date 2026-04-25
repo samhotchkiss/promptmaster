@@ -179,8 +179,9 @@ def validate_typed_memory(memory: TypedMemory) -> None:
         if value is None or (isinstance(value, str) and not value.strip()):
             missing.append(field_name)
     if missing:
+        field_word = "field" if len(missing) == 1 else "fields"
         raise ValueError(
-            f"{memory.TYPE.value} memory missing required field(s): "
+            f"{memory.TYPE.value} memory missing required {field_word}: "
             f"{', '.join(missing)}"
         )
     if not (1 <= int(memory.importance) <= 5):

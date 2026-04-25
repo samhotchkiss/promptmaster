@@ -173,7 +173,11 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
             supervisor.store.commit()
         except Exception:  # noqa: BLE001
             pass
-        typer.echo(f"Killed {len(sessions_to_kill)} session(s): {', '.join(sessions_to_kill)}")
+        session_word = "session" if len(sessions_to_kill) == 1 else "sessions"
+        typer.echo(
+            f"Killed {len(sessions_to_kill)} {session_word}: "
+            f"{', '.join(sessions_to_kill)}"
+        )
 
     @app.command(help=helpers._STATUS_HELP)
     def status(

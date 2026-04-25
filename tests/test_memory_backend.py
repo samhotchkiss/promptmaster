@@ -168,6 +168,10 @@ def test_feedback_memory_missing_why_raises() -> None:
         validate_typed_memory(memory)
     assert "feedback" in str(exc.value)
     assert "why" in str(exc.value)
+    # Cycle 76: pluralise per count — single missing field reads
+    # ``missing required field:`` (not ``field(s)``).
+    assert "missing required field:" in str(exc.value)
+    assert "field(s)" not in str(exc.value)
 
 
 def test_project_memory_missing_fields_raises() -> None:
@@ -176,6 +180,9 @@ def test_project_memory_missing_fields_raises() -> None:
         validate_typed_memory(memory)
     assert "why" in str(exc.value)
     assert "how_to_apply" in str(exc.value)
+    # Two missing → plural ``fields:``.
+    assert "missing required fields:" in str(exc.value)
+    assert "field(s)" not in str(exc.value)
 
 
 def test_user_memory_whitespace_only_field_raises() -> None:
