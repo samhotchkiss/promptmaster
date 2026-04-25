@@ -352,7 +352,9 @@ def format_pending_summary(status: MigrationStatus) -> str:
     """Render pending migrations as a compact multi-line string."""
     if not status.pending:
         return "All migrations up to date."
-    lines = [f"{len(status.pending)} pending migration(s):"]
+    n_pending = len(status.pending)
+    migration_word = "migration" if n_pending == 1 else "migrations"
+    lines = [f"{n_pending} pending {migration_word}:"]
     for item in status.pending:
         lines.append(f"  [{item.namespace}] v{item.version}: {item.description}")
     return "\n".join(lines)
@@ -405,7 +407,9 @@ def _format_refuse_start_message(status: MigrationStatus) -> str:
             "needs an update before any session can connect. Running "
             "without it risks cross-version data corruption."
         ),
-        next_action="Apply the pending migration(s) with pm migrate --apply.",
+        next_action=(
+            f"Apply the pending migration{plural} with pm migrate --apply."
+        ),
         # Three escalating options so the user can pick their comfort
         # level: safe apply, dry-run-first, or emergency bypass for
         # non-destructive CLI work. The bypass is last because it

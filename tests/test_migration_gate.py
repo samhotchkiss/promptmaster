@@ -81,6 +81,33 @@ def _write_minimal_config(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def test_format_pending_summary_pluralisation(tmp_path: Path) -> None:
+    """Cycle 80: ``format_pending_summary`` pluralises per count.
+
+    The summary header read ``N pending migration(s):`` — at one
+    pending migration (the typical case after a single new migration
+    lands in a release) the parenthetical reads as a copy bug.
+    """
+    one = mig_mod.MigrationStatus(
+        db_path=tmp_path / "x.db",
+        pending=[mig_mod.PendingMigration("state", 1, "first")],
+    )
+    rendered_one = mig_mod.format_pending_summary(one)
+    assert rendered_one.startswith("1 pending migration:")
+    assert "migration(s)" not in rendered_one
+
+    many = mig_mod.MigrationStatus(
+        db_path=tmp_path / "x.db",
+        pending=[
+            mig_mod.PendingMigration("state", 1, "first"),
+            mig_mod.PendingMigration("state", 2, "second"),
+            mig_mod.PendingMigration("work", 1, "wfirst"),
+        ],
+    )
+    rendered_many = mig_mod.format_pending_summary(many)
+    assert rendered_many.startswith("3 pending migrations:")
+
+
 def test_pm_migrate_check_on_clean_db(tmp_path: Path) -> None:
     db_path = _fresh_state_db(tmp_path / "state.db")
     status = mig_mod.inspect(db_path)
@@ -336,7 +363,7 @@ def test_cli_migrate_check_renders_failure_in_structured_shape(
     monkeypatch.setattr(_mig, "inspect", lambda _db_path: _FakeStatus())
     monkeypatch.setattr(
         _mig, "format_pending_summary",
-        lambda status: "1 pending migration(s):\n  [state] v99: synthetic pending",
+        lambda status: "1 pending migration:\n  [state] v99: synthetic pending",
     )
 
     app = _build_cli_app()
