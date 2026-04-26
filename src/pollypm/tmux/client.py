@@ -397,14 +397,39 @@ class TmuxClient:
         # which can drop characters or cause rendering issues in Claude Code's
         # input bar. Short text still uses send-keys -l for simplicity.
         if len(text) > 100:
+            # #808: every long send used the unnamed global paste
+            # buffer, so two concurrent ``send_keys`` calls could
+            # interleave their ``load-buffer`` and ``paste-buffer``
+            # tmux invocations and paste one sender's text into the
+            # other's pane. Use a per-call named buffer so each send
+            # has its own isolated slot, and clean it up after the
+            # paste in case ``-d`` doesn't fire (e.g. paste failure).
             import os
             import tempfile
+            import uuid
+
+            buffer_name = f"pollypm-{uuid.uuid4().hex}"
             fd, tmp_path = tempfile.mkstemp(suffix=".txt")
             try:
                 with os.fdopen(fd, "w") as f:
                     f.write(text)
-                self.run("load-buffer", tmp_path)
-                self.run("paste-buffer", "-d", "-t", resolved)
+                self.run("load-buffer", "-b", buffer_name, tmp_path)
+                try:
+                    self.run(
+                        "paste-buffer",
+                        "-d",
+                        "-b", buffer_name,
+                        "-t", resolved,
+                    )
+                except Exception:
+                    # ``-d`` deletes the buffer on a successful paste.
+                    # If the paste itself failed, drop our buffer
+                    # explicitly so it doesn't leak.
+                    try:
+                        self.run("delete-buffer", "-b", buffer_name, check=False)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise
             finally:
                 try:
                     os.unlink(tmp_path)
