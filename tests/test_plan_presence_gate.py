@@ -80,6 +80,7 @@ class FakeSessionService:
 class FakeKnownProject:
     key: str
     path: Path
+    enforce_plan: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1124,5 +1125,57 @@ class TestSweepHandlerGateIntegration:
         assert result["plan_missing_alerts"] == 0
         assert result["by_outcome"].get("sent", 0) == 1
         assert session_svc.sent and session_svc.sent[0][0] == "worker-proj"
+
+        store.close()
+
+    def test_per_project_enforce_plan_false_disables_gate_for_one_project(
+        self, tmp_path, monkeypatch,
+    ):
+        """Per-project ``enforce_plan=False`` overrides the global default.
+
+        Two projects, both missing plans. Global ``enforce_plan=True``
+        keeps the gate active; the per-project override on ``alpha``
+        unblocks it while ``beta`` still trips ``plan_missing``. Mirrors
+        Sam's media-project ask: bypass the gate for one project without
+        flipping the global default.
+        """
+        proj_a = tmp_path / "alpha"
+        proj_a.mkdir()
+        _create_queued_impl_task(proj_a, project_key="alpha")
+
+        proj_b = tmp_path / "beta"
+        proj_b.mkdir()
+        _create_queued_impl_task(proj_b, project_key="beta")
+
+        store = StateStore(tmp_path / "workspace_state.db")
+        session_svc = FakeSessionService(
+            handles=[FakeHandle("worker-alpha"), FakeHandle("worker-beta")],
+        )
+
+        def _factory():
+            return _RuntimeServices(
+                session_service=session_svc,
+                state_store=store,
+                work_service=None,
+                project_root=tmp_path,
+                known_projects=(
+                    FakeKnownProject(
+                        key="alpha", path=proj_a, enforce_plan=False,
+                    ),
+                    FakeKnownProject(key="beta", path=proj_b),
+                ),
+                enforce_plan=True,
+                plan_dir="docs/plan",
+            )
+
+        _install_fake_loader(monkeypatch, _factory)
+
+        result = task_assignment_sweep_handler({})
+
+        # alpha → gate skipped → worker pinged.
+        assert any(name == "worker-alpha" for name, _ in session_svc.sent)
+        # beta → gate still enforced → plan_missing alert.
+        assert result["plan_missing_alerts"] == 1
+        assert result["by_outcome"].get("skipped_plan_missing", 0) == 1
 
         store.close()

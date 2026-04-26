@@ -403,6 +403,7 @@ def _sweep_work_service(
     plan_missing_projects: set[str],
     plan_decisions: dict[str, bool],
     project_path: Any = None,
+    project: Any = None,
 ) -> None:
     """Run one sweep pass over a single work-service DB.
 
@@ -419,7 +420,13 @@ def _sweep_work_service(
     root and so auto-skips the gate).
     """
     by_outcome = totals["by_outcome"]
-    enforce_plan = bool(getattr(services, "enforce_plan", True))
+    global_enforce = bool(getattr(services, "enforce_plan", True))
+    project_enforce = (
+        getattr(project, "enforce_plan", None) if project is not None else None
+    )
+    enforce_plan = (
+        project_enforce if project_enforce is not None else global_enforce
+    )
     for status in _SWEEPABLE_STATUSES:
         try:
             tasks = work.list_tasks(work_status=status)
@@ -900,6 +907,7 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
                 plan_missing_projects=plan_missing_projects,
                 plan_decisions=plan_decisions,
                 project_path=getattr(project, "path", None),
+                project=project,
             )
             # #768: auto-claim runs after the regular sweep body so
             # dead-window recovery has the most-recent state to work

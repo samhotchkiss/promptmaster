@@ -1192,6 +1192,13 @@ class CockpitRouter:
             tasks = list(work.list_tasks(project=project_key))
             planner = getattr(config, "planner", None)
             plan_dir = str(getattr(planner, "plan_dir", "docs/plan") or "docs/plan")
+            global_enforce = bool(getattr(planner, "enforce_plan", True))
+            project_enforce = getattr(project, "enforce_plan", None)
+            enforce_plan = (
+                project_enforce if project_enforce is not None else global_enforce
+            )
+            if not enforce_plan:
+                return tasks, False
             plan_blocked = bool(tasks) and not has_acceptable_plan(
                 project_key,
                 project_path,

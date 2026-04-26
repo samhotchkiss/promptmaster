@@ -657,6 +657,13 @@ def _merge_project_local_config(
             persona_name = project_raw.get("persona_name")
             if isinstance(persona_name, str) and persona_name.strip():
                 project.persona_name = persona_name.strip()
+        # ``[planner].enforce_plan`` per-project override. Reading at the
+        # project-local layer (rather than threading new TOML keys through
+        # ``[projects.<key>]`` in the global config) keeps the bypass
+        # discoverable in the project's own pollypm.toml.
+        planner_raw = raw.get("planner", {})
+        if isinstance(planner_raw, dict) and "enforce_plan" in planner_raw:
+            project.enforce_plan = bool(planner_raw["enforce_plan"])
         _PROTECTED_SESSIONS = {"heartbeat", "operator"}
         for session_name, session in _parse_sessions(raw, base=project.path, default_project=project_key).items():
             if session_name in _PROTECTED_SESSIONS:

@@ -366,6 +366,58 @@ path = "wire"
     assert config.sessions["worker_wire"].cwd == project_root
 
 
+def test_load_config_reads_project_local_planner_enforce_plan(tmp_path: Path) -> None:
+    """Per-project ``[planner].enforce_plan`` lands on KnownProject."""
+    project_root = tmp_path / "wire"
+    project_root.mkdir()
+    (project_root / ".pollypm" / "config").mkdir(parents=True)
+    (project_root / ".pollypm" / "config" / "project.toml").write_text(
+        """
+[project]
+display_name = "Wire"
+
+[planner]
+enforce_plan = false
+"""
+    )
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        """
+[project]
+name = "PollyPM"
+tmux_session = "pollypm"
+
+[pollypm]
+controller_account = "claude_primary"
+
+[accounts.claude_primary]
+provider = "claude"
+home = ".pollypm/homes/claude_primary"
+
+[sessions.heartbeat]
+role = "heartbeat-supervisor"
+provider = "claude"
+account = "claude_primary"
+cwd = "."
+
+[sessions.operator]
+role = "operator-pm"
+provider = "claude"
+account = "claude_primary"
+cwd = "."
+
+[projects.wire]
+path = "wire"
+"""
+    )
+
+    config = load_config(config_path)
+
+    assert config.projects["wire"].enforce_plan is False
+    # Global default unchanged — only the per-project override flips.
+    assert config.planner.enforce_plan is True
+
+
 def test_write_config_splits_worker_sessions_into_project_local_files(tmp_path: Path) -> None:
     project_root = tmp_path / "wire"
     project_root.mkdir()

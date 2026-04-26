@@ -78,6 +78,12 @@ class KnownProject:
     # #768 auto-claim overrides. ``None`` means "defer to planner defaults".
     auto_claim: bool | None = None
     max_concurrent_workers: int | None = None
+    # Per-project override of ``[planner].enforce_plan``. ``None`` defers
+    # to the global setting; ``False`` bypasses the plan-presence gate
+    # for this project (single-task / cleanup / one-off work that doesn't
+    # warrant a multi-stage plan); ``True`` re-enables the gate even
+    # when the global default has been turned off.
+    enforce_plan: bool | None = None
 
     def display_label(self) -> str:
         return self.name or self.key
