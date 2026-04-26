@@ -773,6 +773,112 @@ class TestTeardownWorker:
         assert result.total_input_tokens == 11
         assert result.total_output_tokens == 7
 
+    def test_codex_token_parser_handles_total_tokens_and_total_token_usage(
+        self, tmp_path,
+    ):
+        """#814: ``_extract_token_usage`` must not drop Codex rows that
+        only carry ``last_token_usage.total_tokens`` (no split) or that
+        only have ``total_token_usage`` (no ``last_token_usage`` at
+        all). Pre-fix the parser returned ``(0, 0)`` for both shapes,
+        leaving ``work_sessions.total_input_tokens`` /
+        ``total_output_tokens`` at zero on teardown — so cockpit token
+        summaries under-reported every Codex worker.
+
+        Contract (mirrors ``transcript_ledger`` / ``transcript_ingest``):
+
+        * Split counters in ``last_token_usage`` win.
+        * If ``last_token_usage`` is missing, fall back to
+          ``total_token_usage``.
+        * If only ``total_tokens`` is available (no split), attribute
+          the whole value to ``output_tokens`` — the schema only has
+          input + output columns today and dropping the value is the
+          worse failure for cost dashboards.
+        """
+        from pollypm.work.session_manager import _extract_token_usage
+
+        # 1) Per-turn ``last_token_usage`` with only ``total_tokens``.
+        last_total_only = {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {"last_token_usage": {"total_tokens": 21}},
+            },
+        }
+        assert _extract_token_usage(last_total_only) == (0, 21)
+
+        # 2) Only ``total_token_usage`` (cumulative snapshot, split
+        #    counters present, no ``last_token_usage``).
+        total_usage_only = {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {
+                        "input_tokens": 300,
+                        "cached_input_tokens": 20,
+                        "output_tokens": 30,
+                        "reasoning_output_tokens": 5,
+                        "total_tokens": 355,
+                    },
+                },
+            },
+        }
+        assert _extract_token_usage(total_usage_only) == (320, 35)
+
+        # 3) Only ``total_token_usage.total_tokens`` (no split).
+        total_total_only = {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": {"total_tokens": 99}},
+            },
+        }
+        assert _extract_token_usage(total_total_only) == (0, 99)
+
+        # 4) Pre-#814 happy path — split ``last_token_usage`` still wins.
+        last_split = {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 300,
+                        "cached_input_tokens": 20,
+                        "output_tokens": 30,
+                        "reasoning_output_tokens": 5,
+                    },
+                },
+            },
+        }
+        assert _extract_token_usage(last_split) == (320, 35)
+
+        # 5) Both ``last`` and ``total`` present — ``last`` wins
+        #    (per-turn delta is the canonical contribution).
+        both = {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 7,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 999,
+                        "output_tokens": 999,
+                    },
+                },
+            },
+        }
+        assert _extract_token_usage(both) == (5, 7)
+
+        # 6) Genuinely empty ``info`` still returns (0, 0).
+        empty = {
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {}},
+        }
+        assert _extract_token_usage(empty) == (0, 0)
+
     def test_codex_archival_filters_rollouts_to_task_worktree(
         self, manager, mock_tmux, tmp_project, tmp_path,
     ):

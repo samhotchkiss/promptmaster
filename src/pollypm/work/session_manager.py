@@ -1343,23 +1343,71 @@ def _parse_token_usage(jsonl_path: Path) -> tuple[int, int]:
 def _extract_token_usage(data: dict) -> tuple[int, int]:
     """Pull (input_tokens, output_tokens) from one transcript row.
 
-    Tolerates both Claude- and Codex-shaped rows (#813). Returns
-    ``(0, 0)`` for rows with no recognisable usage data.
+    Tolerates both Claude- and Codex-shaped rows. Returns ``(0, 0)``
+    for rows with no recognisable usage data.
+
+    Codex ``event_msg`` / ``token_count`` rows can land in any of
+    these shapes (#814):
+
+    * ``info.last_token_usage`` with split counters (``input_tokens``,
+      ``cached_input_tokens``, ``output_tokens``,
+      ``reasoning_output_tokens``) — per-turn delta, the common case.
+    * ``info.last_token_usage`` with only ``total_tokens`` — no
+      split available.
+    * ``info.total_token_usage`` only (no ``last_token_usage``) —
+      cumulative snapshot, fallback shape.
+
+    The transcript_ledger / transcript_ingest readers already use
+    ``last_usage = info.last_token_usage or info.total_token_usage``
+    and accept ``total_tokens`` when split fields are absent. The
+    archival parser now follows the same contract so all three
+    shapes contribute to ``work_sessions.total_input_tokens`` /
+    ``total_output_tokens`` instead of being silently dropped.
+
+    When a row only carries ``total_tokens`` (no input/output split)
+    we attribute the value to ``output_tokens``: Codex rollouts are
+    output-heavy once reasoning is included, and dropping the value
+    would leave the per-task token totals at zero — under-reporting
+    is the worse failure for cost dashboards. ``work_sessions``
+    schema only stores input + output today (#809); a richer split
+    can land later without changing this contract.
     """
-    # Codex ``event_msg`` rows carry token data under a nested
-    # ``payload.info.last_token_usage`` (per-turn delta) — sum those
-    # so the cumulative across the whole rollout is correct.
+    # Codex ``event_msg`` rows carry token data under
+    # ``payload.info.last_token_usage`` (per-turn) or
+    # ``payload.info.total_token_usage`` (cumulative).
     if data.get("type") == "event_msg":
         payload = data.get("payload") or {}
         if isinstance(payload, dict) and payload.get("type") == "token_count":
             info = payload.get("info") or {}
-            usage = info.get("last_token_usage") if isinstance(info, dict) else None
-            if isinstance(usage, dict):
-                inp = int(usage.get("input_tokens", 0) or 0)
-                inp += int(usage.get("cached_input_tokens", 0) or 0)
-                out = int(usage.get("output_tokens", 0) or 0)
-                out += int(usage.get("reasoning_output_tokens", 0) or 0)
-                return inp, out
+            if isinstance(info, dict):
+                last_usage = info.get("last_token_usage")
+                total_usage = info.get("total_token_usage")
+                # Mirror transcript_ledger: prefer per-turn ``last``;
+                # fall back to ``total_token_usage`` so cumulative-only
+                # rows don't silently drop to (0, 0).
+                usage = last_usage if isinstance(last_usage, dict) else total_usage
+                if isinstance(usage, dict):
+                    has_split = any(
+                        key in usage
+                        for key in (
+                            "input_tokens",
+                            "cached_input_tokens",
+                            "output_tokens",
+                            "reasoning_output_tokens",
+                        )
+                    )
+                    if has_split:
+                        inp = int(usage.get("input_tokens", 0) or 0)
+                        inp += int(usage.get("cached_input_tokens", 0) or 0)
+                        out = int(usage.get("output_tokens", 0) or 0)
+                        out += int(usage.get("reasoning_output_tokens", 0) or 0)
+                        return inp, out
+                    total = usage.get("total_tokens")
+                    if total is not None:
+                        # No split available. Bucket the whole total
+                        # into output so the row still contributes —
+                        # see docstring for rationale.
+                        return 0, int(total or 0)
             return 0, 0
 
     # Claude shapes — direct ``token_usage`` event, top-level ``usage``,
