@@ -81,7 +81,7 @@ def _read_current_docs(project_root: Path) -> dict[str, str]:
     for name in _DOC_NAMES:
         path = project_root / "docs" / f"{name}.md"
         if path.exists():
-            docs[name] = path.read_text().strip()
+            docs[name] = path.read_text(encoding="utf-8").strip()
         else:
             docs[name] = ""
     return docs
@@ -91,7 +91,7 @@ def _read_recent_activity(project_root: Path) -> str:
     path = project_root / "docs" / "activity-log.md"
     if not path.exists():
         return ""
-    content = path.read_text()
+    content = path.read_text(encoding="utf-8")
     # Take last ~2000 chars (most recent entries are at the top)
     return content[:2000]
 

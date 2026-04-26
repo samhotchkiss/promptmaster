@@ -440,7 +440,7 @@ def _append_log(log_path: Path, actions: Sequence[CuratorAction], now: datetime)
     existing = ""
     if log_path.exists():
         try:
-            existing = log_path.read_text()
+            existing = log_path.read_text(encoding="utf-8")
         except OSError:
             existing = ""
     if existing and not existing.endswith("\n"):

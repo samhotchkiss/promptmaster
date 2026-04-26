@@ -96,7 +96,7 @@ def _scan_catalog_dir(
     for path in sorted(directory.glob("*.md")):
         if path.name.startswith("_"):
             continue
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
         rule = _parse_catalog_metadata(
             path,
             content,
@@ -117,7 +117,7 @@ def _scan_catalog_dir(
         skill_md = child / "SKILL.md"
         if not skill_md.is_file():
             continue
-        content = skill_md.read_text()
+        content = skill_md.read_text(encoding="utf-8")
         rule = _parse_catalog_metadata(
             skill_md,
             content,
@@ -225,8 +225,8 @@ def _write_project_manifest(project_root: Path) -> None:
     try:
         dest = project_root / _SESSION_MANIFEST_PATH
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if not dest.exists() or dest.read_text() != full_manifest:
-            dest.write_text(full_manifest)
+        if not dest.exists() or dest.read_text(encoding="utf-8") != full_manifest:
+            dest.write_text(full_manifest, encoding="utf-8")
     except Exception:  # noqa: BLE001
         return
 

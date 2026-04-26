@@ -336,7 +336,7 @@ def load_worker_guide_text() -> str:
     if path is None:
         return ""
     try:
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     except OSError:  # noqa: BLE001
         return ""
 

@@ -523,10 +523,10 @@ def _read_instruct_rules(project_root: Path) -> str:
     ]
     system_path = project_root / ".pollypm" / "docs" / "SYSTEM.md"
     if system_path.exists():
-        parts.append(system_path.read_text().strip())
+        parts.append(system_path.read_text(encoding="utf-8").strip())
     instruct_path = project_root / ".pollypm" / "INSTRUCT.md"
     if instruct_path.exists():
-        parts.append(instruct_path.read_text().strip())
+        parts.append(instruct_path.read_text(encoding="utf-8").strip())
     return "\n\n".join(parts)
 
 
@@ -552,7 +552,7 @@ def _read_project_overview(project_root: Path) -> str:
     path = project_root / "docs" / "project-overview.md"
     if not path.exists():
         return ""
-    return f"## Project Overview\nRead `{path.relative_to(project_root)}` before starting.\n\n{path.read_text().strip()}"
+    return f"## Project Overview\nRead `{path.relative_to(project_root)}` before starting.\n\n{path.read_text(encoding='utf-8').strip()}"
 
 
 def _read_active_issue(project_root: Path) -> str:
