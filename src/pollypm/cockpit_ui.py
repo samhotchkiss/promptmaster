@@ -9171,6 +9171,17 @@ def _action_count(items: list[dict], action_items: list[dict]) -> int:
     return task_action_count + len(action_items)
 
 
+# Cache the activity-feed projection by (project, db_mtime, limit).
+# Every per-project dashboard refresh used to rebuild the projector
+# and walk the messages table to assemble feed entries — pure
+# repeated work when no event has landed since the last call.
+# Sister to ``_DASHBOARD_INBOX_CACHE`` (cycle 138) and
+# ``_PLAN_STALENESS_CACHE`` (cycle 133).
+_DASHBOARD_ACTIVITY_CACHE: dict[
+    tuple[str, float | None, int], list[dict]
+] = {}
+
+
 def _dashboard_activity(
     config_path: Path, project_key: str, *, limit: int = 10,
 ) -> list[dict]:
@@ -9188,6 +9199,20 @@ def _dashboard_activity(
         config = load_config(config_path)
     except Exception:  # noqa: BLE001
         return []
+    # Content-addressed cache: an unchanged db_mtime means no event
+    # has landed since the last call so the projection is unchanged.
+    project = (config.projects or {}).get(project_key)
+    db_mtime: float | None = None
+    if project is not None and getattr(project, "path", None) is not None:
+        db_path = project.path / ".pollypm" / "state.db"
+        try:
+            db_mtime = db_path.stat().st_mtime
+        except OSError:
+            db_mtime = None
+    cache_key = (project_key, db_mtime, limit)
+    cached = _DASHBOARD_ACTIVITY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     projector = build_projector(config)
     if projector is None:
         return []
@@ -9195,7 +9220,7 @@ def _dashboard_activity(
         entries = projector.project(projects=[project_key], limit=limit)
     except Exception:  # noqa: BLE001
         return []
-    return [
+    result = [
         {
             "timestamp": e.timestamp,
             "actor": e.actor or "",
@@ -9205,6 +9230,8 @@ def _dashboard_activity(
         }
         for e in entries
     ]
+    _DASHBOARD_ACTIVITY_CACHE[cache_key] = result
+    return result
 
 
 def _gather_project_dashboard(
