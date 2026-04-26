@@ -258,6 +258,81 @@ def _classify_session_health(signals: SessionSignals) -> SessionHealth:
     return _DEFAULT_POLICY.classify(signals)
 
 
+# Per-role canonical guide path the persona-drift remediation message
+# tells the session to re-read. Worker has no canonical guide here —
+# its role identity is enforced through the per-task prompt the
+# launcher writes, not a free-floating profile, so persona drift on a
+# worker session falls back to a generic re-assertion.
+_ROLE_GUIDE_PATHS: dict[str, str] = {
+    "operator-pm": (
+        "src/pollypm/plugins_builtin/core_agent_profiles/profiles/"
+        "polly-operator-guide.md"
+    ),
+    "reviewer": (
+        "src/pollypm/plugins_builtin/core_agent_profiles/profiles/russell.md"
+    ),
+    "architect": (
+        "src/pollypm/plugins_builtin/core_agent_profiles/profiles/"
+        "architect.md"
+    ),
+}
+
+
+_ROLE_PERSONA_NAMES: dict[str, str] = {
+    "operator-pm": "Polly",
+    "reviewer": "Russell",
+    "architect": "Archie",
+    "heartbeat-supervisor": "Heartbeat",
+}
+
+
+def _build_persona_reassertion_message(
+    *,
+    role: str,
+    drifted_to: str,
+) -> str:
+    """Build the corrective message the heartbeat sends to a drifted session.
+
+    Covers #757's "re-inject the correct role guide via a trusted
+    mechanism (not ``<system-update>``)". The message is delivered
+    through the ``persona-drift-remediation`` owner channel so the
+    session can identify it as a heartbeat-issued correction in its
+    transcript, not arbitrary user input. Avoids the
+    ``<system-update>`` tag that prompt-injection defenses learned to
+    reject in #755.
+
+    Includes:
+
+    * The session's *canonical* role + persona name.
+    * The persona the session drifted into (so the model has context
+      for what just happened).
+    * A path to the role's operating guide for re-anchoring.
+    * The plain-language acknowledgement the model should produce so
+      the operator can verify the drift cleared on the next snapshot.
+    """
+    canonical_persona = _ROLE_PERSONA_NAMES.get(role, role or "this session")
+    guide_path = _ROLE_GUIDE_PATHS.get(role)
+    lines = [
+        f"PollyPM persona-drift correction (heartbeat-issued).",
+        "",
+        f"This session is configured as role={role!r}; canonical "
+        f"persona is {canonical_persona}. The pane just identified "
+        f"itself as {drifted_to!r}, which doesn't match.",
+        "",
+        f"Re-anchor: stop, re-read your operating guide, then "
+        f"continue under your canonical persona. Acknowledge with "
+        f"\"OK {canonical_persona}\" before your next action so the "
+        f"operator can confirm the drift cleared.",
+    ]
+    if guide_path:
+        lines.insert(
+            -1,
+            f"Operating guide: {guide_path}",
+        )
+        lines.insert(-1, "")
+    return "\n".join(lines)
+
+
 def _select_intervention(
     health: SessionHealth,
     signals: SessionSignals,
@@ -605,6 +680,11 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             # #760 — actionable copy: explain what drifted, name the
             # restart command the user can copy-paste, keep the
             # observed-identity detail present for context.
+            #
+            # Note: ``severity="error"`` puts this through the
+            # ACTION_REQUIRED toast tier (cockpit_alerts.alert_channel
+            # — #765). Drift is one of the rare cases where we DO want
+            # to interrupt the user.
             api.raise_alert(
                 context.session_name,
                 "persona_drift_detected",
@@ -616,6 +696,39 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                 ),
             )
             alerts.append("persona_drift_detected")
+            # #757 — reactive remediation: send a one-shot re-assertion
+            # message to the drifted session so the model can correct
+            # itself before the user has to intervene. Gated by the
+            # alert state — only sent on the *first* heartbeat that
+            # detects the drift, not on every subsequent tick the
+            # alert is still open. The owner-tagged path (``persona-
+            # drift-remediation``) makes the corrective message
+            # distinguishable from arbitrary user input in transcript
+            # scans, and avoids the ``<system-update>`` tag that
+            # tripped prompt-injection defenses (#755).
+            try:
+                already_open = any(
+                    getattr(alert, "alert_type", None) == "persona_drift_detected"
+                    for alert in api.open_alerts()
+                    if getattr(alert, "session_name", None) == context.session_name
+                )
+            except Exception:  # noqa: BLE001
+                already_open = True  # err on the side of NOT spamming
+            if not already_open:
+                try:
+                    api.send_session_message(
+                        context.session_name,
+                        _build_persona_reassertion_message(
+                            role=context.role or "",
+                            drifted_to=drifted_to,
+                        ),
+                        owner="persona-drift-remediation",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "heartbeat: persona-drift remediation send failed for %s",
+                        context.session_name,
+                    )
         else:
             api.clear_alert(context.session_name, "persona_drift_detected")
 

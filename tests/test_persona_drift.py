@@ -97,3 +97,38 @@ def test_no_drift_on_partial_match() -> None:
     not trip the detector — the identity-claim patterns are explicit."""
     pane = "Pushed to https://github.com/org/russell-tool/pull/1"
     assert detect_persona_drift("operator-pm", pane) is None
+
+
+def test_persona_reassertion_message_names_canonical_persona() -> None:
+    """#757 — the heartbeat's reactive-remediation message must:
+    name the session's canonical persona, name the persona the
+    session drifted into (so the model has context), point at the
+    operating guide for re-anchoring, and state the explicit ack
+    phrase the model should produce so the operator can verify the
+    drift cleared on the next snapshot.
+
+    Avoids the ``<system-update>`` tag — prompt-injection defenses
+    correctly reject that shape (#755). Uses an owner-tagged plain
+    message instead.
+    """
+    from pollypm.heartbeats.local import (
+        _build_persona_reassertion_message,
+    )
+
+    msg = _build_persona_reassertion_message(
+        role="operator-pm", drifted_to="Russell",
+    )
+
+    assert "<system-update>" not in msg  # #755 — never use this shape
+    assert "Polly" in msg  # canonical persona for operator-pm
+    assert "Russell" in msg  # the persona we drifted INTO
+    assert "polly-operator-guide.md" in msg  # operating guide path
+    assert "OK Polly" in msg  # ack phrase
+
+    # Reviewer drift to Polly — same shape, mirror role.
+    rev_msg = _build_persona_reassertion_message(
+        role="reviewer", drifted_to="Polly",
+    )
+    assert "Russell" in rev_msg
+    assert "russell.md" in rev_msg
+    assert "OK Russell" in rev_msg
