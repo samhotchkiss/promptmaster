@@ -9280,6 +9280,52 @@ def _gather_project_dashboard(
     )
 
 
+def _project_dashboard_signature(
+    data: "ProjectDashboardData | None",
+) -> tuple:
+    """Cheap signature over the user-visible state of a project dashboard.
+
+    Used by ``PollyProjectDashboardApp._refresh`` to skip the full
+    Textual re-paint when nothing has structurally changed since the
+    last tick. Captures every field whose change the user would
+    notice; deliberately excludes time-relative labels (those are
+    refreshed by a force-tick every Nth refresh).
+    """
+    if data is None:
+        return ("none",)
+    worker = data.active_worker or {}
+    return (
+        data.project_key,
+        data.exists_on_disk,
+        data.status_dot,
+        data.status_label,
+        # Worker liveness — heartbeat changes invalidate the signature
+        # on purpose so the worker section stays current.
+        worker.get("session_name"),
+        worker.get("role"),
+        worker.get("last_heartbeat"),
+        # Task pipeline.
+        tuple(sorted((data.task_counts or {}).items())),
+        # Action / inbox / alerts.
+        data.inbox_count,
+        data.alert_count,
+        len(data.action_items or []),
+        tuple(
+            (str(item.get("task_id") or ""), str(item.get("primary_ref") or ""))
+            for item in (data.action_items or [])[:5]
+        ),
+        # Plan section.
+        str(data.plan_path) if data.plan_path else None,
+        data.plan_mtime,
+        data.plan_stale_reason,
+        # Activity tail (newest entries' identity, not their age).
+        tuple(
+            (e.get("event_type"), e.get("created_at"))
+            for e in (data.activity_entries or [])[:10]
+        ),
+    )
+
+
 class PollyProjectDashboardApp(App[None]):
     """Information-dense per-project dashboard — replaces the legacy
     text dump rendered when the user selects a project in the rail.
@@ -9532,6 +9578,14 @@ class PollyProjectDashboardApp(App[None]):
         # When True, the plan section takes over the whole body — other
         # sections are hidden via the ``proj-plan-focus`` screen class.
         self._plan_view_mode: bool = False
+        # Cycle 135: signature of last rendered ProjectDashboardData so
+        # the 10s refresh tick can skip the (relatively expensive) full
+        # re-paint when nothing the user can see has changed. Mirrors
+        # the inbox loader's #752 pattern. Force a re-render every Nth
+        # tick so age-based labels stay current.
+        self._last_render_signature: tuple | None = None
+        self._ticks_since_force_render: int = 0
+        self._FORCE_RENDER_EVERY_N_TICKS = 6  # ~60s at 10s tick
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -9587,6 +9641,18 @@ class PollyProjectDashboardApp(App[None]):
                 f"[#ff5f6d]Error loading project:[/#ff5f6d] {_escape(str(exc))}"
             )
             return
+        # Skip the full re-paint when nothing the user can see has
+        # changed. Force-refresh every Nth tick so "5m ago" age labels
+        # don't freeze. Mirrors the inbox loader's #752 signature
+        # pattern, applied to the 10s project-dashboard refresh.
+        self._ticks_since_force_render += 1
+        if self._ticks_since_force_render >= self._FORCE_RENDER_EVERY_N_TICKS:
+            self._ticks_since_force_render = 0
+            self._last_render_signature = None  # force a re-render below
+        signature = _project_dashboard_signature(self.data)
+        if signature == self._last_render_signature:
+            return
+        self._last_render_signature = signature
         self._render()
 
     def _render(self) -> None:
