@@ -84,14 +84,19 @@ def format_project_health_scorecard(
     *,
     now: datetime | None = None,
 ) -> str:
-    """Format the cockpit one-line project health summary."""
+    """Format the cockpit one-line project health summary.
+
+    The health glyph leads the line so the rank (which determines sort
+    order in the workspace dashboard) is the first thing the user
+    sees. Previously it sat at the end of a long stats line where it
+    was easy to miss — audit UX #7.
+    """
     cycle = _project_cycle_minutes(tasks)
     cycle_part = f"{cycle}m cycle" if cycle is not None else "— cycle"
     return (
-        f"{project_name} · "
+        f"{project_health_glyph(tasks, now=now)} {project_name} · "
         f"{int(counts.get('in_progress', 0))} in progress · "
         f"{int(counts.get('review', 0))} review · "
         f"{int(counts.get('blocked', 0))} blocked · "
-        f"{cycle_part} · "
-        f"{project_health_glyph(tasks, now=now)}"
+        f"{cycle_part}"
     )

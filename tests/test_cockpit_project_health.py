@@ -89,7 +89,10 @@ def test_format_project_health_scorecard_includes_counts_cycle_and_health() -> N
         [done, active],
         now=now,
     )
-    assert line == "web-app · 1 in progress · 0 review · 0 blocked · 45m cycle · 🟢"
+    # Cycle 134: health glyph leads the line so the rank (which
+    # determines workspace-dashboard sort order) is the first thing
+    # the user sees, not the last.
+    assert line == "🟢 web-app · 1 in progress · 0 review · 0 blocked · 45m cycle"
 
 
 def test_health_thresholds_track_stuck_tasks() -> None:
@@ -161,8 +164,8 @@ def test_global_dashboard_surfaces_project_scorecards_sorted_by_health(monkeypat
     )
 
     assert "Projects" in out
-    red_line = "api · 0 in progress · 3 review · 0 blocked · — cycle · 🔴"
-    green_line = "notesy · 1 in progress · 0 review · 0 blocked · — cycle · 🟢"
+    red_line = "🔴 api · 0 in progress · 3 review · 0 blocked · — cycle"
+    green_line = "🟢 notesy · 1 in progress · 0 review · 0 blocked · — cycle"
     assert red_line in out
     assert green_line in out
     assert out.index(red_line) < out.index(green_line)
