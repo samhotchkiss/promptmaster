@@ -7628,6 +7628,16 @@ def _dashboard_plan_aux_files(project_path: Path) -> list[Path]:
     return out[:12]
 
 
+# Per-project plan-staleness cache. Key includes plan_mtime AND
+# state.db mtime so the cache invalidates whenever the inputs that
+# could change the answer change — no TTL needed. Cycle 133 perf fix:
+# the previous implementation opened SQLiteWorkService and walked
+# the whole task list on every per-project dashboard refresh tick
+# (every 10s). With this cache, a project with no plan or task
+# changes pays zero work past the first refresh.
+_PLAN_STALENESS_CACHE: dict[tuple[str, float | None, float | None], str | None] = {}
+
+
 def _dashboard_plan_staleness(
     plan_path: Path | None,
     plan_mtime: float | None,
@@ -7662,6 +7672,15 @@ def _dashboard_plan_staleness(
     db_path = project_path / ".pollypm" / "state.db"
     if not db_path.exists():
         return None
+    # Cache key: project + plan mtime + db mtime. If neither file has
+    # changed since the last call, the answer cannot have changed.
+    try:
+        db_mtime = db_path.stat().st_mtime
+    except OSError:
+        db_mtime = None
+    cache_key = (project_key, plan_mtime, db_mtime)
+    if cache_key in _PLAN_STALENESS_CACHE:
+        return _PLAN_STALENESS_CACHE[cache_key]
     try:
         from pollypm.plugins_builtin.project_planning.plan_presence import (
             _find_approved_plan_task,
@@ -7670,15 +7689,18 @@ def _dashboard_plan_staleness(
         from pollypm.work.sqlite_service import SQLiteWorkService
     except Exception:  # noqa: BLE001
         return None
+    result: str | None = None
     try:
         with SQLiteWorkService(
             db_path=db_path, project_path=project_path,
         ) as svc:
             plan_task = _find_approved_plan_task(svc, project_key)
             if plan_task is None:
+                _PLAN_STALENESS_CACHE[cache_key] = None
                 return None
             approved_at = _plan_approved_at(svc, plan_task)
             if approved_at is None:
+                _PLAN_STALENESS_CACHE[cache_key] = None
                 return None
             # Find latest non-planning task's created_at.
             tasks = svc.list_tasks(project=project_key)
@@ -7700,10 +7722,12 @@ def _dashboard_plan_staleness(
                 if latest_backlog is None or ts > latest_backlog:
                     latest_backlog = ts
             if latest_backlog is not None and approved_at < latest_backlog:
-                return "plan approved before latest backlog task"
+                result = "plan approved before latest backlog task"
     except Exception:  # noqa: BLE001
+        # Don't cache failures — let the next refresh retry.
         return None
-    return None
+    _PLAN_STALENESS_CACHE[cache_key] = result
+    return result
 
 
 def _dashboard_status(
