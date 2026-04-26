@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pollypm.config import load_config
 from pollypm.cockpit_rail import CockpitItem, CockpitRouter  # noqa: F401
@@ -11,8 +12,34 @@ from pollypm.projects import ensure_project_scaffold
 # below cover everything except the ``_build_cockpit_detail_inner`` path
 # that boots a supervisor for the legacy text dump. Deferring saves
 # ~211ms cumulative on every cockpit-pane spawn.
+#
+# Tests historically monkeypatched ``pollypm.cockpit.PollyPMService.load_supervisor``
+# to swap a fake supervisor in. After the lazy-import switch that path
+# became a ``ModuleNotFoundError``: ``'pollypm.cockpit' is not a
+# package`` (#811). Keep the lazy goal but expose ``PollyPMService`` as
+# a module attribute via ``__getattr__`` so the existing test seam
+# resolves to the real class without paying the import cost at module
+# load time.
 from pollypm.task_backends import get_task_backend
 from pollypm.worktrees import list_worktrees
+
+if TYPE_CHECKING:  # pragma: no cover — type hints only.
+    from pollypm.service_api import PollyPMService as PollyPMService
+
+
+def __getattr__(name: str):
+    """Lazy module-level attribute resolver.
+
+    Currently used to expose ``PollyPMService`` to monkeypatch-driven
+    tests (#811) without importing ``pollypm.service_api`` at module
+    import time. Production code paths still import the symbol
+    locally inside the functions that need it; this hook only fires
+    on out-of-line attribute access (``pollypm.cockpit.PollyPMService``).
+    """
+    if name == "PollyPMService":
+        from pollypm.service_api import PollyPMService as _PollyPMService
+        return _PollyPMService
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # ---------------------------------------------------------------------------
 # Dashboard section helpers (#403). The heavy rendering lives in
