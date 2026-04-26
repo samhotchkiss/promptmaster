@@ -10813,16 +10813,21 @@ class PollyProjectDashboardApp(App[None]):
             return
         db_path = data.project_path / ".pollypm" / "state.db"
         approved_task = None
-        # Track the post-action status so the toast can tell the user
+        # Track the pre/post status so the toast can tell the user
         # whether their click actually moved the task or just left a
         # reply. "Decision recorded." was misleading when the underlying
         # task stayed parked at blocked/on_hold/etc. — the user thought
-        # they had pushed the project forward.
+        # they had pushed the project forward. The pre-status lets us
+        # also distinguish "didn't move at all" from "resumed from
+        # on_hold but stopped short of approval" — the latter is real
+        # progress that the original "stayed at 'X'" copy obscured.
+        initial_status = ""
         final_status = ""
         try:
             with SQLiteWorkService(
                 db_path=db_path, project_path=data.project_path,
             ) as svc:
+                initial_status = svc.get(task_id).work_status.value
                 svc.add_reply(task_id, response, actor="user")
                 if approve_if_possible:
                     task = svc.get(task_id)
@@ -10840,13 +10845,26 @@ class PollyProjectDashboardApp(App[None]):
             notify_task_approved(approved_task, notify=self.notify)
         elif approve_if_possible and final_status:
             # Approval was requested but the task wasn't in an approvable
-            # state. Be explicit so the user can decide what to do next
-            # rather than think the click moved the project forward.
-            self.notify(
-                f"Reply saved — task stayed at '{final_status}' "
-                "(not in a state PollyPM can auto-approve from here).",
-                severity="warning",
-            )
+            # state. Distinguish three cases so the user knows what
+            # actually happened:
+            #   * status changed (on_hold → queued/in_progress) → real
+            #     progress; we resumed but stopped short of approval.
+            #   * status unchanged → click only saved a reply.
+            #   * either way, name the state so the user can decide
+            #     the next move.
+            if initial_status and initial_status != final_status:
+                self.notify(
+                    f"Resumed task (was '{initial_status}', now "
+                    f"'{final_status}'), reply saved — not yet in a "
+                    "state PollyPM can auto-approve from here.",
+                    severity="information",
+                )
+            else:
+                self.notify(
+                    f"Reply saved — task stayed at '{final_status}' "
+                    "(not in a state PollyPM can auto-approve from here).",
+                    severity="warning",
+                )
         else:
             self.notify("Decision recorded.", severity="information")
         self._refresh()

@@ -564,6 +564,142 @@ def test_plan_review_action_uses_contextual_review_plan_button(
     _run(body())
 
 
+def test_record_action_response_distinguishes_resume_from_no_op(
+    dashboard_app, monkeypatch,
+) -> None:
+    """When 'Approve' resumes an on_hold task that lands somewhere other
+    than ``review``, the toast says ``Resumed task (was on_hold, now
+    queued)`` instead of the misleading ``task stayed at 'queued'``.
+
+    Original copy lumped two distinct cases together: (1) click did
+    nothing because the task was never approvable, and (2) click
+    resumed the task but stopped short of approval. The user reading
+    "stayed at 'queued'" after a real on_hold → queued transition
+    couldn't tell their click had moved anything. Now case (1) keeps
+    the warning toast and case (2) gets an information toast that
+    names the transition.
+    """
+    from types import SimpleNamespace
+
+    # Pin the action item to a real-shape task ref so the early bail-
+    # out gates (action_item_at, primary_ref regex) all pass.
+    fake_action_item = {
+        "task_id": "demo/1",
+        "primary_ref": "demo/1",
+        "primary_response": "Approve it anyway.",
+    }
+    dashboard_app._action_item_at = lambda idx: fake_action_item  # type: ignore[method-assign]
+
+    # ProjectDashboardData stub — needs project_path so the service
+    # path resolution doesn't bail.
+    dashboard_app.data = SimpleNamespace(
+        project_path=Path("/tmp/dashboard-test-fake"),
+    )
+
+    # Replay the on_hold → queued transition. ``svc.get`` is called
+    # twice (initial_status + final_status) and once between resume
+    # checks, so the iterator drives all four calls.
+    statuses = iter([
+        SimpleNamespace(work_status=SimpleNamespace(value="on_hold")),  # initial
+        SimpleNamespace(work_status=SimpleNamespace(value="on_hold")),  # before resume check
+        SimpleNamespace(work_status=SimpleNamespace(value="queued")),   # after resume
+        SimpleNamespace(work_status=SimpleNamespace(value="queued")),   # final
+    ])
+
+    class _FakeSvc:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, _task_id):
+            return next(statuses)
+        def add_reply(self, _task_id, _response, *, actor): pass
+        def resume(self, _task_id, _actor):
+            return SimpleNamespace(work_status=SimpleNamespace(value="queued"))
+        def approve(self, _task_id, _actor, _response):  # not called
+            raise AssertionError("approve should not fire when status != review")
+
+    monkeypatch.setattr(
+        "pollypm.work.sqlite_service.SQLiteWorkService", _FakeSvc,
+    )
+
+    notifications: list[tuple[str, str]] = []
+    dashboard_app.notify = lambda msg, **kw: notifications.append(  # type: ignore[method-assign]
+        (kw.get("severity", "information"), msg)
+    )
+    # Prevent _refresh from doing real I/O.
+    dashboard_app._refresh = lambda: None  # type: ignore[method-assign]
+
+    dashboard_app._record_action_response(
+        0, "Approve it anyway.", approve_if_possible=True,
+    )
+
+    assert len(notifications) == 1
+    severity, msg = notifications[0]
+    assert "Resumed task" in msg
+    assert "on_hold" in msg
+    assert "queued" in msg
+    # Resume is real progress, not a warning.
+    assert severity == "information"
+    # Old "stayed at" copy must not appear for a state that did change.
+    assert "stayed at" not in msg
+
+
+def test_record_action_response_warns_when_state_truly_unchanged(
+    dashboard_app, monkeypatch,
+) -> None:
+    """If 'Approve' fires on a state that PollyPM can't transition AND
+    the status doesn't change, keep the warning toast — the user's
+    click really did just save a reply."""
+    from types import SimpleNamespace
+
+    fake_action_item = {
+        "task_id": "demo/1",
+        "primary_ref": "demo/1",
+        "primary_response": "Approve it anyway.",
+    }
+    dashboard_app._action_item_at = lambda idx: fake_action_item  # type: ignore[method-assign]
+    dashboard_app.data = SimpleNamespace(
+        project_path=Path("/tmp/dashboard-test-fake"),
+    )
+
+    statuses = iter([
+        SimpleNamespace(work_status=SimpleNamespace(value="blocked")),  # initial
+        SimpleNamespace(work_status=SimpleNamespace(value="blocked")),  # before resume check (not on_hold, no resume)
+        SimpleNamespace(work_status=SimpleNamespace(value="blocked")),  # final
+    ])
+
+    class _FakeSvc:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, _task_id):
+            return next(statuses)
+        def add_reply(self, _task_id, _response, *, actor): pass
+        def resume(self, *a):
+            raise AssertionError("resume should not fire on blocked")
+        def approve(self, *a):
+            raise AssertionError("approve should not fire on blocked")
+
+    monkeypatch.setattr(
+        "pollypm.work.sqlite_service.SQLiteWorkService", _FakeSvc,
+    )
+
+    notifications: list[tuple[str, str]] = []
+    dashboard_app.notify = lambda msg, **kw: notifications.append(  # type: ignore[method-assign]
+        (kw.get("severity", "information"), msg)
+    )
+    dashboard_app._refresh = lambda: None  # type: ignore[method-assign]
+
+    dashboard_app._record_action_response(
+        0, "Approve it anyway.", approve_if_possible=True,
+    )
+
+    assert len(notifications) == 1
+    severity, msg = notifications[0]
+    assert "stayed at 'blocked'" in msg
+    assert severity == "warning"
+
+
 def test_review_plan_falls_back_to_inbox_without_task_ref(dashboard_app) -> None:
     """When a ``review_plan`` action has no resolvable task ref (older
     messages, malformed primary_ref), the button still lands the user
