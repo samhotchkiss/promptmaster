@@ -11,6 +11,7 @@ from pollypm.cockpit_sections.base import (
     _STATUS_ICONS,
     _age_from_dt,
     _dashboard_divider,
+    _format_clock,
     _format_tokens,
     _iso_to_dt,
 )
@@ -707,10 +708,15 @@ def _build_dashboard(supervisor, config, config_path: Path | None = None) -> str
         if event.event_type not in ("heartbeat", "token_ledger", "polly_followup")
     ][:6]
     for event in notable:
-        age = _age_from_dt(_iso_to_dt(getattr(event, "created_at", None)), now=now)
+        # Match per-project Activity (cockpit_sections/activity.py): use
+        # absolute HH:MM clock time so users can correlate events across
+        # surfaces. The previous "5m ago" / "2h ago" was inconsistent
+        # with the per-project section and harder to sequence at a
+        # glance. Audit UX #3.
+        clock = _format_clock(_iso_to_dt(getattr(event, "created_at", None)))
         session = getattr(event, "session_name", "")
         message = getattr(event, "message", "")[:55]
-        lines.append(f"  {age:>8}  {session}: {message}")
+        lines.append(f"  {clock}  {session}: {message}")
     if notable:
         lines.append("")
 
