@@ -79,13 +79,38 @@ class TmuxClient:
     _DEFAULT_TIMEOUT = 15  # seconds — prevents indefinite hangs if tmux is unresponsive
 
     def run(self, *args: str, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["tmux", *args],
-            check=check,
-            text=True,
-            capture_output=True,
-            timeout=timeout or self._DEFAULT_TIMEOUT,
-        )
+        effective_timeout = timeout or self._DEFAULT_TIMEOUT
+        try:
+            return subprocess.run(
+                ["tmux", *args],
+                check=check,
+                text=True,
+                capture_output=True,
+                timeout=effective_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # When the tmux server itself is wedged (Sam's screenshot
+            # 2026-04-26 14:08), even tiny calls like ``has-session``
+            # block past the 15s timeout and raise. ``check=False``
+            # callers (e.g. ``has_session``) expect a CompletedProcess
+            # they can inspect — propagating the exception crashes the
+            # CLI on any tmux probe. Return a non-zero result mirroring
+            # the UNIX ``124`` timeout convention so existing
+            # ``returncode != 0`` fallbacks kick in. ``check=True``
+            # callers still see the exception.
+            logger.warning(
+                "tmux %s timed out after %ds (server unresponsive)",
+                args[0] if args else "?",
+                effective_timeout,
+            )
+            if check:
+                raise
+            return subprocess.CompletedProcess(
+                args=["tmux", *args],
+                returncode=124,
+                stdout="",
+                stderr=f"tmux command timed out after {effective_timeout}s",
+            )
 
     def has_session(self, name: str) -> bool:
         result = self.run("has-session", "-t", self._exact_target(name), check=False)
