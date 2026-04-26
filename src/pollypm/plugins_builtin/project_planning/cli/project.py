@@ -344,6 +344,137 @@ def _plan_project_task(
 
 
 # ---------------------------------------------------------------------------
+# pm project blocker-summary  (#779)
+# ---------------------------------------------------------------------------
+
+
+@project_app.command("blocker-summary")
+def blocker_summary_cmd(
+    project: str = typer.Argument(
+        ...,
+        help="Project key the blocker summary applies to.",
+    ),
+    reason: str = typer.Option(
+        ...,
+        "--reason",
+        help="Plain-language description of why the project is blocked.",
+    ),
+    owner: str = typer.Option(
+        ...,
+        "--owner",
+        help="Who owns the next action: 'user' to create a follow-up "
+             "task assigned to the user, otherwise an agent name "
+             "(e.g. 'polly', 'archie').",
+    ),
+    action: list[str] = typer.Option(
+        [],
+        "--action",
+        help="Concrete required action — repeat for multiple steps.",
+    ),
+    affected: list[str] = typer.Option(
+        [],
+        "--affected",
+        help="Task ID this blocker affects (repeatable, e.g. proj/3).",
+    ),
+    unblock_when: str = typer.Option(
+        "",
+        "--unblock-when",
+        help="The condition that clears the blocker. Defaults to empty.",
+    ),
+    actor: str = typer.Option(
+        "polly",
+        "--actor",
+        help="Author of the summary. Defaults to polly (the PM).",
+    ),
+    config_path: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path.",
+    ),
+) -> None:
+    """Record a structured blocker summary for a project (#779).
+
+    The PM authors this when a project enters a user-blocked state so
+    the dashboard, inbox, and downstream consumers stop having to
+    infer the blocker reason from free-form notify messages.
+
+    Examples
+    --------
+    Record a user-blocked summary that creates an inbox task:
+
+        pm project blocker-summary booktalk \\
+            --reason "Plan needs your Phase A approval before workers can claim." \\
+            --owner user \\
+            --action "Read docs/project-plan.md" \\
+            --action "Approve via 'pm task approve booktalk/3' or reject" \\
+            --affected booktalk/3 \\
+            --unblock-when "Plan task transitions out of user_review"
+
+    Record a project-internal blocker (no user task created):
+
+        pm project blocker-summary widgets \\
+            --reason "Vendor API down — waiting on upstream." \\
+            --owner polly \\
+            --action "Polly retries the probe every 30 minutes" \\
+            --unblock-when "Vendor reports the outage cleared"
+    """
+    from pollypm.project_status_summary import (
+        ProjectBlockerSummary,
+        record_project_blocker_summary,
+    )
+
+    cfg = load_config(config_path)
+    project_cfg = cfg.projects.get(project)
+    if project_cfg is None:
+        typer.echo(
+            f"Project {project!r} is not registered in the workspace.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    project_path = Path(project_cfg.path)
+    db_path = _planner_db_path(project_path, config_path=config_path)
+    if not db_path.exists():
+        typer.echo(
+            f"Project {project!r} has no work-service DB at {db_path}. "
+            "Initialize the project first with `pm project plan` or "
+            "`pm task new`.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    summary = ProjectBlockerSummary(
+        project=project,
+        reason=reason,
+        owner=owner,
+        required_actions=list(action),
+        affected_tasks=list(affected),
+        unblock_condition=unblock_when,
+    )
+
+    from pollypm.store import SQLAlchemyStore
+    from pollypm.work.sqlite_service import SQLiteWorkService
+
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        with SQLiteWorkService(
+            db_path=db_path, project_path=project_path,
+        ) as svc:
+            result = record_project_blocker_summary(
+                store=store,
+                work_service=svc,
+                summary=summary,
+                actor=actor,
+            )
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    typer.echo(f"Recorded blocker summary for {project} (event {result['event_id']}).")
+    if result.get("task_id"):
+        typer.echo(f"Created user-facing unblock task: {result['task_id']}")
+
+
+# ---------------------------------------------------------------------------
 # pm project init-guide / list-guides
 # ---------------------------------------------------------------------------
 

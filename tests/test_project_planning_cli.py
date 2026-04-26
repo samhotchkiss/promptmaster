@@ -73,6 +73,76 @@ def _write_minimal_config(
 
 
 # ---------------------------------------------------------------------------
+# blocker-summary  (#779)
+# ---------------------------------------------------------------------------
+
+
+class TestBlockerSummary:
+    """``pm project blocker-summary`` records a structured blocker
+    summary for a project (#779).
+
+    The PM (or user acting as PM) authors this when a project enters
+    a user-blocked state so the dashboard, inbox, and downstream
+    consumers stop having to infer the blocker reason from free-form
+    notify text.
+    """
+
+    def test_user_owned_summary_creates_inbox_task(self, tmp_path: Path) -> None:
+        from pollypm.work.inbox_view import inbox_tasks
+        from pollypm.work.sqlite_service import SQLiteWorkService
+
+        repo = _make_project_repo(tmp_path)
+        config_path = _write_minimal_config(tmp_path, projects={"demo": repo})
+        # Initialize the project's work DB so blocker-summary has a
+        # service to write to. ``record_project_blocker_summary``
+        # refuses to run without one.
+        db_path = tmp_path / ".pollypm" / "state.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with SQLiteWorkService(db_path=db_path, project_path=repo):
+            pass
+
+        result = runner.invoke(
+            project_app,
+            [
+                "blocker-summary", "demo",
+                "--reason", "Plan needs user approval before workers can claim.",
+                "--owner", "user",
+                "--action", "Read docs/project-plan.md",
+                "--action", "Approve via pm task approve demo/3",
+                "--affected", "demo/3",
+                "--unblock-when", "Plan transitions out of user_review",
+                "--config", str(config_path),
+            ],
+        )
+
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "Recorded blocker summary for demo" in result.stdout
+        assert "Created user-facing unblock task: demo/" in result.stdout
+
+        # Verify the inbox task lands.
+        with SQLiteWorkService(db_path=db_path, project_path=repo) as svc:
+            tasks = inbox_tasks(svc, project="demo")
+            assert len(tasks) == 1
+            task = svc.get(tasks[0].task_id)
+            assert "project_blocker" in task.labels
+            assert "Plan needs user approval" in task.description
+
+    def test_unknown_project_exits_nonzero(self, tmp_path: Path) -> None:
+        config_path = _write_minimal_config(tmp_path, projects={})
+        result = runner.invoke(
+            project_app,
+            [
+                "blocker-summary", "ghost",
+                "--reason", "anything",
+                "--owner", "user",
+                "--config", str(config_path),
+            ],
+        )
+        assert result.exit_code == 1
+        assert "not registered" in (result.stdout + result.stderr)
+
+
+# ---------------------------------------------------------------------------
 # init-guide / list-guides
 # ---------------------------------------------------------------------------
 
