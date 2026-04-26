@@ -304,6 +304,77 @@ def test_replayed_plan_review_notifications_collapse_to_most_recent() -> None:
     assert "msg:polly_remote:12" in deduped_ids
 
 
+def test_message_plan_review_dedupes_against_task_entry() -> None:
+    """Notify message + task entry for the same plan collapses to one row.
+
+    Sam (2026-04-26) saw booktalk show two flagged inbox items —
+    ``Plan ready for review: booktalk`` (the architect's notify
+    message) and ``Plan project booktalk`` (the underlying user_approval
+    task) — both pointing at the same plan, indistinguishable to the
+    user. The notify message wins because it carries the operator's
+    user-friendly copy and the structured user_prompt payload (when
+    present).
+    """
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from pollypm.cockpit_inbox_items import (
+        InboxEntry,
+        _dedupe_message_vs_task_plan_reviews,
+        task_to_inbox_entry,
+    )
+
+    notify_msg = InboxEntry(
+        source="message",
+        task_id="msg:booktalk:1",
+        title="[Action] Plan ready for review: booktalk",
+        project="booktalk",
+        labels=[
+            "plan_review",
+            "project:booktalk",
+            "plan_task:booktalk/3",
+        ],
+        created_at=datetime(2026, 4, 23, 16, 2, 58),
+        updated_at=datetime(2026, 4, 23, 16, 2, 58),
+    )
+    task = SimpleNamespace(
+        task_id="booktalk/3",
+        title="Plan project booktalk",
+        description="",
+        project="booktalk",
+        labels=[],
+        created_at=datetime(2026, 4, 20, 15, 53, 58),
+        updated_at=datetime(2026, 4, 23, 23, 16, 11),
+        priority=None,
+        roles={},
+        created_by="polly",
+    )
+    task_entry = task_to_inbox_entry(task, db_path=None)
+    # Annotation would normally add the ``plan_review`` label for
+    # task entries on the plan_project flow — pin it here for the
+    # narrow dedup test.
+    task_entry.labels = list(task_entry.labels) + ["plan_review"]
+    unrelated = InboxEntry(
+        source="message",
+        task_id="msg:polly_remote:12",
+        title="[Action] N-RC1 review (polly_remote/12)",
+        project="polly_remote",
+        labels=["project:polly_remote"],
+        created_at=datetime(2026, 4, 23, 18, 53, 0),
+        updated_at=datetime(2026, 4, 23, 18, 53, 0),
+    )
+
+    deduped = _dedupe_message_vs_task_plan_reviews(
+        [notify_msg, task_entry, unrelated]
+    )
+    deduped_ids = [getattr(item, "task_id", None) for item in deduped]
+    # Task row dropped — message row covers it.
+    assert "booktalk/3" not in deduped_ids
+    # Message row kept; unrelated row kept.
+    assert "msg:booktalk:1" in deduped_ids
+    assert "msg:polly_remote:12" in deduped_ids
+
+
 def test_task_backed_inbox_entries_default_to_action() -> None:
     from types import SimpleNamespace
 

@@ -369,6 +369,53 @@ def _entry_sort_value(item: InboxEntry) -> str:
     return ""
 
 
+def _dedupe_message_vs_task_plan_reviews(
+    items: list[InboxEntry],
+) -> list[InboxEntry]:
+    """Collapse a notify-message + task-entry pair for the same plan.
+
+    Two streams feed the inbox: notify messages produced by the
+    operator/architect's ``pm notify`` calls, and task-backed entries
+    surfaced from the work-service for any task at ``user_approval``
+    on the ``plan_project`` flow. Both surface the booktalk plan as a
+    distinct row — Sam (2026-04-26) saw them as ``Plan ready for
+    review: booktalk`` (message) and ``Plan project booktalk`` (task)
+    side by side, indistinguishable noise pointing at the same action.
+
+    The notify message carries the operator's user-friendly copy and
+    (eventually) the structured user_prompt payload, so it's the
+    higher-fidelity surface — drop the bare task row when a message
+    with ``plan_task:<task_id>`` already covers it.
+    """
+    # Build the set of task_ids that a notify-message already covers.
+    message_covered_task_ids: set[str] = set()
+    for item in items:
+        labels = {str(lbl) for lbl in (getattr(item, "labels", []) or [])}
+        if "plan_review" not in labels:
+            continue
+        # Task-based entries also carry ``plan_review`` via annotation,
+        # but they don't carry the ``plan_task:<id>`` reference label
+        # the architect's notify includes. Only message rows have it.
+        for label in labels:
+            if label.startswith("plan_task:"):
+                ref = label.split(":", 1)[1].strip()
+                if ref:
+                    message_covered_task_ids.add(ref)
+                break
+    if not message_covered_task_ids:
+        return items
+    kept: list[InboxEntry] = []
+    for item in items:
+        # Only drop task-based entries — message rows we keep no matter
+        # what (they may be the source of the coverage).
+        if is_task_inbox_entry(item):
+            task_id = str(getattr(item, "task_id", "") or "")
+            if task_id in message_covered_task_ids:
+                continue
+        kept.append(item)
+    return kept
+
+
 def _dedupe_replayed_plan_reviews(items: list[InboxEntry]) -> list[InboxEntry]:
     """Collapse re-fired plan-review notifications.
 
@@ -507,4 +554,5 @@ def load_inbox_entries(
             except Exception:  # noqa: BLE001
                 pass
     items = _dedupe_replayed_plan_reviews(items)
+    items = _dedupe_message_vs_task_plan_reviews(items)
     return items, unread, replies_by_task
