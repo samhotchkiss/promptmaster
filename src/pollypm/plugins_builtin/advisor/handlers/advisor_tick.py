@@ -444,7 +444,7 @@ def advisor_tick_handler(payload: dict[str, Any]) -> dict[str, Any]:
         if reason == "stagnation-candidate":
             try:
                 from pollypm.project_status_summary import (
-                    ProjectMonitorSummary,
+                    compute_project_monitor_summary,
                     record_project_monitor_summary,
                 )
                 from pollypm.store import SQLAlchemyStore
@@ -453,17 +453,24 @@ def advisor_tick_handler(payload: dict[str, Any]) -> dict[str, Any]:
                 if state_db is not None:
                     store = SQLAlchemyStore(f"sqlite:///{Path(state_db)}")
                     try:
+                        # #782: record a full monitor summary, not
+                        # just a stalled-tasks placeholder. The helper
+                        # walks the work service and fills
+                        # completions, stalls, blockers, and the
+                        # zero-completion flag so durable activity
+                        # rows carry the full picture.
+                        summary = compute_project_monitor_summary(
+                            work_service=work_service,
+                            project_key=project_key,
+                        )
+                        summary.automatic_next_actions = [
+                            "advisor review queued for stagnation classification"
+                            if entry.get("scheduled")
+                            else "advisor review considered but not queued"
+                        ]
                         record_project_monitor_summary(
                             store=store,
-                            summary=ProjectMonitorSummary(
-                                project=project_key,
-                                stalled_tasks=[project_key],
-                                automatic_next_actions=[
-                                    "advisor review queued for stagnation classification"
-                                    if entry.get("scheduled")
-                                    else "advisor review considered but not queued"
-                                ],
-                            ),
+                            summary=summary,
                         )
                     finally:
                         store.close()
