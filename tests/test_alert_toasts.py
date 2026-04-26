@@ -453,6 +453,42 @@ def test_operational_alert_types_are_suppressed_from_toasts(inbox_env, inbox_app
     _run(body())
 
 
+def test_toast_renders_full_message_under_220_chars() -> None:
+    """Cycle 143 / Issue #6 — the previous 57-char hard cap chopped
+    "[Alert] Project 'media' has no..." mid-word. Now that the
+    toast can wrap (max-height=10), messages up to ~220 chars
+    render in full; nothing useful gets clipped.
+    """
+    from pollypm.cockpit_alerts import AlertToast
+
+    msg = (
+        "[Alert] Project 'media' has no .pollypm/state.db — register it "
+        "with `pm project add /path/to/media` before clicking it in the rail."
+    )
+    toast = AlertToast(alert_id=1, severity="warn", message=msg)
+    body = toast._render_body()
+    # Full message survives — the actionable detail isn't clipped.
+    assert "register it with `pm project add" in body
+    assert "before clicking it in the rail." in body
+    # No truncation hint is appended (the message fit within the cap).
+    assert "(truncated" not in body
+
+
+def test_toast_truncation_advertises_press_a_for_full_text() -> None:
+    """Above the 220-char cap, the tail switches from "press a to view
+    all" to an explicit "(truncated — press a for full text)" so the
+    user knows there's hidden content, not just a generic shortcut."""
+    from pollypm.cockpit_alerts import AlertToast
+
+    msg = "[Alert] " + "x" * 250  # well past the 220 cap
+    toast = AlertToast(alert_id=1, severity="warn", message=msg)
+    body = toast._render_body()
+    assert "(truncated" in body
+    assert "press [b]a[/b] for full text" in body
+    # Ellipsis marker present.
+    assert "…" in body
+
+
 def test_is_operational_alert_helper() -> None:
     """Unit test for the operational-type detector — covers the
     canonical set plus a couple of negative cases."""

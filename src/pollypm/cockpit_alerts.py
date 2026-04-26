@@ -188,10 +188,10 @@ class AlertToast(Static):
 
     DEFAULT_CSS = """
     AlertToast {
-        width: 52;
+        width: 60;
         height: auto;
         min-height: 3;
-        max-height: 6;
+        max-height: 10;
         padding: 1 2;
         margin: 0 0 1 0;
         content-align: left top;
@@ -243,10 +243,21 @@ class AlertToast(Static):
     def _render_body(self) -> str:
         icon = _alert_toast_icon(self.severity)
         text = _sanitize_alert_message(self.message)
-        if len(text) > 60:
-            text = text[:57] + "\u2026"
+        # Issue #6 \u2014 the previous 57-char hard cap chopped most alert
+        # messages mid-word (e.g. "[Alert] Project 'media' has no..."
+        # with the actionable detail invisible). The toast can wrap to
+        # ~4 lines (width=60 \u00d7 max-height=10 minus padding + hint), so
+        # bump the cap to a paragraph-sized 220 chars and append an
+        # explicit "(truncated \u2014 press a)" tail so the user knows
+        # there's more behind the ``a`` shortcut.
+        truncated = False
+        if len(text) > 220:
+            text = text[:217].rstrip() + "\u2026"
+            truncated = True
         body = f"{icon}  [b]{_escape_markup(text) or 'alert'}[/b]"
-        if self.show_action_hint:
+        if truncated:
+            body += "\n[dim](truncated \u2014 press [b]a[/b] for full text)[/dim]"
+        elif self.show_action_hint:
             body += "\n[dim]press [b]a[/b] to view all \u00b7 esc to dismiss[/dim]"
         else:
             body += "\n[dim]esc/click to dismiss[/dim]"
