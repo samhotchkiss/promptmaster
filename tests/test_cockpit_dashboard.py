@@ -451,6 +451,27 @@ def test_build_dashboard_renders_new_header_and_suggestions(
     assert "What's next?" in output
     assert "Approve demo/5" in output
 
+    # Cycle 132: ``review`` count appears once on the attention bar
+    # ("◉ N awaiting review") and must NOT also appear on the
+    # flow-state count_parts line two lines below — same number,
+    # two glyphs, was just visual duplication.
+    assert "1 awaiting review" in output  # attention bar still shows it
+    # The workspace-wide flow-state line previously rendered
+    # "⟳ 1 review · ○ 1 queued · ✓ 2 done"; after the dedup it
+    # renders queued + done only. (The per-project scorecards still
+    # show "N review" — that's a different surface.)
+    assert "⟳ 1 review" not in output
+    # Find the flow-state line specifically (preceded by the briefing
+    # and attention rows, followed by the Projects divider) and
+    # verify it has no review glyph.
+    flow_line = next(
+        line for line in output.splitlines()
+        if "queued" in line and "done" in line and "Projects" not in line
+    )
+    assert "review" not in flow_line, (
+        f"flow-state line still mentions review: {flow_line!r}"
+    )
+
 
 def test_cockpit_dispatch_passes_config_path_to_dashboard_builder(
     monkeypatch,

@@ -592,7 +592,12 @@ def _build_dashboard(supervisor, config, config_path: Path | None = None) -> str
         lines.append("")
 
     count_parts = []
-    for status in ("in_progress", "review", "queued", "blocked"):
+    # ``review`` was previously shown here AND on the attention bar
+    # ("◉ N awaiting review") two lines up — same number, two glyphs,
+    # confusing. Drop it from the flow-state breakdown so attention
+    # owns the call-to-action and count_parts shows pure pipeline
+    # state. Cycle 132 / dashboard audit fix.
+    for status in ("in_progress", "queued", "blocked"):
         count = total_counts.get(status, 0)
         if count:
             icon = _STATUS_ICONS.get(status, "·")
