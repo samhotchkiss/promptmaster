@@ -755,10 +755,15 @@ class PollyCockpitApp(App[None]):
             "Help: pulse ♥/♡, writing ◜◝◞◟, review ✎, idle ·, stuck ⚠, exited ✕",
             priority=True,
         ),
-        Binding("j,down", "cursor_down", "Down", show=False),
-        Binding("k,up", "cursor_up", "Up", show=False),
-        Binding("g,home", "cursor_first", "First", show=False),
-        Binding("G,end", "cursor_last", "Last", show=False),
+        # j/k/arrows are priority bindings (#797). Without ``priority``,
+        # any sibling widget that grabs focus (e.g. the right-pane app
+        # or a modal that just dismissed) intercepts the keystroke and
+        # the rail's cursor stops moving — the user has to Tab back
+        # to the nav before navigation responds again.
+        Binding("j,down", "cursor_down", "Down", show=False, priority=True),
+        Binding("k,up", "cursor_up", "Up", show=False, priority=True),
+        Binding("g,home", "cursor_first", "First", show=False, priority=True),
+        Binding("G,end", "cursor_last", "Last", show=False, priority=True),
         Binding("q,Q,ctrl+q", "request_quit", "Quit", priority=True),
         Binding("w,W,ctrl+w", "detach", "Detach", priority=True),
     ]
@@ -1053,7 +1058,17 @@ class PollyCockpitApp(App[None]):
         nav_items = self._nav_items()
         previous_key = self._selected_row_key()
         selected_key = None if self.selected_key == "settings" else (previous_key or self.selected_key)
+        # #797: keep selected_key valid against the visible items so
+        # the focus marker doesn't drop off when a previously-selected
+        # row (e.g. an expanded project sub-row) leaves the list.
         keys = [item.key for item in nav_items]
+        if self.selected_key not in keys and self.selected_key != "settings":
+            for item in nav_items:
+                if item.selectable:
+                    self.selected_key = item.key
+                    if selected_key is None or selected_key not in keys:
+                        selected_key = item.key
+                    break
         rebuild = keys != list(self._row_widgets)
         if rebuild:
             self._row_widgets = {}
@@ -1137,6 +1152,12 @@ class PollyCockpitApp(App[None]):
             return child.cockpit_key
         return None
 
+    # Internal infrastructure events that have no signal value to a
+    # user reading the rail's events strip (#793). Heartbeat ticks and
+    # token-ledger syncs run every few seconds; surfacing them as
+    # "events" buries actual project activity.
+    _TICKER_SUPPRESSED_EVENT_TYPES = frozenset({"heartbeat", "token_ledger"})
+
     def _event_ticker_text(self) -> str:
         # Gate on real tmux-client attachment (not just isatty). When the
         # user detaches from tmux, animation should stop — see #656.
@@ -1147,9 +1168,15 @@ class PollyCockpitApp(App[None]):
             pass  # fall through — render as if attached if gate fails
         try:
             supervisor = self.router._load_supervisor()
-            events = list(supervisor.store.recent_events(limit=12))
+            # Pull a wider window than we display so we still have signal
+            # after suppressing infra ticks.
+            raw_events = list(supervisor.store.recent_events(limit=48))
         except Exception:  # noqa: BLE001
             return ""
+        events = [
+            e for e in raw_events
+            if getattr(e, "event_type", "") not in self._TICKER_SUPPRESSED_EVENT_TYPES
+        ]
         if not events:
             return ""
         # #667 acceptance: show the 3 newest events, cycle the window so
@@ -1307,10 +1334,11 @@ class PollyCockpitApp(App[None]):
     _HEARTBEAT_STALE_SECONDS = 180  # warn if no heartbeat in 3 minutes
 
     def _update_hint(self) -> None:
-        hint_text = (
-            "j/k move \u00b7 \u21b5 open \u00b7 n new \u00b7 t activity "
-            "\u00b7 p pin \u00b7 w detach \u00b7 q quit"
-        )
+        # Keep this hint short enough to fit a 30-col rail without
+        # wrapping. Anything beyond j/k/\u21b5/?/q is discoverable via the
+        # ``?`` overlay (#790). Width budget is roughly 28 chars after
+        # the leading pad applied by Textual.
+        hint_text = "j/k \u21b5open \u00b7 ? help \u00b7 q quit"
         try:
             supervisor = self.router._load_supervisor()
             last_hb = supervisor.store.last_heartbeat_at()
@@ -1709,6 +1737,19 @@ class PollyDashboardApp(App[None]):
                 )
                 message_lines.append(f"  [dim]{meta}[/dim]")
                 message_lines.append("")
+            message_lines.append("[dim]Press [b]i[/b] to jump to the inbox[/dim]")
+        elif data.inbox_count:
+            # ``recent_messages`` filters to tracked projects only,
+            # but ``inbox_count`` (and the rail's Inbox badge) cover
+            # all registered projects. Saying "Inbox is clear." here
+            # while the rail says ``Inbox (13)`` is the contradiction
+            # in #799. Show the actual count instead.
+            count = data.inbox_count
+            noun = "item" if count == 1 else "items"
+            message_lines.append(
+                f"[dim]No recent messages from tracked projects "
+                f"· [b]{count}[/b] {noun} in the inbox[/dim]"
+            )
             message_lines.append("[dim]Press [b]i[/b] to jump to the inbox[/dim]")
         else:
             message_lines.append("[dim]Inbox is clear.[/dim]")
@@ -2647,7 +2688,7 @@ class PollySettingsPaneApp(App[None]):
     _DEFAULT_HINT = (
         "j/k move \u00b7 Tab section \u00b7 / search \u00b7 r refresh \u00b7 "
         "b permissions \u00b7 c/o add account \u00b7 x remove \u00b7 "
-        "t project \u00b7 m controller \u00b7 v failover \u00b7 u undo \u00b7 q back"
+        "t project \u00b7 m controller \u00b7 v failover \u00b7 u undo \u00b7 q close"
     )
 
     def __init__(self, config_path: Path) -> None:
@@ -5370,7 +5411,12 @@ class PollyInboxApp(App[None]):
         Binding("ctrl+r", "refresh", "Refresh", show=False),
         Binding("ctrl+k,colon", "open_command_palette", "Palette", priority=True),
         Binding("question_mark", "show_keyboard_help", "Help", priority=True),
-        Binding("q,escape", "back_or_cancel", "Back"),
+        # #789: previously labelled "Back", but at the list level
+        # ``action_back_or_cancel`` calls ``self.exit()`` which tears
+        # down the entire right pane. ``Close`` matches what actually
+        # happens; from the filter or reply input we still bounce
+        # focus back to the list before exit kicks in.
+        Binding("q,escape", "back_or_cancel", "Close"),
     ]
 
     def action_open_command_palette(self) -> None:
@@ -7061,25 +7107,25 @@ class PollyInboxApp(App[None]):
 
     _DEFAULT_HINT = (
         "j/k move \u00b7 \u21b5 open \u00b7 r reply \u00b7 a archive "
-        "\u00b7 d discuss \u00b7 / filter \u00b7 m all \u00b7 c clear \u00b7 q back"
+        "\u00b7 d discuss \u00b7 / filter \u00b7 m all \u00b7 c clear \u00b7 q close"
     )
     _MESSAGE_HINT = (
         "j/k move \u00b7 \u21b5 open \u00b7 a archive "
-        "\u00b7 d discuss \u00b7 / filter \u00b7 m all \u00b7 c clear \u00b7 q back"
+        "\u00b7 d discuss \u00b7 / filter \u00b7 m all \u00b7 c clear \u00b7 q close"
     )
     _PROPOSAL_HINT = (
-        "A accept \u00b7 X reject \u00b7 r reply \u00b7 q back"
+        "A accept \u00b7 X reject \u00b7 r reply \u00b7 q close"
     )
     # Plan-review hint bars (#297). The gated variant hides ``A`` until
     # the thread has a round-trip; the ungated variant surfaces it.
     _PLAN_REVIEW_HINT_GATED = (
-        "v open explainer \u00b7 d discuss with PM \u00b7 q back"
+        "v open explainer \u00b7 d discuss with PM \u00b7 q close"
     )
     _PLAN_REVIEW_HINT_OPEN = (
-        "v open explainer \u00b7 d discuss \u00b7 A approve \u00b7 q back"
+        "v open explainer \u00b7 d discuss \u00b7 A approve \u00b7 q close"
     )
     _PLAN_REVIEW_HINT_FAST_TRACK = (
-        "v open explainer \u00b7 d discuss \u00b7 A approve \u00b7 q back"
+        "v open explainer \u00b7 d discuss \u00b7 A approve \u00b7 q close"
     )
     # Blocking-question hint (#302). ``r`` replies to the worker via
     # ``pm send --force`` so the blocker clears without the PM needing
@@ -7087,7 +7133,7 @@ class PollyInboxApp(App[None]):
     # hatch; ``a`` archives once the blocker is resolved.
     _BLOCKING_QUESTION_HINT = (
         "r reply to worker \u00b7 d jump to worker \u00b7 "
-        "a archive \u00b7 q back"
+        "a archive \u00b7 q close"
     )
 
     def _update_hint_for_blocking_question(self) -> None:
@@ -7821,6 +7867,7 @@ class ProjectDashboardData:
         "inbox_top",
         "action_items",
         "alert_count",
+        "enforce_plan",
     )
 
     def __init__(
@@ -7851,6 +7898,7 @@ class ProjectDashboardData:
         inbox_top: list[dict],
         action_items: list[dict],
         alert_count: int,
+        enforce_plan: bool = True,
     ) -> None:
         self.project_key = project_key
         self.project_name = project_name
@@ -7877,6 +7925,7 @@ class ProjectDashboardData:
         self.inbox_top = inbox_top
         self.action_items = action_items
         self.alert_count = alert_count
+        self.enforce_plan = enforce_plan
 
 
 # Module-level cache keyed by (project_key, db_mtime) so a rapidly-
@@ -9330,6 +9379,20 @@ def _gather_project_dashboard(
         on_hold_count=on_hold_count,
     )
 
+    # Resolve effective enforce_plan with the same precedence the rail
+    # rollup, sweeper, and task-list use: per-project override wins,
+    # else fall back to the global ``[planner].enforce_plan``. The Plan
+    # section copy reads this so it doesn't nudge the user to draft a
+    # plan for a project they've explicitly bypassed (Sam, media on
+    # 2026-04-26 still saw the "Press c to ask the PM to plan it now"
+    # nudge after shipping ``enforce_plan = false``).
+    planner_settings = getattr(config, "planner", None)
+    global_enforce = bool(getattr(planner_settings, "enforce_plan", True))
+    project_enforce = getattr(project, "enforce_plan", None)
+    enforce_plan = (
+        project_enforce if project_enforce is not None else global_enforce
+    )
+
     return ProjectDashboardData(
         project_key=project_key,
         project_name=name,
@@ -9356,6 +9419,7 @@ def _gather_project_dashboard(
         inbox_top=inbox_top,
         action_items=action_items,
         alert_count=alert_count,
+        enforce_plan=enforce_plan,
     )
 
 
@@ -9572,7 +9636,7 @@ class PollyProjectDashboardApp(App[None]):
         _open_keyboard_help(self)
 
     _DEFAULT_HINT = (
-        "c chat \u00b7 p plan \u00b7 i inbox \u00b7 l log \u00b7 q back"
+        "c chat \u00b7 p plan \u00b7 i inbox \u00b7 l log \u00b7 q close"
     )
     _PLAN_VIEW_HINT = (
         "j/k scroll \u00b7 g/G top/bottom \u00b7 v explainer "
@@ -10260,6 +10324,18 @@ class PollyProjectDashboardApp(App[None]):
         if not data.exists_on_disk:
             return "[dim]Virtual project — no plan on disk.[/dim]"
         if data.plan_path is None:
+            # Per-project ``[planner].enforce_plan = false`` opts the
+            # project out of the planning ceremony entirely (one-off
+            # cleanups, single-task scopes). The default "ask the PM to
+            # plan it now" nudge contradicts that choice — surface the
+            # bypass explicitly instead.
+            if not data.enforce_plan:
+                return (
+                    "[dim]Plan not required — this project is configured "
+                    "with [b]\\[planner].enforce_plan = false[/b].\n"
+                    "Workers can pick up tasks directly without a plan "
+                    "ceremony.[/dim]"
+                )
             return (
                 "[dim]No plan yet — the PM will draft one when this "
                 "project picks up work.\n"
@@ -10595,7 +10671,18 @@ class PollyProjectDashboardApp(App[None]):
                 lines.append("[dim]Other open items[/dim]")
             for item in info_previews[:3]:
                 _emit_preview_row(item)
-        if not count and not preview_items and not data.action_items:
+        if (
+            not count
+            and not preview_items
+            and not data.action_items
+            and not on_hold_total
+            and not blocked_total
+        ):
+            # Only print the "no items" reassurance when the section
+            # really is empty. The on-hold / blocked branches above
+            # already rendered something; saying "No project inbox
+            # items are open." right under a held-task card reads as
+            # the panel contradicting itself (#794).
             lines.append("[dim]No project inbox items are open.[/dim]")
         # Show the "press i" CTA only when the inbox actually has more
         # to offer than what we just rendered. When every action item

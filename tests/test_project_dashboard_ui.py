@@ -2615,6 +2615,77 @@ def test_other_open_items_skips_duplicates_of_action_cards(
     assert "Different thing waiting on you" in other_section
 
 
+def test_inbox_remainder_no_contradiction_with_on_hold(dashboard_app) -> None:
+    """#794: when the project has no inbox messages but does have
+    on-hold tasks, the dashboard rendered both an "On hold" block
+    and "No project inbox items are open." right after it, so the
+    same panel said yes-and-no on adjacent lines. Suppress the
+    no-items reassurance whenever the on-hold/blocked branch
+    already rendered something.
+    """
+    from types import SimpleNamespace
+
+    fake_data = SimpleNamespace(
+        inbox_count=0,
+        task_counts={"on_hold": 1},
+        task_buckets={
+            "on_hold": [
+                {
+                    "task_number": 1,
+                    "title": "Library cleanup",
+                    "summary": "Awaiting Phase A approval",
+                    "steps": [],
+                }
+            ]
+        },
+        action_items=[],
+        inbox_top=[],
+    )
+    rendered = dashboard_app._render_inbox_body(fake_data)
+    assert "On hold" in rendered
+    assert "No project inbox items are open" not in rendered
+
+
+def test_plan_body_with_enforce_plan_false_says_plan_not_required(dashboard_app) -> None:
+    """When the project has ``enforce_plan = false`` and no plan file,
+    the Plan section reads ``Plan not required`` instead of nudging the
+    user to draft one. Sam's media project (2026-04-26) shipped the
+    bypass but the dashboard kept showing ``Press c to ask the PM to
+    plan it now`` — contradicting the operator's explicit choice.
+    """
+    from types import SimpleNamespace
+
+    fake_data = SimpleNamespace(
+        exists_on_disk=True,
+        plan_path=None,
+        plan_sections=[],
+        plan_aux_files=[],
+        plan_explainer=None,
+        enforce_plan=False,
+    )
+    body = dashboard_app._render_plan_body(fake_data)
+    assert "Plan not required" in body
+    assert "enforce_plan = false" in body
+    assert "ask the PM to plan it now" not in body
+
+
+def test_plan_body_with_enforce_plan_true_uses_default_nudge(dashboard_app) -> None:
+    """Default ``enforce_plan = true`` keeps the original draft-prompt copy."""
+    from types import SimpleNamespace
+
+    fake_data = SimpleNamespace(
+        exists_on_disk=True,
+        plan_path=None,
+        plan_sections=[],
+        plan_aux_files=[],
+        plan_explainer=None,
+        enforce_plan=True,
+    )
+    body = dashboard_app._render_plan_body(fake_data)
+    assert "ask the PM to plan it now" in body
+    assert "Plan not required" not in body
+
+
 def test_action_card_steps_compact_when_two_cards_visible(dashboard_app) -> None:
     """When two action cards are visible, each one shrinks its step list.
 
