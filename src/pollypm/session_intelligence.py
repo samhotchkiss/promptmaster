@@ -222,10 +222,15 @@ def _read_new_events(project_root: Path, session_name: str, cursors: dict[str, i
         size = events_path.stat().st_size
     except OSError:
         return [], offset
-    if size <= offset:
-        return [], offset  # No new data
+    # Order matters: ``size < offset`` (file was truncated/rotated)
+    # must reset the cursor BEFORE the no-new-data short-circuit. The
+    # original ``size <= offset`` ordering swallowed both cases, so
+    # truncation silently parked the cursor past EOF and the sweep
+    # never re-read the new file content.
     if size < offset:
-        offset = 0  # File was truncated
+        offset = 0  # File was truncated/rotated; rewind to start.
+    if size == offset:
+        return [], offset  # No new data.
     events: list[dict] = []
     with events_path.open("r", encoding="utf-8") as f:
         f.seek(offset)
