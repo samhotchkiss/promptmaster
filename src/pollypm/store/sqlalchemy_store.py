@@ -313,8 +313,9 @@ class SQLAlchemyStore:
         supported = {"scope", "recipient", "type", "sender"}
         unknown = set(dedupe_key) - supported
         if unknown:
+            field_word = "field" if len(unknown) == 1 else "fields"
             raise ValueError(
-                f"upsert_message received unsupported dedupe_key field(s) "
+                f"upsert_message received unsupported dedupe_key {field_word} "
                 f"{sorted(unknown)!r}. "
                 f"Only {sorted(supported)} are valid because those are the "
                 f"columns the indexed open-row lookup can match on. "
@@ -472,8 +473,10 @@ class SQLAlchemyStore:
         }
         unknown = set(filters) - supported
         if unknown:
+            filter_word = "filter" if len(unknown) == 1 else "filters"
             raise ValueError(
-                f"query_messages received unsupported filter(s) {sorted(unknown)!r}. "
+                f"query_messages received unsupported {filter_word} "
+                f"{sorted(unknown)!r}. "
                 f"Silent filter drops mask bugs in the inbox aggregation path. "
                 f"Fix: remove the key, or widen the supported set in "
                 f"SQLAlchemyStore.query_messages."
