@@ -430,3 +430,75 @@ def test_user_waiting_task_ids_skips_non_tracked_projects(tmp_path: Path) -> Non
     waiting = _user_waiting_task_ids(ctx)
     assert "tracked/1" in waiting
     assert "ghost/99" not in waiting
+
+
+def test_classify_projects_review_status_does_not_set_has_working(
+    tmp_path: Path,
+) -> None:
+    """A project whose only non-terminal task sits in ``review`` must
+    NOT be flagged as having a working task — review = waiting on the
+    user/reviewer to act, not an active agent turn.
+
+    Regression for the booktalk stuck-spinner case (2026-04-25): the
+    rail row for any project with a task in ``code_review`` /
+    ``user_approval`` would render the green spinning glyph forever,
+    even with the worker idle at its prompt and no live session in a
+    turn. Mirror of ``cockpit_project_state._is_automated_progress``
+    which already excludes ``review`` from its ``WORKING`` predicate.
+    """
+    import sqlite3
+
+    from pollypm.plugins_builtin.core_rail_items.plugin import (
+        _classify_projects,
+    )
+
+    def _seed(db_path: Path, project: str, number: int, status: str) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE work_tasks ("
+                "project TEXT, task_number INTEGER, "
+                "work_status TEXT, updated_at TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO work_tasks VALUES (?, ?, ?, ?)",
+                (project, number, status, "2026-04-25T12:00:00+00:00"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    review_path = tmp_path / "review_only"
+    _seed(review_path / ".pollypm" / "state.db", "review_only", 1, "review")
+
+    inflight_path = tmp_path / "inflight"
+    _seed(inflight_path / ".pollypm" / "state.db", "inflight", 1, "in_progress")
+
+    config = type("C", (), {
+        "projects": {
+            "review_only": KnownProject(
+                key="review_only", path=review_path, name="ReviewOnly",
+                kind=ProjectKind.GIT, tracked=True,
+            ),
+            "inflight": KnownProject(
+                key="inflight", path=inflight_path, name="InFlight",
+                kind=ProjectKind.GIT, tracked=True,
+            ),
+        },
+    })()
+
+    class _StubRouter:
+        _project_activity_cache: dict = {}
+
+    ctx = RailContext(extras={"config": config, "router": _StubRouter()})
+    _active, _inactive, has_working = _classify_projects(ctx)
+
+    # The review-only project must NOT trigger the working spinner.
+    assert has_working["review_only"] is False, (
+        "review status should not flag has_working — "
+        "the rail spinner spins on '◆ working' state, "
+        "and review = waiting on user, not an active turn"
+    )
+    # Sanity: a real in_progress task DOES flag the spinner.
+    assert has_working["inflight"] is True

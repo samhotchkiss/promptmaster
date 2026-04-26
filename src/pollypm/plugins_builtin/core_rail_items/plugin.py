@@ -244,9 +244,22 @@ def _classify_projects(ctx: RailContext) -> tuple[list[tuple[str, Any]], list[tu
                 conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
                 try:
                     conn.row_factory = sqlite3.Row
+                    # ``has_working_task`` drives the ``◆ working`` rail
+                    # state on the project row, which the renderer turns
+                    # into a spinning glyph (cockpit_ui ProjectRowGlyph,
+                    # ``"working" in self.item.state`` branch). A task in
+                    # ``review`` is waiting for the user / reviewer to act
+                    # — that's the opposite of an active turn, so counting
+                    # it here makes the spinner spin perpetually whenever
+                    # any task sits at code_review or user_approval. Match
+                    # ``cockpit_project_state._is_automated_progress`` (the
+                    # rollup's ``WORKING`` predicate): only ``in_progress``
+                    # is genuine automated work. ``queued`` is intentionally
+                    # excluded too — a queued task with no live worker
+                    # shouldn't spin.
                     row = conn.execute(
                         "SELECT "
-                        "  SUM(CASE WHEN work_status IN ('in_progress','review') "
+                        "  SUM(CASE WHEN work_status = 'in_progress' "
                         "           THEN 1 ELSE 0 END) AS working_count, "
                         "  MAX(updated_at) AS max_updated "
                         "FROM work_tasks WHERE project = ?",
