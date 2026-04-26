@@ -1082,6 +1082,19 @@ def test_summary_counts_are_accurate() -> None:
     assert "4 checks · 2 passed · 1 warning · 1 error" in text
 
 
+def test_summary_check_word_pluralises_for_single_check() -> None:
+    """Cycle 111 — when only one check ran (e.g. ``pm doctor --check
+    foo``), the footer read ``1 checks · 1 passed · 0 warnings · 0
+    errors``. Match the noun to the count."""
+    def _pass() -> doctor.CheckResult:
+        return doctor._ok("ok")
+
+    report = doctor.run_checks([doctor.Check("only", _pass, "pipeline")])
+    text = doctor.render_human(report)
+    assert "1 check ·" in text
+    assert "1 checks" not in text
+
+
 def test_render_human_labels_guide_drift_section() -> None:
     report = doctor.run_checks([
         doctor.Check("guide-x", lambda: doctor._ok("ok"), "guides"),

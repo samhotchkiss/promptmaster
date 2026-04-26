@@ -62,6 +62,7 @@ def render_human(report: doctor.DoctorReport) -> str:
     skipped = report.skipped_count
     warning_word = "warning" if warnings == 1 else "warnings"
     error_word = "error" if errors == 1 else "errors"
+    check_word = "check" if total == 1 else "checks"
     lines.append("")
     lines.append(
         f"Summary: {passed}/{total} passed, {warnings} {warning_word}, "
@@ -69,7 +70,7 @@ def render_human(report: doctor.DoctorReport) -> str:
         f"({report.duration_seconds:.2f}s)"
     )
     lines.append(
-        f"{total} checks · {passed} passed · "
+        f"{total} {check_word} · {passed} passed · "
         f"{warnings} {warning_word} · {errors} {error_word}"
     )
 
