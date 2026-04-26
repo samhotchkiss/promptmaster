@@ -474,8 +474,31 @@ class EventProjector:
             return True
 
         filtered = [entry for entry in entries if _keep(entry)]
-        filtered.sort(key=lambda e: e.timestamp, reverse=True)
+        # Sources use different timestamp shapes — the state store
+        # writes ``YYYY-MM-DD HH:MM:SS`` (SQLite ``CURRENT_TIMESTAMP``)
+        # while ``work_transitions`` writes
+        # ``YYYY-MM-DDTHH:MM:SS.ffffff+00:00`` (Python ``isoformat()``).
+        # Lexical sort puts a space (0x20) before a ``T`` (0x54), so
+        # newer work-transitions land *after* older state events in
+        # the same second (#791). Normalize before sorting.
+        filtered.sort(key=_timestamp_sort_key, reverse=True)
         return filtered[:limit]
+
+
+def _timestamp_sort_key(entry: FeedEntry) -> str:
+    """Normalize the entry timestamp into a key safe for lexical sort.
+
+    Replaces the SQLite ``YYYY-MM-DD HH:MM:SS`` shape with the ISO-8601
+    ``T`` separator so it sorts adjacent to ``isoformat()`` strings
+    written by other sources. Handles missing/malformed timestamps by
+    returning the empty string (which sorts to the end under ``DESC``).
+    """
+    raw = getattr(entry, "timestamp", "") or ""
+    if not raw:
+        return ""
+    # `2026-04-26 14:30:00` → `2026-04-26T14:30:00`. Only replace the
+    # first space — the time component never contains one.
+    return raw.replace(" ", "T", 1)
 
 
 def _decode_payload(raw: Any) -> dict[str, Any]:

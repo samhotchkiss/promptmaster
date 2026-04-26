@@ -325,6 +325,57 @@ def test_work_transition_projection(tmp_path: Path) -> None:
     assert "missing spec" in t8.summary
 
 
+def test_cross_source_entries_sort_chronologically(tmp_path: Path) -> None:
+    """#791: state-store events use SQLite ``YYYY-MM-DD HH:MM:SS`` and
+    work_transitions use Python ``isoformat()`` (``YYYY-MM-DDTHH...``).
+    A naïve lexical sort orders space (0x20) before ``T`` (0x54), so a
+    work-transition that happened *after* a state event lands behind it
+    in the feed. The projector must normalize these into a single
+    chronological order.
+    """
+    state_db = tmp_path / "state.db"
+    work_db = tmp_path / "demo" / ".pollypm" / "state.db"
+    work_db.parent.mkdir(parents=True)
+
+    # State event "older": SQLite-style timestamp at 12:00:00 (with
+    # the bare-space separator the SQLite ``CURRENT_TIMESTAMP``
+    # default produces). Insert directly via sqlite3 so the literal
+    # string round-trips without SQLAlchemy parsing it.
+    older_ts = "2026-04-26 12:00:00"
+    StateStore(state_db).close()
+    raw = sqlite3.connect(str(state_db))
+    try:
+        raw.execute(
+            "INSERT INTO messages (scope, type, tier, recipient, sender, "
+            "state, subject, body, payload_json, labels, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "worker", "event", "immediate", "*", "worker",
+                "open", "older_event", "older state event",
+                json.dumps({"event_type": "older_event"}), "[]",
+                older_ts,
+            ),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    # Work transition "newer": ISO timestamp 30 minutes later.
+    newer_ts = "2026-04-26T12:30:00+00:00"
+    _seed_work_transition(
+        work_db, project="demo", task=1,
+        from_state="queued", to_state="in_progress",
+        actor="worker-demo-1", ts=newer_ts,
+    )
+
+    projector = EventProjector(state_db, [("demo", work_db)])
+    entries = projector.project(limit=20)
+    # Newer transition must land first under reverse-chronological sort.
+    assert len(entries) == 2
+    assert entries[0].source == "work_transitions"
+    assert entries[1].source == "events"
+
+
 def test_since_timedelta_filter(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     store = StateStore(db)
