@@ -105,6 +105,80 @@ def is_operational_alert(alert_type: str) -> bool:
     return any(name.startswith(prefix) for prefix in _OPERATIONAL_ALERT_PREFIXES)
 
 
+# ---------------------------------------------------------------------------
+# Toast policy — three-tier severity model (#765).
+# ---------------------------------------------------------------------------
+#
+# Toasts are an *interruption primitive* — they take over the user's
+# attention and demand to be read. Surfacing every operational signal
+# as a toast trains the user to dismiss toasts wholesale, so when a
+# real action-required toast lands it gets ignored alongside the
+# noise. Encode the policy explicitly so every alert-emitting site
+# can reason about what tier it belongs to.
+
+import enum
+
+
+class AlertChannel(enum.Enum):
+    """Where an alert is delivered.
+
+    * :attr:`OPERATIONAL` — activity log only. Heartbeat classification
+      events, supervisor self-recovery signals, plugin lifecycle.
+      Useful for debugging and forensic scans; never interrupts.
+    * :attr:`INFORMATIONAL` — activity log + inbox item. The user
+      probably wants to know about it but doesn't have to act now
+      (plan ready for review, worker completed task). Toasts are a
+      bad fit for "eventually read" so this tier still does NOT toast.
+    * :attr:`ACTION_REQUIRED` — activity log + inbox + toast. The
+      only tier that interrupts. Reserved for cases the heartbeat /
+      supervisor cannot handle on its own and where there's a
+      concrete user action.
+    """
+
+    OPERATIONAL = "operational"
+    INFORMATIONAL = "informational"
+    ACTION_REQUIRED = "action_required"
+
+
+# Alert types known to be informational rather than operational/action.
+# Today this set is small — most real alerts are either operational
+# (filtered above) or action-required (everything else). Surfacing this
+# explicitly lets future plugins register their own informational
+# alerts without retraining the whole pipeline.
+_INFORMATIONAL_ALERT_TYPES: frozenset[str] = frozenset({
+    # Plan-ready / worker-completed / first-shipped — already routed
+    # via the inbox. Listed here so a registry-based router can opt
+    # them out of the toast tier explicitly instead of relying on the
+    # absence of an operational match.
+})
+
+
+def alert_channel(alert_type: str) -> AlertChannel:
+    """Classify an ``alert_type`` into a :class:`AlertChannel`.
+
+    The toast renderer (:class:`AlertNotifier`) uses this to decide
+    whether to mount a toast for a new alert: only
+    :attr:`AlertChannel.ACTION_REQUIRED` does. Operational alerts are
+    still recorded on the activity log + cockpit alert list — they're
+    just not allowed to interrupt.
+    """
+    if is_operational_alert(alert_type):
+        return AlertChannel.OPERATIONAL
+    if alert_type in _INFORMATIONAL_ALERT_TYPES:
+        return AlertChannel.INFORMATIONAL
+    return AlertChannel.ACTION_REQUIRED
+
+
+def alert_should_toast(alert_type: str) -> bool:
+    """Return True when an alert is allowed to mount a toast.
+
+    Wraps :func:`alert_channel` for the common single-bit branch. Pre-#765
+    each call site re-implemented this with hand-maintained tuples;
+    routing through the public helper keeps the policy in one place.
+    """
+    return alert_channel(alert_type) is AlertChannel.ACTION_REQUIRED
+
+
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
@@ -434,8 +508,12 @@ class AlertNotifier:
             # signal doesn't trip the filter again next poll.
             self._seen_alert_ids.add(key)
             alert_type = getattr(record, "alert_type", "")
-            if _is_operational_alert(alert_type):
-                continue  # activity log / dashboard, never a toast
+            # Three-tier policy (#765): only ACTION_REQUIRED alerts are
+            # allowed to interrupt. Operational + informational alerts
+            # still appear on the alert list / activity feed but never
+            # mount a toast.
+            if not alert_should_toast(alert_type):
+                continue
             toast = self._mount_toast(record)
             if toast is not None:
                 mounted.append(toast)

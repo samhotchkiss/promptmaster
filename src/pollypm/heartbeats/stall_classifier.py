@@ -75,27 +75,43 @@ class StallContext:
     #: the user (plan review, approval request, etc.). The architect
     #: case: just emitted a plan and is waiting for the user to approve.
     awaiting_user_action: bool = False
+    #: ``True`` when the session has been nudged in the last cycle.
+    #: Suppresses re-nudging while the previous nudge is still being
+    #: digested — gives the model one more tick before the heartbeat
+    #: escalates to ``unrecoverable_stall`` (#765).
+    recently_nudged: bool = False
+    #: ``True`` when the session is mid-turn (model is thinking /
+    #: streaming) per the live transcript / pane heuristics. A stable
+    #: snapshot during an active turn is normal — just a long thinking
+    #: pause — so it gets the ``transient`` bucket instead of
+    #: ``unrecoverable_stall``.
+    turn_in_flight: bool = False
 
 
 def classify_stall(ctx: StallContext) -> StallClass:
     """Classify a same-snapshot detection for ``ctx``.
 
-    Policy:
+    Three-tier policy (#765):
 
-    - Event-driven roles (heartbeat / operator / reviewer) → legitimate.
-      These sessions legitimately idle when the user isn't interacting.
-    - Explicit control session names → legitimate.
-    - Architect with no pending work → legitimate. They emit, they
-      stop. The next motion is user approval or a plan-replan command.
-    - Worker with an open inbox item awaiting the user → legitimate.
-      We're waiting on the user, not the session.
-    - Worker with no pending work → legitimate. Queue is empty;
-      silence is correct.
-    - Worker with pending work AND no awaiting-user gate → this is a
-      real stall signal. Return ``unrecoverable_stall`` so the heartbeat
-      starts the remediation ladder.
-    - Anything else → legitimate by default. We'd rather miss one real
-      stall than train the user to ignore warnings.
+    - ``legitimate_idle`` — the session is supposed to be quiet.
+      Event-driven roles (heartbeat / operator / reviewer), explicit
+      control sessions, idle architects, workers with no queued work
+      or with an awaiting-user gate. No alert; no remediation.
+    - ``transient`` — the session is probably still working but the
+      snapshot happens to look stable right now (the heartbeat just
+      nudged it last cycle, the model is mid-turn). Defer remediation
+      one tick before deciding. The heartbeat MUST NOT raise
+      ``suspected_loop`` for transient classifications.
+    - ``unrecoverable_stall`` — the session looks actually stuck.
+      Worker with pending work, no awaiting-user gate, no in-flight
+      turn, no recent nudge. The heartbeat starts the remediation
+      ladder (nudge → triage → restart) without escalating to a toast
+      until the ladder is exhausted.
+
+    Conservative by design: when a case is ambiguous it errs toward
+    ``legitimate_idle`` rather than ``unrecoverable_stall``. A missed
+    real stall is a single delayed detection on the next heartbeat;
+    a false-positive stall toast is user-trust damage that persists.
     """
     role = (ctx.role or "").strip()
     session_name = (ctx.session_name or "").strip()
@@ -110,16 +126,20 @@ def classify_stall(ctx: StallContext) -> StallClass:
         # being queued / in_progress does NOT mean the architect has
         # work to do; those belong to workers. So an idle architect is
         # always ``legitimate_idle`` from the classifier's perspective.
-        # A real "architect stuck mid-plan" case would need richer
-        # signals (e.g. the architect's own plan_project task is at a
-        # non-terminal node) and doesn't belong in the same-snapshot
-        # detector. See morning-after #765 follow-up.
         return "legitimate_idle"
     if role == "worker":
         if ctx.awaiting_user_action:
             return "legitimate_idle"
         if not ctx.has_pending_work:
             return "legitimate_idle"
+        # Worker has pending work and we'd otherwise classify this as
+        # a stall. Two transient cases (#765):
+        # 1. The heartbeat just nudged this session — give the model
+        #    a tick to act on the nudge before declaring it stalled.
+        # 2. The session is mid-turn — a stable snapshot during an
+        #    active turn is just a long thinking pause.
+        if ctx.recently_nudged or ctx.turn_in_flight:
+            return "transient"
         return "unrecoverable_stall"
 
     # Unknown role — stay conservative.

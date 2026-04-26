@@ -85,3 +85,56 @@ def test_unknown_role_defaults_to_legitimate_idle() -> None:
     """Conservative: unknown roles get silence, not alerts. Rather
     miss a stall than train the user to ignore warnings."""
     assert classify_stall(_ctx(role="polyglot", has_pending_work=True)) == "legitimate_idle"
+
+
+def test_recently_nudged_worker_is_transient_not_stalled() -> None:
+    """#765 — when the heartbeat just nudged a worker, the next stable
+    snapshot is the model digesting the nudge. Defer remediation one
+    tick instead of escalating to ``suspected_loop`` immediately."""
+    assert (
+        classify_stall(_ctx(role="worker", has_pending_work=True, recently_nudged=True))
+        == "transient"
+    )
+
+
+def test_turn_in_flight_worker_is_transient_not_stalled() -> None:
+    """A long thinking pause looks like a stable snapshot — a stall
+    detection during an active turn is a false positive."""
+    assert (
+        classify_stall(_ctx(role="worker", has_pending_work=True, turn_in_flight=True))
+        == "transient"
+    )
+
+
+def test_transient_signals_dont_apply_when_user_gate_holds() -> None:
+    """``awaiting_user_action`` wins over the transient signals — we're
+    waiting on the user, period; the worker is legitimately idle."""
+    assert (
+        classify_stall(_ctx(
+            role="worker", has_pending_work=True,
+            awaiting_user_action=True, recently_nudged=True,
+        ))
+        == "legitimate_idle"
+    )
+
+
+def test_alert_channel_classifies_three_tiers() -> None:
+    """#765 — public alert-channel policy. Operational alerts never
+    earn a toast; informational alerts don't either; only
+    action-required does. The toast renderer routes through this so
+    every emitter goes through one classifier."""
+    from pollypm.cockpit_alerts import (
+        AlertChannel,
+        alert_channel,
+        alert_should_toast,
+    )
+
+    # Operational: heartbeat-internal noise.
+    assert alert_channel("suspected_loop") is AlertChannel.OPERATIONAL
+    assert alert_channel("missing_window") is AlertChannel.OPERATIONAL
+    assert not alert_should_toast("suspected_loop")
+
+    # Action-required: anything not in the operational/informational
+    # buckets. ``auth_broken`` is a real user-actionable failure.
+    assert alert_channel("auth_broken") is AlertChannel.ACTION_REQUIRED
+    assert alert_should_toast("auth_broken")
