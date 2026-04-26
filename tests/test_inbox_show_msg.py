@@ -88,6 +88,36 @@ def test_inbox_show_accepts_msg_id_form(tmp_path: Path) -> None:
     assert "body:" in result.output
 
 
+def test_inbox_show_survives_corrupt_non_list_labels(tmp_path: Path) -> None:
+    """Cycle 114 — ``pm inbox show`` rendered ``labels`` by joining a
+    parsed JSON list. A row whose labels JSON parsed to a dict /
+    string would silently iterate dict keys / characters as fake
+    "labels". Coerce non-list shapes to ``[]`` so the line is
+    suppressed instead of misleading the user.
+    """
+    from sqlalchemy import text
+
+    db_path = tmp_path / "state.db"
+    msg_id = _seed_message(db_path, subject="With corrupt labels")
+    # Hand-corrupt the labels column to a JSON-encoded string so the
+    # parser succeeds but yields a non-list.
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        with store.write_engine.begin() as conn:
+            conn.execute(
+                text("UPDATE messages SET labels = :v WHERE id = :id"),
+                {"v": '"oops"', "id": msg_id},
+            )
+    finally:
+        store.close()
+    result = runner.invoke(inbox_app, ["show", f"msg:{msg_id}", "--db", str(db_path)])
+    assert result.exit_code == 0, result.output
+    # The labels line is suppressed when the coerced value is empty —
+    # without the fix, it would have read ``labels:    o, o, p, s``.
+    assert "labels:    o, o, p, s" not in result.output
+    assert "labels:    oops" not in result.output
+
+
 def test_inbox_show_msg_strips_routing_tag_from_subject(
     tmp_path: Path,
 ) -> None:

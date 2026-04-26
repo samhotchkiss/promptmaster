@@ -348,6 +348,11 @@ def _render_message_display(row: dict[str, Any]) -> list[str]:
             labels = _json.loads(labels)
         except Exception:  # noqa: BLE001
             labels = []
+    # Producer always serialises a list, but a corrupt row could land
+    # a dict / string / null — without coercion ``for label in labels``
+    # would iterate dict keys or string characters as fake "labels".
+    if not isinstance(labels, list):
+        labels = []
     lines = [
         f"msg:{mid}",
         f"  subject:   {subject}",

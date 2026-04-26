@@ -117,6 +117,7 @@ def list_digest_rollup_candidates(
             (project, milestone_key),
         ).fetchall()
 
+    from pollypm.work.sqlite_service import _safe_json_dict
     merged = [
         DigestRollupCandidate(
             source="legacy",
@@ -125,7 +126,12 @@ def list_digest_rollup_candidates(
             body=row["body"] or "",
             actor=row["actor"] or "polly",
             created_at=row["created_at"] or "",
-            payload=json.loads(row["payload_json"] or "{}"),
+            # ``payload_json`` is producer-controlled, but a corrupt
+            # row could parse to a non-dict — downstream needle-in-
+            # payload checks (line ~235) silently change semantics
+            # (substring vs key membership). Coerce defensively per
+            # the cycle 107-113 pattern.
+            payload=_safe_json_dict(row["payload_json"]),
         )
         for row in legacy_rows
     ]
