@@ -31,15 +31,14 @@ def _work_progress_sweep_one(
     """Run one ``work.progress_sweep`` pass against a single work DB."""
     from datetime import UTC, datetime, timedelta
 
-    from pollypm.plugins_builtin.task_assignment_notify.handlers.sweep import (
-        _build_event_for_task,
-        _record_sweeper_ping,
-    )
-    from pollypm.plugins_builtin.task_assignment_notify.resolver import (
+    # #802: import via the plugin's public API surface so this
+    # cross-plugin dependency is documented and stable, instead of
+    # reaching into ``handlers.sweep`` privates / resolver internals.
+    from pollypm.plugins_builtin.task_assignment_notify.api import (
         DEDUPE_WINDOW_SECONDS,
-    )
-    from pollypm.plugins_builtin.task_assignment_notify.resolver import (
+        build_event_for_task as _build_event_for_task,
         notify as _notify,
+        record_sweeper_ping as _record_sweeper_ping,
     )
     from pollypm.recovery.state_reconciliation import (
         reconcile_expected_advance,
@@ -299,14 +298,14 @@ def _work_progress_sweep_one(
 
 def work_progress_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
     """Scan in_progress tasks for staleness and emit resume pings (#249)."""
-    from pollypm.plugins_builtin.task_assignment_notify.handlers.sweep import (
-        _auto_claim_enabled_for_project,
-        _close_quietly,
-        _open_project_work_service,
-        _recover_dead_claims,
-    )
-    from pollypm.plugins_builtin.task_assignment_notify.resolver import (
+    # #802: route through the plugin's public API instead of poking
+    # private ``handlers.sweep._...`` and ``resolver`` internals.
+    from pollypm.plugins_builtin.task_assignment_notify.api import (
+        auto_claim_enabled_for_project as _auto_claim_enabled_for_project,
+        close_quietly as _close_quietly,
         load_runtime_services,
+        open_project_work_service as _open_project_work_service,
+        recover_dead_claims as _recover_dead_claims,
     )
 
     STALE_THRESHOLD_SECONDS = int(
@@ -426,7 +425,10 @@ def work_progress_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
 
 def pane_text_classify_handler(payload: dict[str, Any]) -> dict[str, Any]:
     """Semantic pane-text classifier sweep — issue #250."""
-    from pollypm.plugins_builtin.task_assignment_notify.resolver import (
+    # #802: ``load_runtime_services`` is part of the plugin's public
+    # API — import it from there rather than reaching into
+    # ``resolver`` privately.
+    from pollypm.plugins_builtin.task_assignment_notify.api import (
         load_runtime_services,
     )
     from pollypm.recovery.pane_patterns import (
