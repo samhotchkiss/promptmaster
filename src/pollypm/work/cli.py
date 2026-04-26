@@ -138,84 +138,11 @@ def _run(fn, *args, **kwargs):
         raise typer.Exit(code=1) from exc
 
 
-def _resolve_db_path(db: str, project: str | None = None) -> Path:
-    """Resolve the work-service database path.
-
-    Issue #339 collapsed PollyPM's on-disk layout to exactly two scopes.
-    This resolver only ever returns one of three things:
-
-    1. An explicit ``--db`` override — a caller passing anything other
-       than the default path gets that path back unchanged. This is the
-       escape hatch tests and CI paths rely on to stage their own DB.
-    2. ``<workspace_root>/.pollypm/state.db`` — the canonical default
-       for ``pm notify``, ``pm inbox``, and every workspace-scoped task
-       command. Resolved from the loaded PollyPM config so the same DB
-       is returned regardless of cwd (#271). The cockpit inbox
-       aggregator scans this same file, so notifications stay visible.
-    3. The literal default path resolved against cwd, as a last-resort
-       fallback when the config can't be loaded (fresh install, or the
-       config file is missing / malformed).
-
-    The old project-registered-lookup branch (which redirected to
-    ``<project>/.pollypm/work/work.db``) is gone — project isolation is
-    row-level now via the ``scope`` column on the workspace-scope DB,
-    not per-file.
-    """
-    is_default = db == ".pollypm/state.db"
-
-    # Explicit override wins — return the caller's path unchanged.
-    if not is_default:
-        db_path = Path(db)
-        if db_path.exists():
-            return db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        return db_path
-
-    # Reviewer regression (tonight): tasks created via the architect's
-    # per-project emit flow live in ``<project>/.pollypm/state.db`` — the
-    # workspace-root default never sees them, so ``pm task get
-    # polly_remote/9`` raises "not found" from Russell's session even
-    # though the task exists. When a ``project`` hint is supplied AND
-    # that project is registered with a real per-project state.db, we
-    # route there. The workspace-root default stays in place for every
-    # non-project command (notify / inbox / etc.).
-    if project:
-        try:
-            from pollypm.config import load_config
-
-            config = load_config()
-            known = getattr(config, "projects", {}) or {}
-            project_cfg = known.get(project)
-            if project_cfg is not None:
-                project_db = (
-                    Path(project_cfg.path) / ".pollypm" / "state.db"
-                )
-                if project_db.exists():
-                    return project_db
-        except Exception:
-            pass
-
-    # Default resolution: workspace-root DB. Every `pm notify`/`pm inbox`
-    # call without an explicit --db lands here, so items are always
-    # visible regardless of which worktree or directory the caller
-    # invoked from.
-    try:
-        from pollypm.config import load_config
-        config = load_config()
-        workspace_root = getattr(config.project, "workspace_root", None)
-        if workspace_root is not None:
-            candidate = Path(workspace_root) / ".pollypm" / "state.db"
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            return candidate
-    except Exception:
-        pass
-
-    # Fallback: cwd-relative default when no config is loadable.
-    db_path = Path(db)
-    if db_path.exists():
-        return db_path
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    return db_path
+# #804: the resolver lives in ``pollypm.work.db_resolver`` so callers
+# outside the CLI (notably ``supervisor_alerts``) don't have to reach
+# into ``_resolve_db_path``. Keep the underscored alias for callers
+# inside this module that still use the old name.
+from pollypm.work.db_resolver import resolve_work_db_path as _resolve_db_path
 
 
 def _project_from_task_id(task_id: str) -> str | None:

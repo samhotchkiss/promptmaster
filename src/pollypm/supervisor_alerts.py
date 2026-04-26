@@ -14,6 +14,7 @@ Contract:
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -23,6 +24,8 @@ from pollypm.models import SessionLaunchSpec
 from pollypm.store.protocol import Store
 from pollypm.storage.state import StateStore
 from pollypm.tmux.client import TmuxWindow
+
+_logger = logging.getLogger(__name__)
 
 
 class SupervisorAlertBoundary(Protocol):
@@ -287,44 +290,62 @@ def _maybe_nudge_reviewer_review(
 
 def _build_review_nudge(supervisor: SupervisorAlertBoundary) -> str | None:
     """Check all projects for tasks in review state."""
-    try:
-        from pollypm.work.cli import _resolve_db_path
+    # #804: route through the public ``pollypm.work.db_resolver`` so
+    # supervisor monitoring isn't tied to a CLI-private helper. Narrow
+    # the catch around the per-project DB read so a contract failure
+    # in path resolution surfaces in logs instead of silently
+    # short-circuiting the whole nudge.
+    from pollypm.work.db_resolver import resolve_work_db_path
 
-        review_tasks: list[str] = []
-        live_keys: set[str] = set()
-        for project_key in supervisor.config.projects:
-            live_keys.add(project_key)
-            db_path = _resolve_db_path(".pollypm/state.db", project=project_key)
-            if not db_path.exists():
-                _REVIEW_NUDGE_CACHE.pop(project_key, None)
-                continue
+    review_tasks: list[str] = []
+    live_keys: set[str] = set()
+    for project_key in supervisor.config.projects:
+        live_keys.add(project_key)
+        try:
+            db_path = resolve_work_db_path(project=project_key)
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "supervisor_alerts: review nudge could not resolve work DB for %s",
+                project_key,
+            )
+            continue
+        if not db_path.exists():
+            _REVIEW_NUDGE_CACHE.pop(project_key, None)
+            continue
+        try:
             entries = _review_tasks_for_project(project_key, db_path)
-            review_tasks.extend(entries)
-        for stale in set(_REVIEW_NUDGE_CACHE) - live_keys:
-            _REVIEW_NUDGE_CACHE.pop(stale, None)
-        if not review_tasks:
-            return None
-        n = len(review_tasks)
-        word = "task" if n == 1 else "tasks"
-        lines = [
-            f"You have {n} {word} waiting for your review:",
-            *review_tasks,
-            "",
-            "Review with: pm task status <id>, then pm task approve <id> --actor russell or pm task reject <id> --actor russell --reason \"...\"",
-        ]
-        return "\n".join(lines)
-    except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "supervisor_alerts: review nudge query failed for %s",
+                project_key,
+            )
+            continue
+        review_tasks.extend(entries)
+    for stale in set(_REVIEW_NUDGE_CACHE) - live_keys:
+        _REVIEW_NUDGE_CACHE.pop(stale, None)
+    if not review_tasks:
         return None
+    n = len(review_tasks)
+    word = "task" if n == 1 else "tasks"
+    lines = [
+        f"You have {n} {word} waiting for your review:",
+        *review_tasks,
+        "",
+        "Review with: pm task status <id>, then pm task approve <id> --actor russell or pm task reject <id> --actor russell --reason \"...\"",
+    ]
+    return "\n".join(lines)
 
 
 def _build_task_nudge(supervisor: SupervisorAlertBoundary, launch: SessionLaunchSpec) -> str | None:
     """Check for queued tasks assigned to this worker and build a nudge message."""
+    # #804: same boundary fix as _build_review_nudge — public resolver,
+    # logged failures instead of swallowing every exception.
     try:
-        from pollypm.work.cli import _resolve_db_path
+        from pollypm.work.db_resolver import resolve_work_db_path
         from pollypm.work.sqlite_service import SQLiteWorkService
 
         project = launch.session.project
-        db_path = _resolve_db_path(".pollypm/state.db", project=project)
+        db_path = resolve_work_db_path(project=project)
         if not db_path.exists():
             return None
         with SQLiteWorkService(db_path=db_path) as svc:
