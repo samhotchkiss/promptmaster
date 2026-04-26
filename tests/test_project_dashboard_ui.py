@@ -430,7 +430,11 @@ def test_status_yellow_when_workspace_action_message_exists(
             assert dashboard_app.data.status_label == "needs attention"
             assert "Waiting on you:" in str(dashboard_app.action_bar.render())
             assert str(dashboard_app.inbox_title.render()) == "Action Needed"
-            rendered = str(dashboard_app.inbox_body.render())
+            # Inbox content is split across inbox_lead, per-card
+            # Statics, and the trailing inbox_body so each card's
+            # response controls can sit directly under it. Use the
+            # combined helper for content assertions.
+            rendered = dashboard_app._inbox_section_text()
             assert "To move this project forward" in rendered
             assert "Action Required" not in rendered
             assert "Details" not in rendered
@@ -529,7 +533,7 @@ def test_plan_review_action_uses_contextual_review_plan_button(
     async def body() -> None:
         async with dashboard_app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
-            rendered = str(dashboard_app.inbox_body.render())
+            rendered = dashboard_app._inbox_section_text()
             assert "A full project plan is ready for your review" in rendered
             assert "Open the plan review surface" in rendered
             assert "Waiting on you:" in str(dashboard_app.action_bar.render())
@@ -590,7 +594,7 @@ def test_user_prompt_payload_drives_dashboard_copy_and_buttons(
     async def body() -> None:
         async with dashboard_app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
-            rendered = str(dashboard_app.inbox_body.render())
+            rendered = dashboard_app._inbox_section_text()
             assert "needs your API key" in rendered
             assert "Add the Bookshop API key" in rendered
             assert "Internal details" not in rendered
@@ -2476,7 +2480,7 @@ def test_project_blocker_summary_lists_required_user_actions(
         async with dashboard_app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
             assert dashboard_app.data is not None
-            rendered = str(dashboard_app.inbox_body.render())
+            rendered = dashboard_app._inbox_section_text()
             assert "To move this project forward" in rendered
             assert "Action Required" not in rendered
             assert "What you need to set up" in rendered
@@ -2668,3 +2672,134 @@ def test_inbox_preview_splits_action_vs_info_items(dashboard_app) -> None:
     assert "Decide review feedback" in head
     assert "Architect status update" not in head
     assert "Architect status update" in tail
+
+
+def test_action_response_controls_sit_under_their_own_card(
+    dashboard_env, dashboard_app,
+) -> None:
+    """Issue #2 — when two action cards render, each card's response
+    controls (Approve / Wait / Other) must sit directly under that
+    card, not stack at the bottom of the inbox section.
+
+    Asserts: (1) each visible card has its body Static and its
+    control row in the same Vertical group; (2) groups mount in
+    order so card 0's controls precede card 1's body in the DOM.
+    """
+    db_path = dashboard_env["project_path"] / ".pollypm" / "state.db"
+    in_progress_id = dashboard_env["task_ids"]["in_progress"]
+    queued_id = dashboard_env["task_ids"]["queued"]
+    store = SQLAlchemyStore(f"sqlite:///{db_path}")
+    try:
+        for task_id, subject in (
+            (in_progress_id, "First decision needed"),
+            (queued_id, "Second decision needed"),
+        ):
+            store.enqueue_message(
+                type="notify",
+                tier="immediate",
+                recipient="user",
+                sender="architect",
+                subject=subject,
+                body="Please choose.",
+                scope="demo",
+                labels=["project:demo"],
+                payload={
+                    "actor": "architect",
+                    "project": "demo",
+                    "task_id": task_id,
+                    "user_prompt": {
+                        "summary": f"{subject} — body",
+                        "steps": ["Step one"],
+                        "question": "Approve?",
+                        "actions": [
+                            {
+                                "label": "Approve",
+                                "kind": "approve_task",
+                                "task_id": task_id,
+                            },
+                            {"label": "Wait", "kind": "record_response"},
+                        ],
+                    },
+                },
+                state="open",
+            )
+    finally:
+        store.close()
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(160, 70)) as pilot:
+            await pilot.pause()
+            assert dashboard_app.data is not None
+            assert len(dashboard_app.data.action_items) >= 2
+
+            # Both card groups visible; trailing inbox_body is the
+            # remainder Static.
+            for idx in range(2):
+                group = dashboard_app.action_card_groups[idx]
+                assert "-hidden" not in group.classes, (
+                    f"action card group {idx} unexpectedly hidden"
+                )
+                # The control row must be a child of the same group
+                # as the card body (interleaved layout, not pooled
+                # at the bottom of the inbox section).
+                row = dashboard_app.action_control_rows[idx]
+                card = dashboard_app.action_card_bodies[idx]
+                assert row.parent is group, (
+                    f"control row {idx} parent is {row.parent!r}, "
+                    f"expected group {group!r}"
+                )
+                assert card.parent is group, (
+                    f"card body {idx} parent is {card.parent!r}, "
+                    f"expected group {group!r}"
+                )
+                # And the row must be visible (-hidden cleared by
+                # _sync_action_controls when the slot is filled).
+                assert "-hidden" not in row.classes, (
+                    f"control row {idx} unexpectedly hidden"
+                )
+
+            # Mount order: title → lead → group 0 → group 1 → inbox_body.
+            inbox_section = dashboard_app.query_one("#proj-inbox-section")
+            children = list(inbox_section.children)
+            ordered_ids = [c.id for c in children]
+            i0 = ordered_ids.index("proj-action-0-group")
+            i1 = ordered_ids.index("proj-action-1-group")
+            assert i0 < i1
+            # The trailing inbox_body Static is mounted last in the
+            # section. (No explicit id, so identify by widget identity.)
+            assert children[-1] is dashboard_app.inbox_body
+
+            # Each card body holds only its own card text (the other
+            # card's body is in a different Static).
+            card0 = str(dashboard_app.action_card_bodies[0].render())
+            card1 = str(dashboard_app.action_card_bodies[1].render())
+            assert "Decision" in card0
+            assert "Decision" in card1
+            # The "To move..." lead is in inbox_lead, not in the
+            # card bodies.
+            assert "To move this project forward" not in card0
+            assert "To move this project forward" not in card1
+            assert "To move this project forward" in str(
+                dashboard_app.inbox_lead.render()
+            )
+
+    _run(body())
+
+
+def test_inbox_section_hides_action_groups_when_no_action_items(
+    dashboard_env, dashboard_app,
+) -> None:
+    """Without action items, the per-card groups + lead must be
+    hidden so they don't reserve empty vertical space in the inbox
+    section."""
+
+    async def body() -> None:
+        async with dashboard_app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            assert dashboard_app.data is not None
+            assert not dashboard_app.data.action_items
+            assert "-hidden" in dashboard_app.inbox_lead.classes
+            for group in dashboard_app.action_card_groups:
+                assert "-hidden" in group.classes
+
+    _run(body())

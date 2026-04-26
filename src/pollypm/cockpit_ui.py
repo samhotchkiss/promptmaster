@@ -9463,6 +9463,22 @@ class PollyProjectDashboardApp(App[None]):
     .proj-action-controls.-hidden {
         display: none;
     }
+    .proj-action-group {
+        height: auto;
+        margin-bottom: 1;
+    }
+    .proj-action-group.-hidden {
+        display: none;
+    }
+    .proj-inbox-lead {
+        height: auto;
+    }
+    .proj-inbox-lead.-hidden {
+        display: none;
+    }
+    .proj-action-card {
+        height: auto;
+    }
     #proj-body {
         height: 1fr;
         padding: 1 0 0 0;
@@ -9600,6 +9616,22 @@ class PollyProjectDashboardApp(App[None]):
         self.inbox_title = Static(
             "[b]Inbox[/b]", classes="proj-section-title", markup=True,
         )
+        # Lead Static — renders the "To move this project forward"
+        # header that introduces the action cards. Hidden when there
+        # are no action items.
+        self.inbox_lead = Static(
+            "", classes="proj-section-body proj-inbox-lead -hidden",
+            markup=True,
+        )
+        # Per-action-card Statics + their wrapping Vertical groups.
+        # Each group contains the card body Static and its
+        # corresponding response controls row, so the controls render
+        # directly under their own card instead of stacking at the
+        # bottom of the inbox section. (Issue #2 — was: both control
+        # rows mounted after the single inbox_body Static, both ended
+        # up under whichever card rendered last.)
+        self.action_card_bodies: list[Static] = []
+        self.action_card_groups: list[Vertical] = []
         self.inbox_body = Static(
             "", classes="proj-section-body", markup=True,
         )
@@ -9632,10 +9664,24 @@ class PollyProjectDashboardApp(App[None]):
                 id=f"proj-action-{idx}-row",
                 classes="proj-action-controls -hidden",
             )
+            card_body = Static(
+                "",
+                id=f"proj-action-{idx}-card",
+                classes="proj-section-body proj-action-card",
+                markup=True,
+            )
+            group = Vertical(
+                card_body,
+                row,
+                id=f"proj-action-{idx}-group",
+                classes="proj-action-group -hidden",
+            )
             self.action_control_rows.append(row)
             self.action_primary_buttons.append(primary)
             self.action_secondary_buttons.append(secondary)
             self.action_other_inputs.append(other)
+            self.action_card_bodies.append(card_body)
+            self.action_card_groups.append(group)
         self.hint = Static(
             self._DEFAULT_HINT, id="proj-hint", markup=True,
         )
@@ -9666,9 +9712,15 @@ class PollyProjectDashboardApp(App[None]):
             with VerticalScroll(id="proj-body"):
                 with Vertical(classes="proj-section", id="proj-inbox-section"):
                     yield self.inbox_title
+                    yield self.inbox_lead
+                    # Each action card sits in its own Vertical group
+                    # together with its response controls so the
+                    # buttons render directly under their card. The
+                    # trailing inbox_body Static below holds everything
+                    # else (click hint, count line, previews, "press i").
+                    for group in self.action_card_groups:
+                        yield group
                     yield self.inbox_body
-                    for row in self.action_control_rows:
-                        yield row
                 with Vertical(classes="proj-section", id="proj-now-section"):
                     yield self.now_title
                     yield self.now_body
@@ -9765,7 +9817,43 @@ class PollyProjectDashboardApp(App[None]):
         self.inbox_title.update(
             "[b]Action Needed[/b]" if data.action_items else "[b]Inbox[/b]"
         )
-        self.inbox_body.update(self._render_inbox_body(data))
+        # Update the consolidated string view first so the side
+        # effect (``self._action_click_task_ids``) is set before we
+        # split the rendered text across the per-card widgets.
+        full_inbox_text = self._render_inbox_body(data)
+        if data.action_items:
+            # Split the consolidated inbox markup into:
+            #   • a lead line ("To move this project forward")
+            #   • one card body per visible action item (interleaved
+            #     with their response controls in the compose tree)
+            #   • a remainder block (click hint + count line + previews
+            #     + "press i") that lives in inbox_body, mounted below
+            #     the last action group.
+            self.inbox_lead.update(
+                "[#f85149][b]To move this project forward[/b][/]"
+            )
+            self.inbox_lead.remove_class("-hidden")
+            visible = data.action_items[:2]
+            for idx, group in enumerate(self.action_card_groups):
+                if idx < len(visible):
+                    self.action_card_bodies[idx].update(
+                        self._render_action_card_body(visible[idx])
+                    )
+                    group.remove_class("-hidden")
+                else:
+                    self.action_card_bodies[idx].update("")
+                    group.add_class("-hidden")
+            self.inbox_body.update(self._render_inbox_remainder(data))
+        else:
+            # No action cards — hide the lead and all groups, render
+            # the entire inbox body as before so blocker / on-hold /
+            # preview content still shows.
+            self.inbox_lead.update("")
+            self.inbox_lead.add_class("-hidden")
+            for idx, group in enumerate(self.action_card_groups):
+                self.action_card_bodies[idx].update("")
+                group.add_class("-hidden")
+            self.inbox_body.update(full_inbox_text)
         self._sync_action_controls(data)
 
         self.hint.update(self._DEFAULT_HINT)
@@ -10231,7 +10319,47 @@ class PollyProjectDashboardApp(App[None]):
             )
         return text
 
+    def _render_action_card_body(self, item: dict) -> str:
+        """Render one Action Needed card (prompt + steps + decision).
+
+        Used by ``_render`` to populate each per-card Static so each
+        action card's response controls (Approve / Wait / Other) sit
+        directly under its own card. Mirrors the per-item branch of
+        ``_render_inbox_body`` so the consolidated string view (used
+        by tests) stays in sync — both call this helper.
+        """
+        prompt = _escape(
+            item.get("plain_prompt")
+            or item.get("next_action")
+            or "Polly needs your decision before this project can continue."
+        )
+        lines: list[str] = [f"  [#f0c45a]◆[/#f0c45a] {prompt}"]
+        unblock_steps = [
+            str(step)
+            for step in (item.get("unblock_steps") or item.get("steps") or [])
+            if str(step).strip()
+        ]
+        if unblock_steps:
+            heading = _escape(item.get("steps_heading") or "What to do")
+            lines.append(f"    [b]{heading}[/b]")
+            for idx, step in enumerate(unblock_steps[:5], start=1):
+                lines.append(f"    [dim]{idx}.[/dim] {_escape(step)}")
+        question = _escape(
+            item.get("decision_question")
+            or "Choose how Polly should proceed."
+        )
+        lines.append(f"    [b]Decision:[/b] {question}")
+        return "\n".join(lines)
+
     def _render_inbox_body(self, data: ProjectDashboardData) -> str:
+        """Return the consolidated inbox markup as a single string.
+
+        At runtime ``_render`` actually splits this content across
+        multiple Statics so the per-card response controls can sit
+        directly under their own card (issue #2). This consolidated
+        view stays around for tests + the click-hint computation in
+        ``_action_card_click_hint`` callers.
+        """
         count = data.inbox_count
         blocked_total = int(data.task_counts.get("blocked", 0))
         on_hold_total = int(data.task_counts.get("on_hold", 0))
@@ -10243,37 +10371,33 @@ class PollyProjectDashboardApp(App[None]):
         if count == 0 and not data.action_items and not blocked_total and not on_hold_total:
             return "[dim]Inbox is clear for this project.[/dim]"
         lines: list[str] = []
+        if data.action_items:
+            lines.append("[#f85149][b]To move this project forward[/b][/]")
+            for item in data.action_items[:2]:
+                lines.append(self._render_action_card_body(item))
+        lines.append(self._render_inbox_remainder(data))
+        return "\n".join(line for line in lines if line)
+
+    def _render_inbox_remainder(self, data: ProjectDashboardData) -> str:
+        """Render the post-action-cards portion of the inbox section.
+
+        Holds the click hint, the blocker / on-hold fallback copy when
+        no action cards render, the ``N need action`` overflow line,
+        the inbox previews (split into action-needed vs FYI), and the
+        ``Press i`` CTA. Mounted in the trailing ``inbox_body`` Static
+        so it sits under both action-card groups.
+        """
+        count = data.inbox_count
+        blocked_total = int(data.task_counts.get("blocked", 0))
+        on_hold_total = int(data.task_counts.get("on_hold", 0))
         action_ids: set[str] = set()
         for item in data.action_items:
             for key in ("task_id", "primary_ref"):
                 value = str(item.get(key) or "")
                 if value:
                     action_ids.add(value)
+        lines: list[str] = []
         if data.action_items:
-            lines.append("[#f85149][b]To move this project forward[/b][/]")
-            for item in data.action_items[:2]:
-                title = _escape(item.get("title") or "")
-                prompt = _escape(
-                    item.get("plain_prompt")
-                    or item.get("next_action")
-                    or "Polly needs your decision before this project can continue."
-                )
-                lines.append(f"  [#f0c45a]\u25c6[/#f0c45a] {prompt}")
-                unblock_steps = [
-                    str(step)
-                    for step in (item.get("unblock_steps") or item.get("steps") or [])
-                    if str(step).strip()
-                ]
-                if unblock_steps:
-                    heading = _escape(item.get("steps_heading") or "What to do")
-                    lines.append(f"    [b]{heading}[/b]")
-                    for idx, step in enumerate(unblock_steps[:5], start=1):
-                        lines.append(f"    [dim]{idx}.[/dim] {_escape(step)}")
-                question = _escape(
-                    item.get("decision_question")
-                    or "Choose how Polly should proceed."
-                )
-                lines.append(f"    [b]Decision:[/b] {question}")
             # One discoverability hint at the bottom of the stack — was
             # previously per-item, which read as "Click this message
             # to open the source task." repeated verbatim under each
@@ -10398,6 +10522,31 @@ class PollyProjectDashboardApp(App[None]):
             lines.append("")
             lines.append("[dim]Press [b]i[/b] to jump to the inbox[/dim]")
         return "\n".join(lines)
+
+    def _inbox_section_text(self) -> str:
+        """Return the joined visible text of every inbox sub-Static.
+
+        Test-only helper: when the inbox is split across the lead
+        Static, per-card Statics, and the trailing body Static (so
+        each card's response controls can sit directly under it),
+        tests still want a single string to assert against. This
+        helper concatenates the rendered text in mount order.
+        """
+        parts: list[str] = []
+        try:
+            parts.append(str(self.inbox_lead.render()))
+        except Exception:  # noqa: BLE001
+            pass
+        for body in self.action_card_bodies:
+            try:
+                parts.append(str(body.render()))
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            parts.append(str(self.inbox_body.render()))
+        except Exception:  # noqa: BLE001
+            pass
+        return "\n".join(p for p in parts if p)
 
     def _sync_action_controls(self, data: ProjectDashboardData) -> None:
         """Show decision controls for the visible Action Needed cards."""
