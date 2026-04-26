@@ -62,6 +62,44 @@ def test_read_new_events_returns_empty_when_no_new_data(tmp_path: Path) -> None:
     assert new_offset == size
 
 
+def test_load_cursors_returns_empty_on_malformed_json(tmp_path: Path) -> None:
+    """Cycle 120 — ``_load_cursors`` did
+    ``json.loads(...).get("files", {}).items()``. A corrupt file that
+    parsed to a non-dict (list, null, string) or whose ``files`` key
+    was a non-dict raised AttributeError — uncaught by the
+    ``(JSONDecodeError, OSError)`` clause — and crashed the whole
+    5-minute sweep across every tracked project.
+    """
+    from pollypm.session_intelligence import _load_cursors
+
+    project_root = tmp_path
+    cursor_path = project_root / ".pollypm" / "transcripts" / ".session-intelligence-state.json"
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cursor_path.write_text("{not valid json")
+    assert _load_cursors(project_root) == {}
+
+    cursor_path.write_text("[1, 2, 3]")
+    assert _load_cursors(project_root) == {}
+
+    cursor_path.write_text('{"files": "oops"}')
+    assert _load_cursors(project_root) == {}
+
+
+def test_load_cursors_skips_individual_bad_entries(tmp_path: Path) -> None:
+    """A single non-int cursor value shouldn't poison the whole map."""
+    from pollypm.session_intelligence import _load_cursors
+
+    project_root = tmp_path
+    cursor_path = project_root / ".pollypm" / "transcripts" / ".session-intelligence-state.json"
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
+    cursor_path.write_text(
+        '{"files": {"good/events.jsonl": 100, "bad/events.jsonl": "oops"}}'
+    )
+    cursors = _load_cursors(project_root)
+    assert cursors == {"good/events.jsonl": 100}
+
+
 def test_read_new_events_returns_only_new_lines(tmp_path: Path) -> None:
     """When the file grows past the cursor, only the new tail is
     returned. Guards against a regression where the truncation fix

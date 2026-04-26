@@ -200,9 +200,26 @@ def _load_cursors(project_root: Path) -> dict[str, int]:
         return {}
     try:
         data = json.loads(path.read_text())
-        return {str(k): int(v) for k, v in data.get("files", {}).items()}
     except (json.JSONDecodeError, OSError):
         return {}
+    # Defend against a cursor file corrupted to a non-dict shape (list,
+    # null, string) or with ``files`` set to a non-dict value. Without
+    # these guards a single malformed read crashed the whole 5-minute
+    # sweep across every tracked project — same family as the cycle
+    # 94-119 corrupt-payload defenses.
+    if not isinstance(data, dict):
+        return {}
+    files = data.get("files", {})
+    if not isinstance(files, dict):
+        return {}
+    cursors: dict[str, int] = {}
+    for k, v in files.items():
+        try:
+            cursors[str(k)] = int(v)
+        except (TypeError, ValueError):
+            # Skip individual junk entries; preserve well-formed ones.
+            continue
+    return cursors
 
 
 def _save_cursors(project_root: Path, cursors: dict[str, int]) -> None:
