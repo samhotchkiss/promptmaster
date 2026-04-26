@@ -10181,9 +10181,14 @@ class PollyProjectDashboardApp(App[None]):
         # screen and the line tells Sam to jump to the inbox for more.
         displayed_actions = len(data.action_items[:2])
         if count and count > displayed_actions:
+            # Verb agreement, sister to cycle 117's action-bar fix:
+            # ``1 needs action``, ``2 need action``. The overflow line
+            # only fires when count > displayed_actions, so the
+            # singular case (1 inbox item, 0 cards rendered) is reachable.
+            verb = "needs" if count == 1 else "need"
             lines.append(
                 f"[#f0c45a]\u25c6[/#f0c45a] [b]{count}[/b] "
-                f"[dim]need action[/dim]"
+                f"[dim]{verb} action[/dim]"
             )
         # Split preview_items into "actually needs action" vs the
         # rest. With no action cards rendered, lumping a "completed
