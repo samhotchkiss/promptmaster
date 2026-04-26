@@ -10868,6 +10868,22 @@ class PollyProjectDashboardApp(App[None]):
             return
         kind = str(action.get("kind") or "").strip()
         if kind == "review_plan":
+            # Audit item: "Review plan currently routes to inbox; it
+            # may be more useful to route to the plan review item
+            # directly if there is a stable route." When the action
+            # card carries a project task ref (the plan_project task
+            # at user_approval), land the user on that task — they
+            # can act on it from one click instead of navigating from
+            # inbox → task. Falls back to inbox when no stable task
+            # ref is available (older messages, missing primary_ref).
+            task_ref = str(
+                action.get("task_id")
+                or item.get("primary_ref")
+                or ""
+            )
+            if _PROJECT_TASK_REF_RE.fullmatch(task_ref):
+                self._route_to_task(task_ref)
+                return
             self.action_jump_inbox()
             return
         if kind == "open_task":

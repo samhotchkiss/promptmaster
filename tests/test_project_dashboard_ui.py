@@ -549,12 +549,41 @@ def test_plan_review_action_uses_contextual_review_plan_button(
             assert dashboard_app.action_primary_buttons[0].label.plain == "Review plan"
             assert dashboard_app.action_secondary_buttons[0].label.plain == "Open task"
 
-            routed: list[str] = []
-            dashboard_app.action_jump_inbox = lambda: routed.append("inbox")  # type: ignore[method-assign]
+            # Audit fix: the "Review plan" primary button now routes
+            # directly to the underlying plan_project task instead of
+            # dropping into the bare inbox. The task ref comes from the
+            # ``plan_task:<ref>`` label on the message — here, demo/3.
+            routed_tasks: list[str] = []
+            routed_inbox: list[str] = []
+            dashboard_app.action_jump_inbox = lambda: routed_inbox.append("inbox")  # type: ignore[method-assign]
+            dashboard_app._route_to_task = lambda task_id: routed_tasks.append(task_id)  # type: ignore[method-assign]
             dashboard_app._perform_dashboard_action(0, "primary")
-            assert routed == ["inbox"]
+            assert routed_tasks == ["demo/3"]
+            assert routed_inbox == []
 
     _run(body())
+
+
+def test_review_plan_falls_back_to_inbox_without_task_ref(dashboard_app) -> None:
+    """When a ``review_plan`` action has no resolvable task ref (older
+    messages, malformed primary_ref), the button still lands the user
+    somewhere useful — the inbox — rather than no-oping silently.
+    """
+    routed_inbox: list[str] = []
+    routed_tasks: list[str] = []
+    dashboard_app.action_jump_inbox = lambda: routed_inbox.append("inbox")  # type: ignore[method-assign]
+    dashboard_app._route_to_task = lambda task_id: routed_tasks.append(task_id)  # type: ignore[method-assign]
+
+    fake_action_item = {
+        "task_id": "msg:demo:1",
+        "primary_ref": "blocker-summary:42",  # NOT a project/N task ref
+        "primary_action": {"kind": "review_plan", "label": "Review plan"},
+    }
+    dashboard_app._action_item_at = lambda idx: fake_action_item  # type: ignore[method-assign]
+
+    dashboard_app._perform_dashboard_action(0, "primary")
+    assert routed_inbox == ["inbox"]
+    assert routed_tasks == []
 
 
 def test_user_prompt_payload_drives_dashboard_copy_and_buttons(
