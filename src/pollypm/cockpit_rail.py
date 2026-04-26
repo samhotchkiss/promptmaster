@@ -52,7 +52,10 @@ from pollypm.config import load_config
 from pollypm.heartbeats.snapshots import read_recent_heartbeat_snapshot
 from pollypm.providers import get_provider
 from pollypm.runtimes import get_runtime
-from pollypm.service_api import PollyPMService
+# Lazy: ``PollyPMService`` pulls supervisor → sqlalchemy on import. The
+# rail module is loaded by every cockpit pane (project dashboard, inbox,
+# tasks); deferring this import shaves the supervisor cost off any pane
+# that doesn't instantiate a ``CockpitRouter``.
 from pollypm.session_services import create_tmux_client
 
 
@@ -441,6 +444,7 @@ class CockpitRouter:
 
     def __init__(self, config_path: Path) -> None:
         self.config_path = config_path
+        from pollypm.service_api import PollyPMService
         self.service = PollyPMService(config_path)
         self.tmux = create_tmux_client()
         self.presence = CockpitPresence(self.tmux)

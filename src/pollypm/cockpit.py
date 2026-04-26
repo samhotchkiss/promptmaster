@@ -6,7 +6,11 @@ from pathlib import Path
 from pollypm.config import load_config
 from pollypm.cockpit_rail import CockpitItem, CockpitRouter  # noqa: F401
 from pollypm.projects import ensure_project_scaffold
-from pollypm.service_api import PollyPMService
+# Lazy: ``PollyPMService`` pulls supervisor → sqlalchemy on import. Most
+# cockpit-detail dispatches don't need it — the build helpers imported
+# below cover everything except the ``_build_cockpit_detail_inner`` path
+# that boots a supervisor for the legacy text dump. Deferring saves
+# ~211ms cumulative on every cockpit-pane spawn.
 from pollypm.task_backends import get_task_backend
 from pollypm.worktrees import list_worktrees
 
@@ -78,6 +82,7 @@ def build_cockpit_detail(config_path: Path, kind: str, target: str | None = None
 
 
 def _build_cockpit_detail_inner(config_path: Path, kind: str, target: str | None = None) -> str:
+    from pollypm.service_api import PollyPMService
     supervisor = PollyPMService(config_path).load_supervisor()
     try:
         supervisor.ensure_layout()

@@ -26,7 +26,7 @@ import resource
 from pathlib import Path
 import subprocess
 import time
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 # Raise FD limit early — the cockpit opens many subprocesses and file handles.
 try:
@@ -120,7 +120,14 @@ from pollypm.rejection_feedback import (
     feedback_target_task_id,
     is_rejection_feedback_task,
 )
-from pollypm.service_api import PollyPMService
+# ``PollyPMService`` pulls supervisor → sqlalchemy on import (~211ms
+# cumulative on cold spawn). Every cockpit pane (project dashboard,
+# inbox, tasks) eats that cost even when the pane never instantiates
+# a service. Defer to per-method local imports; keep the symbol
+# visible to type-checkers under TYPE_CHECKING for the function
+# parameter annotations below (``service: PollyPMService | None``).
+if TYPE_CHECKING:
+    from pollypm.service_api import PollyPMService  # noqa: F401
 from pollypm.cockpit import build_cockpit_detail
 from pollypm.cockpit_rail import CockpitItem, CockpitPresence, CockpitRouter
 
@@ -767,6 +774,7 @@ class PollyCockpitApp(App[None]):
         self.config_path = config_path
         self.router = CockpitRouter(config_path)
         self.presence = CockpitPresence(self.router.tmux)
+        from pollypm.service_api import PollyPMService
         self.service = PollyPMService(config_path)
         _lines = ASCII_POLLY.split("\n")
         self.brand = Static(
@@ -1443,6 +1451,7 @@ class PollyCockpitApp(App[None]):
         )
         if result.returncode == 0 and "CONFIRMED" in (result.stdout or ""):
             try:
+                from pollypm.service_api import PollyPMService
                 supervisor = PollyPMService(self.config_path).load_supervisor()
                 supervisor.shutdown_tmux()
             except Exception:  # noqa: BLE001
@@ -2213,6 +2222,7 @@ def _gather_settings_data(
     accounts: list[dict] = []
     if account_statuses is None:
         if service is None:
+            from pollypm.service_api import PollyPMService
             service = PollyPMService(config_path)
         try:
             list_cached = getattr(service, "list_cached_account_statuses", None)
@@ -2643,6 +2653,7 @@ class PollySettingsPaneApp(App[None]):
     def __init__(self, config_path: Path) -> None:
         super().__init__()
         self.config_path = config_path
+        from pollypm.service_api import PollyPMService
         self.service = PollyPMService(config_path)
         try:
             role_alias_options = [
@@ -8128,6 +8139,7 @@ def _dashboard_active_worker(
     worker_info: dict | None = None
     alert_count = 0
     try:
+        from pollypm.service_api import PollyPMService
         supervisor = PollyPMService(config_path).load_supervisor()
     except Exception:  # noqa: BLE001
         return None, 0
