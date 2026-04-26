@@ -678,6 +678,14 @@ class KeyboardHelpModal(ModalScreen[None]):
         )
 
     def _render_body(self) -> str:
+        # The modal can render inside narrow panes (e.g. the 30-col
+        # rail), where a one-line ``KEY    DESC`` layout wraps and
+        # the wrap continuation reverses the visual indent so keys
+        # appear *more* indented than descriptions (#795). Use a
+        # robust two-line shape per binding instead: key on its own
+        # line at indent 2, description below it at indent 6. Both
+        # lines are short enough to never wrap, and the deeper
+        # description indent makes the pairing unambiguous.
         if not self._sections:
             return "[dim]No keybindings registered.[/dim]"
         lines: list[str] = []
@@ -688,10 +696,9 @@ class KeyboardHelpModal(ModalScreen[None]):
             if not rows:
                 lines.append("  [dim](none)[/dim]")
                 continue
-            max_key_len = max((len(key) for key, _ in rows), default=0)
             for key, desc in rows:
-                pad = " " * max(0, max_key_len - len(key))
-                lines.append(f"  [b]{key}[/b]{pad}   [dim]{desc}[/dim]")
+                lines.append(f"  [b]{key}[/b]")
+                lines.append(f"      [dim]{desc}[/dim]")
         return "\n".join(lines)
 
     def compose(self) -> ComposeResult:
