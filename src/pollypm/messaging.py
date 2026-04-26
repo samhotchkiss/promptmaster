@@ -48,7 +48,7 @@ def _alert(
         try:
             store.upsert_alert(_SESSION, alert_type, severity, message)
             if event:
-                from pollypm.plugins_builtin.activity_feed.summaries import (
+                from pollypm.events import (
                     activity_summary,
                 )
 

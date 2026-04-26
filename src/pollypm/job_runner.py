@@ -138,7 +138,7 @@ def _run_session_intelligence_sweep(supervisor: Supervisor, payload: dict[str, A
     from pollypm.session_intelligence import sweep_all_sessions
     result = sweep_all_sessions(supervisor.config)
     if result["sessions_processed"]:
-        from pollypm.plugins_builtin.activity_feed.summaries import activity_summary
+        from pollypm.events import activity_summary
 
         n_sessions = result["sessions_processed"]
         n_entries = result["knowledge_entries"]
@@ -191,7 +191,7 @@ def _run_project_intelligence(supervisor: Supervisor, payload: dict[str, Any]) -
         if run_project_intelligence(supervisor.config, project_root):
             updated += 1
     if updated:
-        from pollypm.plugins_builtin.activity_feed.summaries import activity_summary
+        from pollypm.events import activity_summary
 
         supervisor.msg_store.append_event(
             scope="project_intelligence",
@@ -224,7 +224,7 @@ def _run_token_ledger_sync(supervisor: Supervisor, payload: dict[str, Any]) -> N
     from pollypm.transcript_ledger import sync_token_ledger_for_config
     samples = sync_token_ledger_for_config(supervisor.config)
     if samples:
-        from pollypm.plugins_builtin.activity_feed.summaries import activity_summary
+        from pollypm.events import activity_summary
 
         supervisor.msg_store.append_event(
             scope="heartbeat",
@@ -272,7 +272,7 @@ def _run_prune_state(supervisor: Supervisor, payload: dict[str, Any]) -> None:
     result = supervisor.store.prune_old_data()
     total = sum(result.values())
     if total > 0:
-        from pollypm.plugins_builtin.activity_feed.summaries import activity_summary
+        from pollypm.events import activity_summary
 
         events_count = result["events"]
         heartbeats_count = result["heartbeats"]

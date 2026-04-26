@@ -148,7 +148,7 @@ def _raise_upgrade_alert(project_root: Path, current: str, latest: str) -> None:
                 "info",
                 f"PollyPM {latest} is available (current: {current}). Run `pm upgrade`.",
             )
-            from pollypm.plugins_builtin.activity_feed.summaries import (
+            from pollypm.events import (
                 activity_summary,
             )
 

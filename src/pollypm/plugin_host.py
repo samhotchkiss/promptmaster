@@ -84,7 +84,7 @@ def _emit_plugin_lifecycle_event(
     if not callable(record):
         return
     try:
-        from pollypm.plugins_builtin.activity_feed.summaries import activity_summary
+        from pollypm.events import activity_summary
 
         record(
             "plugin",
