@@ -153,3 +153,36 @@ def test_state_store_readonly_mode_reads_existing_data(tmp_path: Path) -> None:
     assert lease.owner == "human"
     assert runtime is not None
     assert runtime.status == "idle"
+
+
+def test_open_alerts_survives_corrupt_non_dict_payload(tmp_path: Path) -> None:
+    """Cycle 108 — ``open_alerts`` did ``json.loads(row[3])`` then
+    ``payload.get("severity")``. A messages row whose ``payload_json``
+    parsed to a non-dict (list/null/string) would AttributeError out
+    of the loop and prevent the dashboard from loading any alerts.
+    Defend with the new ``_safe_payload`` helper."""
+    db_path = tmp_path / "state.db"
+    store = StateStore(db_path)
+    store.upsert_session(
+        name="worker",
+        role="worker",
+        project="demo",
+        provider="codex",
+        account="codex_primary",
+        cwd=str(tmp_path),
+        window_name="worker",
+    )
+    store.upsert_alert("worker", "idle_output", "warn", "No new output")
+    # Hand-corrupt the persisted payload to a JSON list — simulate a
+    # legacy or hand-edited DB row.
+    store.execute(
+        "UPDATE messages SET payload_json = ? WHERE type = 'alert'",
+        ('[1, 2, 3]',),
+    )
+    alerts = store.open_alerts()
+    # Without the fix this raised AttributeError. With the fix the row
+    # comes back with severity coerced to "" (empty payload).
+    assert len(alerts) == 1
+    assert alerts[0].alert_type == "idle_output"
+    assert alerts[0].severity == ""
+    store.close()

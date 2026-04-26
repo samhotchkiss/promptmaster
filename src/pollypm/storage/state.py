@@ -495,6 +495,24 @@ def _strip_alert_subject(subject: str) -> str:
     return subject
 
 
+def _safe_payload(raw: object) -> dict:
+    """Decode a ``payload_json`` column into a dict, defensively.
+
+    Producers always write dict payloads, but a hand-edited or legacy
+    DB row could parse to a list/null/string — downstream callers do
+    ``payload.get(...)`` and would AttributeError. Coerce non-dict
+    shapes to ``{}`` so a corrupt row degrades gracefully. Mirrors the
+    cycle 107 fix in ``SQLAlchemyStore.query_messages``.
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 class StateStore:
     def __init__(self, path: Path, *, readonly: bool = False) -> None:
         self.path = path
@@ -1409,7 +1427,7 @@ class StateStore:
         ).fetchall()
         out: list[AlertRecord] = []
         for row in rows:
-            payload = json.loads(row[3]) if row[3] else {}
+            payload = _safe_payload(row[3])
             out.append(
                 AlertRecord(
                     session_name=row[1],
@@ -1435,7 +1453,7 @@ class StateStore:
         ).fetchone()
         if row is None:
             return None
-        payload = json.loads(row[3]) if row[3] else {}
+        payload = _safe_payload(row[3])
         return AlertRecord(
             session_name=row[1],
             alert_type=row[2],
@@ -1590,7 +1608,7 @@ class StateStore:
         rows = self.execute(sql, tuple(params)).fetchall()
         out: list[dict] = []
         for row in rows:
-            payload = json.loads(row[5]) if row[5] else {}
+            payload = _safe_payload(row[5])
             out.append(
                 {
                     "session_name": row[0],
