@@ -168,17 +168,41 @@ def _russell_state(ctx: RailContext) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Per-render memoization for ``_count_inbox_tasks_for_label``. The rail
+# calls ``_inbox_count`` three times per render (label, state, badge),
+# each call would otherwise walk every tracked project's
+# SQLAlchemyStore + SQLiteWorkService. The cache key is the router
+# instance id (a fresh router per cockpit boot) plus a coarse 1s
+# wall-clock bucket so the count refreshes between ticks but doesn't
+# triple-fire within one. Cleared lazily as the bucket rolls over.
+_INBOX_COUNT_CACHE: dict[tuple[int, int], int] = {}
+
+
 def _inbox_count(ctx: RailContext) -> int:
     config = _config(ctx)
     if config is None:
         return 0
     from pollypm.cockpit import _count_inbox_tasks_for_label
 
+    import time as _time
+
+    router = _router(ctx)
+    bucket = (id(router) if router is not None else 0, int(_time.monotonic()))
+    cached = _INBOX_COUNT_CACHE.get(bucket)
+    if cached is not None:
+        return cached
     try:
-        return int(_count_inbox_tasks_for_label(config) or 0)
+        count = int(_count_inbox_tasks_for_label(config) or 0)
     except Exception:  # noqa: BLE001
         logger.exception("core_rail_items: inbox count raised")
         return 0
+    # Drop stale per-router buckets so the cache doesn't grow.
+    router_id = bucket[0]
+    for stale_key in list(_INBOX_COUNT_CACHE.keys()):
+        if stale_key[0] == router_id and stale_key != bucket:
+            _INBOX_COUNT_CACHE.pop(stale_key, None)
+    _INBOX_COUNT_CACHE[bucket] = count
+    return count
 
 
 def _inbox_label(ctx: RailContext) -> str:
