@@ -34,12 +34,13 @@ class WorkService(Protocol):
         self,
         *,
         title: str,
-        description: str,
+        description: str = "",
         type: str,
         project: str,
         flow_template: str,
         roles: dict[str, str],
-        priority: str,
+        priority: str = "normal",
+        created_by: str = "system",
         acceptance_criteria: str | None = None,
         constraints: str | None = None,
         relevant_files: list[str] | None = None,
@@ -49,6 +50,10 @@ class WorkService(Protocol):
         """Create a task in ``draft`` state.
 
         Validates that all required roles for the chosen flow are filled.
+
+        ``created_by`` records the author of the task. Defaults to
+        ``"system"`` for orchestrator-spawned work; CLI / API callers
+        should pass a real actor (#796).
         """
         ...
 
@@ -71,18 +76,26 @@ class WorkService(Protocol):
         """Query tasks with optional filters."""
         ...
 
-    def queue(self, task_id: str, actor: str) -> Task:
+    def queue(self, task_id: str, actor: str, skip_gates: bool = False) -> Task:
         """Move a task from ``draft`` to ``queued``.
 
         If ``requires_human_review`` is set, validates that the human has
         approved via inbox.
+
+        ``skip_gates`` bypasses gate evaluation when the caller has
+        explicit authority (``pm task queue --skip-gates``). Implementations
+        must record the bypass on the resulting transition (#796).
         """
         ...
 
-    def claim(self, task_id: str, actor: str) -> Task:
+    def claim(self, task_id: str, actor: str, skip_gates: bool = False) -> Task:
         """Atomically set assignee, activate first flow node, and set status to ``in_progress``.
 
         The task must currently be ``queued``.
+
+        ``skip_gates`` mirrors :meth:`queue` — used by ``pm task claim
+        --skip-gates`` for repair flows where the operator has decided
+        to bypass advancement guards (#796).
         """
         ...
 
@@ -116,19 +129,38 @@ class WorkService(Protocol):
     # Flow progression
     # ------------------------------------------------------------------
 
-    def node_done(self, task_id: str, actor: str, work_output: WorkOutput) -> Task:
+    def node_done(
+        self,
+        task_id: str,
+        actor: str,
+        work_output: WorkOutput | dict | None = None,
+        skip_gates: bool = False,
+    ) -> Task:
         """Signal that the current work node is complete.
 
         Validates that a work output is present, then advances the flow to
         ``next_node``.  Updates ``work_status`` based on the next node type.
+
+        ``work_output`` accepts either the typed dataclass or a dict
+        shape for callers that don't share the import; implementations
+        coerce on the way in. ``skip_gates`` bypasses advancement
+        guards (#796).
         """
         ...
 
-    def approve(self, task_id: str, actor: str, reason: str | None = None) -> Task:
+    def approve(
+        self,
+        task_id: str,
+        actor: str,
+        reason: str | None = None,
+        skip_gates: bool = False,
+    ) -> Task:
         """Approve at a review node.
 
         Advances to ``next_node``.  If the target is terminal the task
         becomes ``done``.
+
+        ``skip_gates`` bypasses gate evaluation (#796).
         """
         ...
 
@@ -161,8 +193,20 @@ class WorkService(Protocol):
     # Context
     # ------------------------------------------------------------------
 
-    def add_context(self, task_id: str, actor: str, text: str) -> ContextEntry:
-        """Append an entry to the task's context log."""
+    def add_context(
+        self,
+        task_id: str,
+        actor: str,
+        text: str,
+        *,
+        entry_type: str = "note",
+    ) -> ContextEntry:
+        """Append an entry to the task's context log.
+
+        ``entry_type`` classifies the row. ``"note"`` is the generic
+        context-log default (mirrors prior behaviour); inbox flows
+        also use ``"reply"`` and ``"read"`` markers (#796).
+        """
         ...
 
     def get_context(
@@ -170,8 +214,14 @@ class WorkService(Protocol):
         task_id: str,
         limit: int | None = None,
         since: str | None = None,
+        entry_type: str | None = None,
     ) -> list[ContextEntry]:
-        """Read context entries, most recent first."""
+        """Read context entries, most recent first.
+
+        When ``entry_type`` is supplied, restricts the result to rows
+        of that classification — pass ``"reply"`` for the inbox thread
+        view, ``"read"`` for read markers, ``None`` for every row (#796).
+        """
         ...
 
     # ------------------------------------------------------------------
@@ -272,11 +322,18 @@ class WorkService(Protocol):
         worktree_path: str,
         branch_name: str,
         started_at: str,
+        provider: str | None = None,
+        provider_home: str | None = None,
     ) -> None:
         """Record a new worker-session binding or resurrect an ended one.
 
         Resurrecting clears ``ended_at``, ``archive_path`` and the token
         counters so the row is reusable after cancel → re-claim.
+
+        ``provider`` (``claude``/``codex``/...) and ``provider_home``
+        (``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME``) are persisted at launch
+        so per-task transcript archival can locate the right tree at
+        teardown without depending on the ambient process env (#809).
         """
         ...
 

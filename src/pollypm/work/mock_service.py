@@ -542,10 +542,19 @@ class MockWorkService:
     # Context
     # ------------------------------------------------------------------
 
-    def add_context(self, task_id: str, actor: str, text: str) -> ContextEntry:
+    def add_context(
+        self,
+        task_id: str,
+        actor: str,
+        text: str,
+        *,
+        entry_type: str = "note",
+    ) -> ContextEntry:
         if task_id not in self._tasks:
             raise TaskNotFoundError(f"Task '{task_id}' not found.")
-        entry = ContextEntry(actor=actor, timestamp=_now(), text=text)
+        entry = ContextEntry(
+            actor=actor, timestamp=_now(), text=text, entry_type=entry_type,
+        )
         self._context.setdefault(task_id, []).append(entry)
         return entry
 
@@ -554,11 +563,14 @@ class MockWorkService:
         task_id: str,
         limit: int | None = None,
         since: str | None = None,
+        entry_type: str | None = None,
     ) -> list[ContextEntry]:
         entries = list(reversed(self._context.get(task_id, [])))
         if since is not None:
             since_dt = datetime.fromisoformat(since)
             entries = [e for e in entries if e.timestamp > since_dt]
+        if entry_type is not None:
+            entries = [e for e in entries if e.entry_type == entry_type]
         if limit is not None:
             entries = entries[:limit]
         return entries
