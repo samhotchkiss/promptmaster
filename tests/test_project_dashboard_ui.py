@@ -2615,6 +2615,56 @@ def test_other_open_items_skips_duplicates_of_action_cards(
     assert "Different thing waiting on you" in other_section
 
 
+def test_action_card_steps_compact_when_two_cards_visible(dashboard_app) -> None:
+    """When two action cards are visible, each one shrinks its step list.
+
+    Sam's perf review (2026-04-26) flagged the dual-card stack as
+    "too tall/noisy" — polly_remote routinely renders two cards with
+    five setup steps each, blowing past a single screen. The renderer
+    now caps steps at 2 per card with a ``+N more`` tail when more
+    than one card is in view; a single solo card keeps the full
+    five-step display so context isn't lost when there's only one
+    thing to do.
+    """
+    long_steps = [
+        "Step one setup task.",
+        "Step two setup task.",
+        "Step three setup task.",
+        "Step four setup task.",
+        "Step five setup task.",
+    ]
+
+    # One card visible — expect full 5 steps, no truncation tail.
+    solo = dashboard_app._render_action_card_body(
+        {
+            "plain_prompt": "Do the thing.",
+            "decision_question": "Approve?",
+            "unblock_steps": long_steps,
+            "steps_heading": "What you need to set up",
+        },
+        compact=False,
+    )
+    assert "[dim]5.[/dim] Step five setup task." in solo
+    assert "more — click card" not in solo
+
+    # Two cards visible — expect 2 steps + "+3 more" tail.
+    compact = dashboard_app._render_action_card_body(
+        {
+            "plain_prompt": "Do the thing.",
+            "decision_question": "Approve?",
+            "unblock_steps": long_steps,
+            "steps_heading": "What you need to set up",
+        },
+        compact=True,
+    )
+    assert "[dim]1.[/dim] Step one setup task." in compact
+    assert "[dim]2.[/dim] Step two setup task." in compact
+    assert "[dim]3.[/dim] Step three setup task." not in compact
+    assert "(+3 more — click card to see all)" in compact
+    # Decision still always renders.
+    assert "[b]Decision:[/b] Approve?" in compact
+
+
 def test_inbox_preview_splits_action_vs_info_items(dashboard_app) -> None:
     """Regression: when no Action Needed cards render but the inbox
     preview holds a mix of ``needs_action`` and informational items,

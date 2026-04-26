@@ -9901,10 +9901,13 @@ class PollyProjectDashboardApp(App[None]):
             )
             self.inbox_lead.remove_class("-hidden")
             visible = data.action_items[:2]
+            compact_cards = len(visible) > 1
             for idx, group in enumerate(self.action_card_groups):
                 if idx < len(visible):
                     self.action_card_bodies[idx].update(
-                        self._render_action_card_body(visible[idx])
+                        self._render_action_card_body(
+                            visible[idx], compact=compact_cards,
+                        )
                     )
                     group.remove_class("-hidden")
                 else:
@@ -10386,7 +10389,9 @@ class PollyProjectDashboardApp(App[None]):
             )
         return text
 
-    def _render_action_card_body(self, item: dict) -> str:
+    def _render_action_card_body(
+        self, item: dict, *, compact: bool = False,
+    ) -> str:
         """Render one Action Needed card (prompt + steps + decision).
 
         Used by ``_render`` to populate each per-card Static so each
@@ -10394,6 +10399,13 @@ class PollyProjectDashboardApp(App[None]):
         directly under its own card. Mirrors the per-item branch of
         ``_render_inbox_body`` so the consolidated string view (used
         by tests) stays in sync — both call this helper.
+
+        ``compact`` clips the steps list to the first two entries with
+        a ``+N more`` summary tail. Caller passes ``True`` when more
+        than one action card is visible — Sam (perf review,
+        2026-04-26) flagged the dual-card stack as "too tall/noisy",
+        and polly_remote routinely renders two cards with 5 steps
+        each, blowing past a single screen.
         """
         prompt = _escape(
             item.get("plain_prompt")
@@ -10409,8 +10421,15 @@ class PollyProjectDashboardApp(App[None]):
         if unblock_steps:
             heading = _escape(item.get("steps_heading") or "What to do")
             lines.append(f"    [b]{heading}[/b]")
-            for idx, step in enumerate(unblock_steps[:5], start=1):
+            step_cap = 2 if compact else 5
+            visible_steps = unblock_steps[:step_cap]
+            for idx, step in enumerate(visible_steps, start=1):
                 lines.append(f"    [dim]{idx}.[/dim] {_escape(step)}")
+            hidden = len(unblock_steps) - len(visible_steps)
+            if hidden > 0:
+                lines.append(
+                    f"    [dim](+{hidden} more — click card to see all)[/dim]"
+                )
         question = _escape(
             item.get("decision_question")
             or "Choose how Polly should proceed."
@@ -10440,8 +10459,12 @@ class PollyProjectDashboardApp(App[None]):
         lines: list[str] = []
         if data.action_items:
             lines.append("[#f85149][b]To move this project forward[/b][/]")
-            for item in data.action_items[:2]:
-                lines.append(self._render_action_card_body(item))
+            visible_items = data.action_items[:2]
+            compact_cards = len(visible_items) > 1
+            for item in visible_items:
+                lines.append(
+                    self._render_action_card_body(item, compact=compact_cards)
+                )
         lines.append(self._render_inbox_remainder(data))
         return "\n".join(line for line in lines if line)
 
