@@ -500,20 +500,31 @@ class SQLAlchemyStore:
             result = conn.execute(stmt)
             rows = [dict(row._mapping) for row in result]
 
-        # Decode JSON text columns for caller convenience.
+        # Decode JSON text columns for caller convenience. Producers
+        # always write dict payloads / list labels (see ``upsert_message``
+        # / ``append_event``), but a hand-edited or legacy DB could
+        # surface a non-dict payload (list/null/string) — downstream
+        # code does ``payload.get(...)``, which would AttributeError
+        # on those shapes. Coerce parsed-but-wrong-type values back to
+        # their expected empty form so a corrupt row degrades gracefully
+        # instead of crashing the cockpit inbox.
         for row in rows:
             payload_json = row.get("payload_json")
             if isinstance(payload_json, str):
                 try:
-                    row["payload"] = json.loads(payload_json)
+                    parsed = json.loads(payload_json)
                 except json.JSONDecodeError:
-                    row["payload"] = {}
+                    parsed = {}
+                row["payload"] = parsed if isinstance(parsed, dict) else {}
             labels_json = row.get("labels")
             if isinstance(labels_json, str):
                 try:
-                    row["labels"] = json.loads(labels_json)
+                    parsed_labels = json.loads(labels_json)
                 except json.JSONDecodeError:
-                    row["labels"] = []
+                    parsed_labels = []
+                row["labels"] = (
+                    parsed_labels if isinstance(parsed_labels, list) else []
+                )
         return rows
 
     # ------------------------------------------------------------------
