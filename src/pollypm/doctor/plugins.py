@@ -33,7 +33,7 @@ def check_builtin_plugin_manifests() -> doctor.CheckResult:
     for manifest in builtin_root.glob("*/pollypm-plugin.toml"):
         seen += 1
         try:
-            tomllib.loads(manifest.read_text())
+            tomllib.loads(manifest.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
             bad.append((manifest.parent.name, str(exc)))
     if bad:
@@ -103,7 +103,7 @@ def check_plugin_capabilities_no_deprecations() -> doctor.CheckResult:
     offenders: list[str] = []
     for manifest in builtin_root.glob("*/pollypm-plugin.toml"):
         try:
-            data = tomllib.loads(manifest.read_text())
+            data = tomllib.loads(manifest.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             continue
         caps = data.get("capabilities") if isinstance(data, dict) else None

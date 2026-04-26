@@ -188,7 +188,7 @@ def _codex_credentials_store(home: Path) -> str:
     if not config_path.exists():
         return "auto"
     try:
-        data = tomllib.loads(config_path.read_text())
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return "auto"
     value = data.get("cli_auth_credentials_store")

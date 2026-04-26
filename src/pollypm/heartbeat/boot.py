@@ -60,7 +60,7 @@ def load_worker_settings(config_path: Path) -> WorkerSettings:
     never raise — worker defaults are safe for any installation.
     """
     try:
-        raw = tomllib.loads(config_path.read_text())
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return WorkerSettings()
     except Exception as exc:  # noqa: BLE001

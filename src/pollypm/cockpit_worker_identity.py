@@ -34,7 +34,7 @@ class WorkerIdentity:
 def load_worker_color_overrides(config_path: Path) -> dict[str, str]:
     """Return valid ``[worker_colors]`` overrides from ``config_path``."""
     try:
-        raw = tomllib.loads(config_path.read_text())
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {}
     section = raw.get("worker_colors", {})

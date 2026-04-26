@@ -734,7 +734,7 @@ class ExtensionHost:
         ]
 
     def _read_manifest(self, manifest_path: Path, source: str) -> PluginManifest:
-        raw = tomllib.loads(manifest_path.read_text())
+        raw = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
         name = _validate_plugin_name(str(raw["name"]))
         capabilities = self._parse_capability_entries(raw.get("capabilities", []), plugin_name=name)
         content = self._parse_content_declaration(raw.get("content"), plugin_name=name)

@@ -10,7 +10,7 @@ def _project_task_backend_settings(project_path: Path) -> tuple[str, str | None]
     if not config_path.exists():
         return "file", None
     try:
-        raw = tomllib.loads(config_path.read_text())
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
         return "file", None
     plugins = raw.get("plugins")
