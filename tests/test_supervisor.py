@@ -374,6 +374,31 @@ def test_release_expired_leases_clears_stale_lease_and_records_event(tmp_path: P
     )
 
 
+def test_release_expired_leases_pluralises_minute_in_message(tmp_path: Path) -> None:
+    """Cycle 110 — the auto-release event message hard-pluralised
+    ``minutes``, so a 1-minute lease timeout produced ``after 1
+    minutes``. Match the noun to the count."""
+    config = _config(tmp_path)
+    config.pollypm.lease_timeout_minutes = 1
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+    supervisor.claim_lease("operator", "human", "manual takeover")
+    expired_at = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
+    supervisor.store.execute(
+        "UPDATE leases SET updated_at = ? WHERE session_name = ?",
+        (expired_at, "operator"),
+    )
+    supervisor.store.commit()
+    supervisor.release_expired_leases(now=datetime.now(UTC))
+    events = supervisor.msg_store.query_messages(
+        type="event", scope="operator", limit=5,
+    )
+    messages = [
+        e.get("payload", {}).get("message") or "" for e in events
+    ]
+    assert any("after 1 minute" in m and "1 minutes" not in m for m in messages), messages
+
+
 def test_release_expired_leases_is_available_for_alerts_gc_handler(monkeypatch, tmp_path: Path) -> None:
     """Lease release is now the ``alerts.gc`` recurring handler's job
     (migrated from inline Phase 1 dispatch by #184). Verify the

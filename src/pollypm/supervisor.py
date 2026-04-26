@@ -1472,6 +1472,8 @@ class Supervisor:
                 continue
             self.store.clear_lease(lease.session_name)
             # Sync — lease state transitions are transactional audit events.
+            timeout_minutes = self.config.pollypm.lease_timeout_minutes
+            minute_word = "minute" if timeout_minutes == 1 else "minutes"
             self._msg_store.record_event(
                 scope=lease.session_name,
                 sender=lease.session_name,
@@ -1479,8 +1481,7 @@ class Supervisor:
                 payload={
                     "message": (
                         f"Auto-released expired lease held by {lease.owner} "
-                        f"after {self.config.pollypm.lease_timeout_minutes} "
-                        f"minutes"
+                        f"after {timeout_minutes} {minute_word}"
                     ),
                 },
             )
