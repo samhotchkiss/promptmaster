@@ -616,3 +616,52 @@ alias = "opus-4.7"
     assert any("pollypm.roles.worker" in message for message in messages)
     assert any("pollypm.roles.ghost" in message for message in messages)
     assert any("projects.demo.roles.operator_pm" in message for message in messages)
+
+
+def test_write_config_round_trips_non_ascii_project_name(tmp_path: Path) -> None:
+    """Cycle 126 — pollypm.toml is UTF-8 by spec, but the writer used
+    the locale-default encoding. A non-ASCII project ``name`` (or
+    persona) round-tripped fine on a UTF-8 host but mojibaked on
+    Windows CP-1252 / ``LC_ALL=C``. Pin both writer and loader to
+    UTF-8 so the round-trip is portable.
+    """
+    config_path = tmp_path / "pollypm.toml"
+    project_path = tmp_path / "café-project"
+    project_path.mkdir()
+    config = PollyPMConfig(
+        project=ProjectSettings(
+            name="プロジェクト",
+            tmux_session="pollypm",
+            workspace_root=tmp_path,
+            base_dir=tmp_path,
+            logs_dir=tmp_path / "logs",
+            snapshots_dir=tmp_path / "snapshots",
+            state_db=tmp_path / "state.db",
+        ),
+        pollypm=PollyPMSettings(controller_account="claude_primary"),
+        accounts={
+            "claude_primary": AccountConfig(
+                name="claude_primary",
+                provider=ProviderKind.CLAUDE,
+                email="user@example.com",
+                home=tmp_path / "home",
+            ),
+        },
+        sessions={},
+        projects={
+            "demo": KnownProject(
+                key="demo",
+                name="café",
+                path=project_path,
+                persona_name="Niño",
+            ),
+        },
+    )
+    write_config(config, config_path, force=True)
+    loaded = load_config(config_path)
+    assert loaded.project.name == "プロジェクト"
+    assert loaded.projects["demo"].name == "café"
+    assert loaded.projects["demo"].persona_name == "Niño"
+    # Bytes must contain the UTF-8 encoding of "café" (c-a-f + 0xC3 0xA9).
+    raw = config_path.read_bytes()
+    assert b"caf\xc3\xa9" in raw

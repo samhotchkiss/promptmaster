@@ -241,7 +241,10 @@ def resolve_config_path(path: Path = DEFAULT_CONFIG_PATH) -> Path:
 
 def _load_raw_toml(path: Path) -> dict[str, object]:
     try:
-        return tomllib.loads(path.read_text())
+        # TOML is UTF-8 by spec; pin the read encoding to match the
+        # write side (``write_config``) so a non-UTF-8 default locale
+        # can't mangle non-ASCII project names / personas on read.
+        return tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise
     except Exception as exc:
@@ -1082,9 +1085,16 @@ def write_config(config: PollyPMConfig, path: Path = DEFAULT_CONFIG_PATH, force:
     if path.exists() and not force:
         raise FileExistsError(f"Config already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_render_global_config(config))
+    # Always UTF-8 — TOML is UTF-8 by spec, and a non-UTF-8 default
+    # locale (Windows CP-1252, ``LC_ALL=C``) would mangle non-ASCII
+    # project names or personas (``café``, ``プロジェクト``) that
+    # round-trip through the cockpit settings UI.
+    path.write_text(_render_global_config(config), encoding="utf-8")
     for project_key, project in config.projects.items():
         local_path = project_config_path(project.path)
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_text(_render_project_local_config(config, project_key))
+        local_path.write_text(
+            _render_project_local_config(config, project_key),
+            encoding="utf-8",
+        )
     return path
