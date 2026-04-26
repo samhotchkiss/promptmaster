@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pollypm.acct.model import AccountConfig, AccountStatus
+from pollypm.acct.model import AccountConfig
 from pollypm.models import SessionConfig
 from pollypm.provider_sdk import ProviderUsageSnapshot
 
@@ -26,7 +26,6 @@ from .adapter import CodexAdapter as _RuntimeCodexAdapter
 from .detect import detect_codex_email, detect_email_from_pane, detect_logged_in
 from .env import isolated_env as _codex_isolated_env
 from .login import run_login_flow as _codex_run_login_flow
-from .probe import probe_usage as _codex_probe_usage
 from .resume import latest_session_id as _codex_latest_session_id
 from .resume import resume_argv as _codex_resume_argv
 
@@ -75,14 +74,10 @@ class CodexProvider:
             )
         _codex_run_login_flow(account.home, window_label=f"login-{account.name}")
 
-    def probe_usage(self, account: AccountConfig) -> AccountStatus:
-        """Return a fresh ``AccountStatus`` for ``account``.
-
-        Currently delegates to :func:`pollypm.providers.codex.probe.probe_usage`,
-        which raises ``NotImplementedError`` until Phase D threads the
-        manager context through.
-        """
-        return _codex_probe_usage(account)
+    # ``probe_usage`` is no longer part of the required Protocol
+    # surface (#798) — the live probe needs a config path the bare
+    # ``AccountConfig`` signature can't carry. Callers go through
+    # :func:`pollypm.accounts.probe_account_usage` for now.
 
     def collect_usage_snapshot(
         self,

@@ -121,39 +121,25 @@ def test_worker_launch_cmd_returns_argv_prefixed_with_claude(tmp_path: Path) -> 
     assert argv == ["claude", "--dangerously-skip-permissions"]
 
 
-def test_run_login_flow_raises_not_implemented_with_three_question_message() -> None:
+def test_run_login_flow_and_probe_usage_are_not_part_of_the_required_surface() -> None:
+    """#798: ``run_login_flow`` and ``probe_usage`` were stubs that
+    raised ``NotImplementedError`` with no real implementation. They
+    are no longer part of the required ``ProviderAdapter`` surface;
+    callers that need the full flows go through
+    :mod:`pollypm.accounts`. The Claude adapter no longer ships the
+    two stubs.
+    """
     provider = ClaudeProvider()
-    with pytest.raises(NotImplementedError) as exc_info:
-        provider.run_login_flow(_make_account(home=None))
-
-    message = str(exc_info.value)
-    # what happened
-    assert "Phase B" in message or "login" in message.lower()
-    # why it matters
-    assert "Why:" in message
-    # how to fix it
-    assert "Fix:" in message
-    assert "add_account_via_login" in message
+    assert not hasattr(provider, "run_login_flow")
+    assert not hasattr(provider, "probe_usage")
 
 
-def test_probe_usage_raises_not_implemented_with_three_question_message() -> None:
+def test_required_protocol_methods_are_present() -> None:
     provider = ClaudeProvider()
-    with pytest.raises(NotImplementedError) as exc_info:
-        provider.probe_usage(_make_account(home=None))
-
-    message = str(exc_info.value)
-    assert "Why:" in message
-    assert "Fix:" in message
-    assert "probe_account_usage" in message
-
-
-def test_all_six_protocol_methods_are_present() -> None:
-    provider = ClaudeProvider()
+    # ``run_login_flow`` / ``probe_usage`` are no longer required (#798).
     for method in (
         "detect_logged_in",
         "detect_email",
-        "run_login_flow",
-        "probe_usage",
         "worker_launch_cmd",
         "isolated_env",
         "detect_email_from_pane",

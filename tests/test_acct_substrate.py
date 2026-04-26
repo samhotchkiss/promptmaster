@@ -153,11 +153,12 @@ def test_registered_adapters_have_required_method_names():
     """Registered adapters expose the full ProviderAdapter contract."""
     for adapter_cls in (ClaudeProvider, CodexProvider):
         adapter = adapter_cls()
+        # ``run_login_flow`` and ``probe_usage`` are intentionally
+        # absent from the required Protocol surface (#798) — see the
+        # docstring on :class:`pollypm.acct.protocol.ProviderAdapter`.
         for method in (
             "detect_logged_in",
             "detect_email",
-            "run_login_flow",
-            "probe_usage",
             "collect_usage_snapshot",
             "worker_launch_cmd",
             "isolated_env",

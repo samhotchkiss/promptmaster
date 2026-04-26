@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pollypm.acct.model import AccountConfig, AccountStatus
+from pollypm.acct.model import AccountConfig
 from pollypm.models import SessionConfig
 from pollypm.provider_sdk import ProviderUsageSnapshot
 
@@ -60,34 +60,16 @@ class ClaudeProvider:
             return None
         return _detect.detect_claude_email(account.home)
 
-    def run_login_flow(self, account: AccountConfig) -> None:
-        """Drive the interactive Claude login.
-
-        Phase B stub — the real flow lives in
-        :func:`pollypm.accounts.add_account_via_login`. See
-        :func:`pollypm.providers.claude.login.run_login_flow` for the
-        full error message.
-
-        Raises:
-            NotImplementedError: always; message points at the legacy
-                entry points that already thread the required tmux
-                context.
-        """
-        _login.run_login_flow(account)
-
-    def probe_usage(self, account: AccountConfig) -> AccountStatus:
-        """Return a fresh ``AccountStatus`` for ``account``.
-
-        Phase B stub — the real probe lives in
-        :func:`pollypm.accounts.probe_account_usage`. See
-        :func:`pollypm.providers.claude.probe.probe_usage` for the
-        full error message.
-
-        Raises:
-            NotImplementedError: always; message points at the legacy
-                entry point that carries the state-DB path.
-        """
-        return _probe.probe_usage(account)
+    # ``run_login_flow`` and ``probe_usage`` were originally listed as
+    # required Protocol methods, but their real implementations need
+    # context (TmuxClient, config path) the bare ``AccountConfig``
+    # signature can't carry. Phase B kept stubs here that only raised
+    # ``NotImplementedError`` — see #798. Both methods are now
+    # explicitly absent from the required Protocol surface; callers
+    # use :func:`pollypm.accounts.probe_account_usage` /
+    # :func:`pollypm.accounts.add_account_via_login` instead. Leaving
+    # them off the class also lets ``getattr(adapter, "run_login_flow",
+    # None)`` in ``acct.manager`` cleanly route to the legacy entry.
 
     def collect_usage_snapshot(
         self,

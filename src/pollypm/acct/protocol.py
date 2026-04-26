@@ -68,22 +68,23 @@ class ProviderAdapter(Protocol):
         """
         ...
 
-    def run_login_flow(self, account: AccountConfig) -> None:
-        """Drive the interactive login for the account.
-
-        Blocks until the user completes login or aborts. Implementations
-        should be idempotent: running login twice on an already-logged-in
-        account must not corrupt the existing credentials.
-        """
-        ...
-
-    def probe_usage(self, account: AccountConfig) -> AccountStatus:
-        """Return a fresh ``AccountStatus`` snapshot for the account.
-
-        This is the "pull me the latest" entry point; callers that want
-        cached data should read from the state store directly.
-        """
-        ...
+    # ``run_login_flow`` and ``probe_usage`` were originally listed
+    # here in Phase A as part of the universal provider lifecycle, but
+    # both implementations need extra context the Phase A signature
+    # cannot carry — ``run_login_flow`` needs a ``TmuxClient`` plus a
+    # window label, and ``probe_usage`` needs a config path so the
+    # refreshed snapshot lands in the right state DB. Keeping them in
+    # the Protocol meant every shipped provider raised
+    # ``NotImplementedError`` and callers had to bypass the manager
+    # anyway (#798). Until the Protocol is widened to carry the
+    # context, those flows live on the legacy dispatcher in
+    # :mod:`pollypm.accounts` (see ``probe_account_usage``,
+    # ``add_account_via_login``, ``relogin_account``).
+    #
+    # Third-party providers that want to opt in early can still ship
+    # ``run_login_flow`` / ``probe_usage`` methods — :mod:`pollypm.acct.manager`
+    # detects them at runtime via ``hasattr``, but they are no longer
+    # part of the required Protocol surface.
 
     def collect_usage_snapshot(
         self,

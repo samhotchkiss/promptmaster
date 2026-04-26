@@ -69,11 +69,23 @@ def detect_email(account: AccountConfig) -> str | None:
 def probe_usage(account: AccountConfig) -> AccountStatus:
     """Return a fresh :class:`AccountStatus` snapshot for ``account``.
 
-    Delegates to the registered provider's
-    :meth:`ProviderAdapter.probe_usage`. Callers that want cached data
-    should read from the state store directly.
+    The Protocol no longer requires ``probe_usage`` because the live
+    probe needs context (config path, tmux client) the bare-bones
+    signature can't carry (#798). When a provider opts in by shipping
+    its own ``probe_usage`` method we delegate; otherwise raise a
+    clear pointer at the legacy entry that already threads the
+    required context through.
     """
-    return _adapter_for(account).probe_usage(account)
+    adapter = _adapter_for(account)
+    probe = getattr(adapter, "probe_usage", None)
+    if probe is None:
+        raise NotImplementedError(
+            "probe_usage is not part of the required ProviderAdapter "
+            "surface — call pollypm.accounts.probe_account_usage("
+            "config_path, account.name) for the built-in providers, "
+            "or have your adapter ship a probe_usage(account) method."
+        )
+    return probe(account)
 
 
 def collect_usage_snapshot(
@@ -166,11 +178,24 @@ def isolated_env(account: AccountConfig) -> dict[str, str]:
 def run_login_flow(account: AccountConfig) -> None:
     """Drive the interactive login for ``account``.
 
-    Blocks until the user completes login or aborts. Idempotent on
-    already-logged-in accounts: running twice must not corrupt existing
-    credentials.
+    The Protocol no longer requires ``run_login_flow`` because the
+    interactive flow needs a tmux client + window label the bare-bones
+    signature can't carry (#798). When a provider opts in by shipping
+    its own ``run_login_flow`` method we delegate; otherwise raise a
+    clear pointer at the legacy entry that already threads the
+    required context through.
     """
-    _adapter_for(account).run_login_flow(account)
+    adapter = _adapter_for(account)
+    flow = getattr(adapter, "run_login_flow", None)
+    if flow is None:
+        raise NotImplementedError(
+            "run_login_flow is not part of the required ProviderAdapter "
+            "surface — call pollypm.accounts.add_account_via_login("
+            "config_path, provider) or pollypm.accounts.relogin_account("
+            "config_path, account.name) for the built-in providers, or "
+            "have your adapter ship a run_login_flow(account) method."
+        )
+    flow(account)
 
 
 def list_logged_in(accounts: Iterable[AccountConfig]) -> list[AccountConfig]:

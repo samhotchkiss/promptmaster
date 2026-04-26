@@ -157,18 +157,15 @@ def test_run_login_flow_rejects_none_home_with_three_question_error() -> None:
     assert "Fix:" in msg
 
 
-def test_probe_usage_surfaces_not_implemented_with_fix_line() -> None:
-    """Phase C leaves probe_usage stubbed — the error must point callers
-    at the legacy API that still works."""
+def test_probe_usage_is_not_part_of_the_required_surface() -> None:
+    """#798: ``probe_usage`` was a stub that always raised
+    ``NotImplementedError``. It is no longer part of the required
+    ``ProviderAdapter`` surface — callers go through
+    :func:`pollypm.accounts.probe_account_usage` until the Protocol
+    grows a context object.
+    """
     provider = CodexProvider()
-
-    with pytest.raises(NotImplementedError) as exc_info:
-        provider.probe_usage(_account("codex_1", None))
-
-    msg = str(exc_info.value)
-    assert "Why:" in msg
-    assert "Fix:" in msg
-    assert "probe_account_usage" in msg
+    assert not hasattr(provider, "probe_usage")
 
 
 def test_legacy_codex_adapter_symbol_still_imports() -> None:
