@@ -301,36 +301,47 @@ def test_build_token_gauge_picks_hottest_account_and_estimates_eta(tmp_path: Pat
     assert "left @" in rendered
 
 
-def test_briefing_banner_autofires_when_no_recent_briefing(
-    monkeypatch,
+def test_briefing_banner_does_not_fire_briefing_during_render(
     tmp_path: Path,
 ) -> None:
+    """#801: dashboard render is read-only with respect to morning_briefing.
+
+    The previous implementation imported plugin handlers and called
+    ``fire_briefing()`` from inside ``_briefing_banner`` if no recent
+    briefing existed — that turned the dashboard into a hidden
+    scheduling path and swallowed plugin failures. Briefings now fire
+    only through the recurring-job/roster path; the banner just
+    surfaces what the plugin has already published.
+    """
     config = _make_config(tmp_path)
     config_path = tmp_path / "pollypm.toml"
     config_path.write_text("[briefing]\nenabled = true\n", encoding="utf-8")
 
-    def fake_fire_briefing(*, base_dir: Path, now_local, **_kwargs):
-        emit_briefing(
-            base_dir,
-            BriefingDraft(
-                date_local="2026-04-21",
-                mode="fallback",
-                markdown="Daily summary",
-            ),
-            now_utc=now_local,
-        )
-        return {"fired": True}
-
-    monkeypatch.setattr(
-        "pollypm.plugins_builtin.morning_briefing.handlers.briefing_tick.fire_briefing",
-        fake_fire_briefing,
-    )
-
+    # No briefing on disk → banner returns None instead of triggering
+    # the plugin from the render path.
     banner = _briefing_banner(config, config_path=config_path, now=NOW)
+    assert banner is None
+    assert not (config.project.base_dir / "briefings").exists()
 
+
+def test_briefing_banner_surfaces_existing_briefing(tmp_path: Path) -> None:
+    """When the morning_briefing plugin has already published a briefing
+    for today, the dashboard banner finds and surfaces it.
+    """
+    config = _make_config(tmp_path)
+    base_dir = config.project.base_dir
+    emit_briefing(
+        base_dir,
+        BriefingDraft(
+            date_local="2026-04-21",
+            mode="fallback",
+            markdown="Daily summary",
+        ),
+        now_utc=NOW,
+    )
+    banner = _briefing_banner(config, config_path=tmp_path / "pollypm.toml", now=NOW)
     assert banner is not None
     assert "Morning briefing available" in banner.text
-    assert (config.project.base_dir / "briefings" / "2026-04-21.json").exists()
 
 
 def test_build_dashboard_renders_new_header_and_suggestions(

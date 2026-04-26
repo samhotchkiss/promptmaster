@@ -338,57 +338,21 @@ def _recent_briefing_entry(base_dir: Path, *, now: datetime, status: str):
 
 
 def _briefing_banner(config, *, config_path: Path | None, now: datetime) -> DashboardBriefingBanner | None:
+    # #801: dashboard render is now read-only with respect to the
+    # morning_briefing plugin. The previous implementation imported
+    # plugin handlers/state/settings and called ``fire_briefing()``
+    # from inside the banner builder, swallowing every exception —
+    # that turned the dashboard into a hidden scheduling path and
+    # masked plugin failures. Briefings now fire only through the
+    # recurring-job/roster path; the dashboard surfaces whatever the
+    # plugin has already published.
+    del config_path  # unused since the render-time fire path is gone
     project_cfg = getattr(config, "project", None)
     base_dir_value = getattr(project_cfg, "base_dir", None)
     if not base_dir_value:
         return None
     base_dir = Path(base_dir_value)
     entry, created_at = _recent_briefing_entry(base_dir, now=now, status="open")
-    if entry is None:
-        recent_any, _created_any = _recent_briefing_entry(base_dir, now=now, status="all")
-        if recent_any is None and config_path is not None:
-            try:
-                from pollypm.plugins_builtin.morning_briefing.handlers.briefing_tick import (
-                    fire_briefing,
-                )
-                from pollypm.plugins_builtin.morning_briefing.settings import load_briefing_settings
-                from pollypm.plugins_builtin.morning_briefing.state import (
-                    iso_date,
-                    load_state,
-                    save_state,
-                )
-            except Exception:  # noqa: BLE001
-                fire_briefing = None
-            else:
-                settings = load_briefing_settings(config_path)
-                if settings.enabled and fire_briefing is not None:
-                    state = load_state(base_dir)
-                    tz_name = getattr(getattr(config, "pollypm", None), "timezone", "") or ""
-                    try:
-                        from zoneinfo import ZoneInfo
-
-                        zone = ZoneInfo(settings.timezone or tz_name) if (settings.timezone or tz_name) else UTC
-                    except Exception:  # noqa: BLE001
-                        zone = UTC
-                    now_local = now.astimezone(zone)
-                    root_dir_value = getattr(project_cfg, "root_dir", None)
-                    if state.last_briefing_date != iso_date(now_local.date()) and root_dir_value:
-                        try:
-                            result = fire_briefing(
-                                project_root=Path(root_dir_value),
-                                base_dir=base_dir,
-                                settings=settings,
-                                now_local=now_local,
-                                state=state,
-                                config=config,
-                            )
-                        except Exception:  # noqa: BLE001
-                            result = {"fired": False}
-                        if isinstance(result, dict) and result.get("fired"):
-                            state.last_briefing_date = iso_date(now_local.date())
-                            state.last_fire_at = now_local.astimezone().isoformat()
-                            save_state(base_dir, state)
-        entry, created_at = _recent_briefing_entry(base_dir, now=now, status="open")
     if entry is None:
         return None
     text = "Morning briefing available — press B to read"
