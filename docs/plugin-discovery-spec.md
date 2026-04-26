@@ -19,7 +19,7 @@ A **plugin** adds a new *kind* of thing the rail can do: a new provider adapter,
 
 **Content** is a new *instance* of an existing kind: a magic skill, a flow template, an agent persona prompt, a deploy recipe. Content is data — a markdown or TOML file — loaded and registered by a plugin at startup. Adding content does not require a plugin install.
 
-The rail provides a single mechanism — `host.content_paths(plugin_name)` — that returns the ordered directories a plugin should scan for content. Every content-hosting plugin (magic, core_agent_profiles, flow templates, future triage/briefing) uses this helper, so precedence and override semantics are uniform.
+The rail provides a single mechanism — `api.content_paths(kind=...)` — that returns the ordered directories the current plugin should scan for content. Every content-hosting plugin (magic, core_agent_profiles, flow templates, future triage/briefing) uses this helper, so precedence and override semantics are uniform.
 
 ---
 
@@ -121,12 +121,12 @@ At runtime, the plugin asks the host for the resolved content paths:
 from pollypm.plugin_api.v1 import PluginAPI
 
 def on_startup(api: PluginAPI) -> None:
-    for path in api.content_paths("magic", kind="magic_skill"):
+    for path in api.content_paths(kind="magic_skill"):
         for skill_file in path.glob("*.md"):
             register_skill(skill_file)
 ```
 
-`content_paths(plugin_name, kind)` returns a list of `Path` objects in discovery-order precedence:
+`content_paths(kind)` returns a list of `Path` objects for the current plugin in discovery-order precedence:
 
 1. `<plugin_dir>/<user_paths[i]>/` (shipped content)
 2. `~/.pollypm/content/<plugin_name>/<kind>/` (user-added)
@@ -252,7 +252,7 @@ Tracked as separate issues:
 
 1. Multi-path discovery (`~/.pollypm/plugins`, `<project>/.pollypm/plugins`, entry_points)
 2. Structured `[[capabilities]]` in manifest parser; reject bare-string capabilities with a migration warning for one release
-3. `host.content_paths(plugin_name, kind)` helper + user/project content layout
+3. `api.content_paths(kind=...)` helper + user/project content layout
 4. `PollyPMPlugin.initialize(api)` callback wired through `plugin_host.load()`
 5. `pm plugins` CLI surface (list / show / install / uninstall / enable / disable / doctor)
 6. `[plugins].disabled` config key

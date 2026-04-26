@@ -1,9 +1,9 @@
 """Automated plugin validation harness.
 
-Validates that plugins implement their declared interfaces correctly
-by exercising all required methods with test inputs and checking
-return types and data shapes. Failing plugins are disabled with clear
-error messages.
+Performs structural checks on loaded plugins: required metadata,
+factory callability/instantiation where safe, known required methods,
+and hook callability. Failing plugins are disabled with clear error
+messages.
 """
 
 from __future__ import annotations

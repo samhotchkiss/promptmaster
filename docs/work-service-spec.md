@@ -270,18 +270,22 @@ A `Transition`:
 ## 5. API Surface
 
 The work service exposes these operations. In the current build, all mutations
-flow through the in-process `SQLiteWorkService` boundary. All operations return
-structured results (not raw file contents).
+are intended to flow through the in-process `SQLiteWorkService` boundary. All
+operations return structured results (not raw file contents).
+
+**Current implementation note (2026-04-26):** `WorkService`,
+`SQLiteWorkService`, and `MockWorkService` all expose the shared parameters
+callers rely on, including `created_by`, `skip_gates`, and `entry_type`.
 
 ### Task Lifecycle
 
 | Operation | Parameters | Returns | Description |
 |-----------|-----------|---------|-------------|
-| `create` | title, description, type, project, flow_template, roles, priority, acceptance_criteria?, constraints?, relevant_files?, labels?, requires_human_review? | Task | Create a task in `draft` state. Validates that all required roles for the flow are filled. |
+| `create` | title, description, type, project, flow_template, roles, priority, acceptance_criteria?, constraints?, relevant_files?, labels?, requires_human_review?, created_by? | Task | Create a task in `draft` state. Validates that all required roles for the flow are filled. |
 | `get` | task_id | Task | Read a task with all fields including current flow node and execution state. |
 | `list_tasks` | work_status?, owner?, project?, assignee?, blocked?, type?, limit?, offset? | list[Task] | Query tasks with filters. |
-| `queue` | task_id, actor | Task | Move from `draft` to `queued`. If `requires_human_review`, validates human has approved via inbox. |
-| `claim` | task_id, actor | Task | Atomic: set assignee + activate first flow node + set `work_status=in_progress`. Task must be `queued`. |
+| `queue` | task_id, actor, skip_gates? | Task | Move from `draft` to `queued`. If `requires_human_review`, validates human has approved via inbox unless gates are explicitly skipped. |
+| `claim` | task_id, actor, skip_gates? | Task | Atomic: set assignee + activate first flow node + set `work_status=in_progress`. Task must be `queued`. |
 | `next` | agent?, project? | Task? | Return the highest-priority queued+unblocked task, optionally filtered by project. Does not claim it. |
 | `update` | task_id, fields... | Task | Update mutable fields (title, description, priority, labels, roles). Cannot change work_status directly. |
 | `cancel` | task_id, actor, reason | Task | Move any non-terminal task to `cancelled`. |
@@ -292,8 +296,8 @@ structured results (not raw file contents).
 
 | Operation | Parameters | Returns | Description |
 |-----------|-----------|---------|-------------|
-| `node_done` | task_id, actor, work_output | Task | Signal that the current work node is complete. Validates work output is present. Advances flow to `next_node`. Updates `work_status` based on next node type. |
-| `approve` | task_id, actor, reason? | Task | Approve at a review node. Advances to `next_node`. If terminal, task becomes `done`. |
+| `node_done` | task_id, actor, work_output, skip_gates? | Task | Signal that the current work node is complete. Validates work output is present unless gates are explicitly skipped. Advances flow to `next_node`. Updates `work_status` based on next node type. |
+| `approve` | task_id, actor, reason?, skip_gates? | Task | Approve at a review node. Advances to `next_node`. If terminal, task becomes `done`. |
 | `reject` | task_id, actor, reason | Task | Reject at a review node. Moves to `reject_node`. Reason is required. Creates new execution record (visit N+1) at the target node. |
 | `block` | task_id, actor, blocker_task_id | Task | Mark task as blocked by another task. Sets `work_status=blocked`. Flow stays at current node. |
 | `get_execution` | task_id, node_id?, visit? | list[FlowNodeExecution] | Read execution records. Filter by node and/or visit. |
@@ -302,8 +306,8 @@ structured results (not raw file contents).
 
 | Operation | Parameters | Returns | Description |
 |-----------|-----------|---------|-------------|
-| `add_context` | task_id, actor, text | ContextEntry | Append to the task's context log. |
-| `get_context` | task_id, limit?, since? | list[ContextEntry] | Read context entries, most recent first. |
+| `add_context` | task_id, actor, text, entry_type? | ContextEntry | Append to the task's context log. |
+| `get_context` | task_id, limit?, since?, entry_type? | list[ContextEntry] | Read context entries, most recent first. |
 
 ### Relationships
 
@@ -735,6 +739,11 @@ transition logging. Mitigations:
 - Maintain import-boundary tests around service helpers and storage access
 - Reserve a future transport boundary for the point where stronger process
   isolation is actually needed
+
+Recent boundary cleanup moved job queue repair/stat operations behind public
+`JobQueue` methods and work DB path resolution behind
+`pollypm.work.db_resolver`; new callers should use those surfaces instead of
+CLI-private helpers or queue internals.
 
 ### P-2: Flow Definition Errors
 

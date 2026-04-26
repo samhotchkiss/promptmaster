@@ -36,15 +36,25 @@ of the core rail.
 
 The deprecation is enforced by `tests/test_import_boundary.py`, which
 maintains an explicit allow-list of files that still import Supervisor
-directly. The allow-list is intentionally generous at Step 5 (#182) —
-every caller that imports Supervisor today is on it with a TODO
-pointing at the issue that will remove it. As Step 6 (#183) migrates
-the TUI/CLI surfaces and Step 8 (#185) migrates the inbox / plugin /
-scheduler integrations, entries drop off and the boundary tightens
-automatically.
+directly. The allow-list is no longer the original broad Step 5 list, but it is
+not empty yet. The current remaining direct-import entries are the service API
+facade and a small set of internal integration points: heartbeats API, job
+runner, core recurring plugin, scheduler base, session intelligence, and worker
+launch helpers.
 
-Service API v1.1 will make the allow-list empty and turn the boundary
-into a hard guard. Until then, adding a new direct Supervisor import
-outside core requires adding the file to the allow-list with a TODO.
+Service API v1.1 is still the target for making the allow-list empty and
+turning the boundary into a hard guard. Until then, adding a new direct
+Supervisor import outside core requires adding the file to the allow-list with a
+TODO.
 
-*Last updated: 2026-04-21 (Step 5 / issue #182)*
+### Boundary cleanup
+
+The broader architecture target is still "call typed boundaries, not private
+internals." The 2026-04-26 cleanup closed the obvious boundary leaks around the
+work-service protocol, account-provider stubs, rail context, morning-briefing
+rendering, cross-plugin task-assignment helpers, job queue accessors, work DB
+resolution, and event summaries (#796, #798, #800-#805). New code should follow
+those public seams rather than reintroducing imports from CLI modules,
+plugin-private helpers, or underscored queue/session internals.
+
+*Last updated: 2026-04-26*

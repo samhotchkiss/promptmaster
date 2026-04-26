@@ -1,7 +1,7 @@
 ---
 ## Summary
 
-PollyPM exposes a stable provider SDK for adding new CLI agent providers without editing core orchestration code. Provider authors subclass a single base class, implement two required methods and two optional methods, and PollyPM handles discovery, lifecycle management, health monitoring, and transcript ingestion. Built-in providers (Claude, Codex) implement the same SDK interface, so third-party adapters have identical capabilities and integration depth.
+PollyPM exposes a runtime provider SDK for adding new CLI agent providers without editing core orchestration code. Runtime provider authors subclass `ProviderAdapterBase`, implement launch, resume, transcript, and usage surfaces, and PollyPM handles discovery, lifecycle management, health monitoring, and transcript ingestion. Account management is a separate provider contract under `pollypm.acct`; login and usage refresh flows that need config/store/tmux context stay on higher-level account entry points.
 
 ---
 
@@ -9,13 +9,15 @@ PollyPM exposes a stable provider SDK for adding new CLI agent providers without
 
 ## Overview
 
-The provider SDK is the primary integration point for adding new CLI agent backends to PollyPM. It is designed around three principles:
+The runtime provider SDK is the primary integration point for adding new CLI agent backends to PollyPM launch/session paths. It is designed around three principles:
 
 1. **SDK, not RPC.** Providers are Python classes loaded in-process, not external services called over a network boundary. This keeps the integration fast, debuggable, and free of serialization overhead.
 
-2. **Same interface for built-ins and third parties.** The Claude and Codex adapters implement `ProviderAdapterBase` exactly as a third-party Gemini or Aider adapter would. There is no privileged internal path.
+2. **Same runtime interface for built-ins and third parties.** The Claude and Codex runtime adapters implement `ProviderAdapterBase` exactly as a third-party Gemini or Aider adapter would. Account-management commands use a separate `pollypm.acct.ProviderAdapter` surface plus higher-level account/onboarding entry points for flows that need additional context.
 
-3. **Minimal surface area.** Two required methods and two optional methods cover the full provider contract. Everything else (session lifecycle, health policy, failover, recovery) is handled by the core.
+3. **Minimal runtime surface area.** Launch, resume, transcript discovery, and live-usage collection cover the runtime provider contract. Everything else (session lifecycle, health policy, failover, recovery) is handled by the core.
+
+For current plugin authoring guidance, use [`../provider-plugin-sdk.md`](../provider-plugin-sdk.md). This v1 chapter describes the runtime provider contract and calls out where the account-provider contract has not reached the same level of stability yet.
 
 
 ## Core Types
@@ -37,7 +39,7 @@ Import from `pollypm.providers.base`:
 
 ## Provider Contract
 
-Subclass `ProviderAdapterBase` and implement the following methods.
+Subclass `ProviderAdapterBase` and implement the following methods for runtime launch and monitoring.
 
 ### Required Methods
 
@@ -172,7 +174,7 @@ Key observations:
 
 ## Built-In Providers
 
-Claude and Codex are implemented as built-in providers using the same SDK.
+Claude and Codex are implemented as built-in runtime providers using the same SDK.
 
 ### Claude
 
@@ -190,7 +192,9 @@ Claude and Codex are implemented as built-in providers using the same SDK.
 - Usage extraction: parses pane output for usage summaries
 - Health signals: detects API errors and auth failures from pane text
 
-Both adapters are registered as built-in plugins with lowest discovery precedence. Per the "opinionated but pluggable" philosophy, these are the opinionated defaults — a project-local (`<project>/.pollypm/plugins/`) or user-local plugin with the same provider name overrides the built-in.
+Both runtime adapters are registered as built-in plugins with lowest discovery precedence. Per the "opinionated but pluggable" philosophy, these are the opinionated defaults — a project-local (`<project>/.pollypm/plugins/`) or user-local plugin with the same provider name overrides the built-in runtime adapter.
+
+Account/onboarding support is separate. `src/pollypm/providers/claude/provider.py` and `src/pollypm/providers/codex/provider.py` implement the `pollypm.acct` Protocol shape. Protocol-level usage probing is intentionally not required; current account commands use `pollypm.accounts` entry points for the context-heavy login and refresh paths.
 
 
 ## Provider Health Classification
@@ -324,7 +328,7 @@ No running tmux session, provider CLI, or PollyPM core is required for adapter u
 
 1. **SDK, not RPC.** Providers are in-process Python classes, not external services. This was chosen over a subprocess or gRPC model for simplicity, debuggability, and performance. Provider adapters are lightweight and do not justify the overhead of inter-process communication.
 
-2. **Providers implement the same interface as built-ins.** Claude and Codex use `ProviderAdapterBase` identically to third-party adapters. There is no internal fast path. This guarantees the SDK is complete enough for real use and prevents drift between built-in and external providers.
+2. **Runtime providers implement the same interface as built-ins.** Claude and Codex use `ProviderAdapterBase` identically to third-party runtime adapters. Account login/probe flows are separate because they need context outside the minimal provider object.
 
 3. **Health is provider-reported, not inferred.** Each provider knows its own error messages and failure modes. The core applies policy to health classifications without parsing provider-specific output. This keeps the core provider-agnostic and makes adding new providers straightforward.
 

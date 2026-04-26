@@ -51,6 +51,11 @@ Handler:
 
 Hourly tick + date-gate = exactly-once-per-day, resilient to restarts and missed hours (if the 6 a.m. tick was missed for any reason, the 7 a.m. tick fires the briefing late).
 
+**Current implementation note (2026-04-26):** the roster entry is the only
+source of scheduled briefings. Dashboard rendering is read-only with respect to
+this plugin: it displays an already-published briefing but does not import the
+plugin or opportunistically fire one while rendering.
+
 ## 4. Data gathering (cross-project)
 
 Window: yesterday 00:00 to 23:59 local time.

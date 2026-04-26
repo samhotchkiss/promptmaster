@@ -1,7 +1,7 @@
 ---
 ## Summary
 
-PollyPM is a pluggable orchestration platform. The core is headless; frontends, backends, and integrations are all swappable. A five-layer architecture separates durable domain logic from extension discovery, service exposure, presentation, and plugin-provided behavior. Plugins use the same contracts as built-in components, and a versioned plugin API guarantees stability across upgrades. Repo-local plugins take highest precedence so individual projects can carry custom behavior without modifying the package tree.
+PollyPM is a pluggable orchestration platform. The core is headless; frontends, backends, and integrations are intended to be swappable. A five-layer architecture separates durable domain logic from extension discovery, service exposure, presentation, and plugin-provided behavior. Runtime plugins use the same contracts as built-in runtime components, while account/onboarding flows that need extra runtime context stay on higher-level account entry points. Repo-local plugins take highest precedence so individual projects can carry custom behavior without modifying the package tree.
 
 ---
 
@@ -9,7 +9,7 @@ PollyPM is a pluggable orchestration platform. The core is headless; frontends, 
 
 ## Five-Layer Architecture
 
-PollyPM is organized into five distinct layers. Each layer has a clear responsibility boundary, and dependencies flow strictly downward.
+PollyPM is organized into five distinct layers. Each layer has a clear responsibility boundary, and dependencies should flow downward.
 
 | Layer | Name | Responsibility |
 |-------|------|----------------|
@@ -53,7 +53,7 @@ Responsibilities:
 - **Hook routing**: deliver lifecycle events to matching observers and filters
 - **Failure isolation**: catch and log plugin exceptions without crashing the core; disable misbehaving plugins after repeated failures
 
-The extension host is the only component that imports plugin code. The core never directly references a plugin module.
+The extension host is intended to be the only component that imports plugin code. When core code needs a helper that originated in a plugin, promote it into a neutral module or a plugin-owned public API before depending on it.
 
 
 ## Layer 3: Service API
@@ -144,7 +144,7 @@ Interface:
 - **Usage extraction**: parse capacity and token usage from pane output or API responses
 - **Health classification**: interpret provider-specific signals into normalized health states
 
-Built-in providers (Claude, Codex) implement this same interface.
+Built-in runtime providers (Claude, Codex) implement this same runtime interface. Account and onboarding flows use a separate `pollypm.acct` provider Protocol that is still partly wired through legacy account helpers.
 
 ### Runtime
 
@@ -354,15 +354,23 @@ When multiple plugins provide the same capability, the highest-precedence plugin
 
 ## Automated Plugin Validation
 
-Every plugin must pass an automated validation harness before activation. The harness exercises all interface methods declared in the plugin's `capabilities` list:
+Every plugin must pass an automated validation harness before activation. The shipped harness is structural: it verifies plugin metadata, factory callability/instantiation where safe, required attributes/methods for supported capability maps, and observer/filter callability.
 
-- For each declared capability, the harness instantiates the plugin and calls every method in the corresponding interface contract with synthetic inputs.
-- Methods must return values conforming to the expected types (e.g., `LaunchCommand`, `ProviderUsageSnapshot`, `TranscriptSource`).
-- Methods must not raise unhandled exceptions during validation.
+- For each registered provider/runtime/heartbeat/scheduler/agent-profile/recovery-policy factory, the harness checks the required callable surface.
+- Transcript-source and launch-planner factories are checked for callability only because their construction currently needs runtime context.
+- Observer and filter handlers must be callable.
 - Plugins that fail validation are disabled with a logged reason. They are not silently ignored — the operator is alerted.
-- Validation runs at discovery time (startup and `pm plugin reload`) and can be triggered manually via `pm plugin validate <name>`.
+- Validation runs at startup and through `pm plugins doctor`. There is no per-plugin `pm plugin validate <name>` command in the current CLI.
 
-This ensures that no plugin reaches production without proving it can fulfill its declared contract.
+This catches missing or malformed plugin surfaces before use. It does not prove full behavioral correctness of every method; capability-specific unit and integration tests still carry that contract.
+
+## Current Boundary Notes
+
+As of 2026-04-26, the main account-provider caveat is deliberate: login and
+usage probing still run through higher-level account/onboarding entry points
+because those paths need config, store, and tmux context. The minimal
+`pollypm.acct` Protocol covers provider identity, isolated env, launch/resume
+helpers, and pane/status parsing.
 
 
 ## Override Hierarchy
@@ -428,7 +436,7 @@ Everything outside these namespaces is internal and not stable for external use.
 
 2. **Headless core.** The core has no knowledge of any frontend. This was chosen over a TUI-centric design to enable Web UI and Discord as first-class frontends rather than afterthoughts.
 
-3. **Plugins use the same contracts as built-ins.** Built-in providers, memory backends, and task backends implement the same interfaces that third-party plugins use. There is no privileged internal API for built-ins. This ensures the plugin interfaces are complete and battle-tested.
+3. **Runtime plugins use the same contracts as built-ins.** Built-in runtime providers, memory backends, and task backends should implement the same interfaces that third-party plugins use. Account login/probe flows are intentionally higher-level until the account Protocol grows the context they need.
 
 4. **Project-local plugins take highest precedence.** A project can carry its own provider adapter, hook, or profile override in `<project>/.pollypm/plugins/` without modifying the user's global configuration or the PollyPM package. This supports per-project customization in multi-project workflows.
 

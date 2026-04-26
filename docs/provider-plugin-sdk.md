@@ -7,6 +7,11 @@ PollyPM has two shipped provider contracts today.
 
 If you only ship the runtime adapter, PollyPM can launch your provider in work sessions, but the account-management commands will not know about it. If you only ship the `pollypm.provider` entry point, `pm accounts` can see you, but the plugin-host launch path will not.
 
+**Current limitation (2026-04-26):** account login and usage probing need
+runtime context that the minimal account-provider Protocol does not carry yet.
+Those flows intentionally stay on the higher-level `pollypm.accounts` /
+`pollypm.onboarding` entry points until the Protocol grows a context object.
+
 ## Choose The Surface
 
 | Goal | Implement | Register it as | In-tree examples |
@@ -191,7 +196,7 @@ The plugin-host side is exercised in [`tests/test_plugins.py`](../tests/test_plu
 
 If you also want PollyPM's account-management flows, add a second class that implements the Protocol in [`src/pollypm/acct/protocol.py`](../src/pollypm/acct/protocol.py) and register it under `pollypm.provider`.
 
-That contract covers:
+The intended contract covers:
 
 - auth detection and email detection
 - interactive login/logout helpers
@@ -201,7 +206,7 @@ That contract covers:
 - latest-session lookup and resume argv
 - home priming and login completion detection
 
-`CodexProvider` in [`src/pollypm/providers/codex/provider.py`](../src/pollypm/providers/codex/provider.py) is the better current example if you need the whole surface. `ClaudeProvider` still carries compatibility stubs for parts of the Phase-B account refactor.
+`CodexProvider` in [`src/pollypm/providers/codex/provider.py`](../src/pollypm/providers/codex/provider.py) is the better current example if you need the whole surface. `ClaudeProvider` and `CodexProvider` no longer expose `probe_usage()` as a required Protocol method; callers that need live usage refresh should use the higher-level account commands that carry config/store context.
 
 Register the account-layer provider in your package metadata:
 

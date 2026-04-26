@@ -73,6 +73,19 @@ add the file to the relevant allow-list inside
 issue that will remove it**. The companion ``_has_no_stale_entries``
 tests keep the allow-lists honest as migrations land.
 
+Additional boundaries are documented here because they have regressed before:
+
+- Plugin lifecycle and presentation code should not import another plugin's
+  private helpers or presentation internals. Promote shared helpers into a
+  neutral public module or a plugin-owned `api.py` surface first.
+- CLI modules should not be runtime dependency targets for non-CLI code.
+  Promote shared path/config helpers into a neutral module first.
+- Queue consumers should not reach through `JobQueue._lock` or `JobQueue._conn`;
+  add typed queue accessors instead.
+- Rail plugins should use typed `RailContext` fields. `RailContext.extras`
+  remains only as a compatibility bag for hints that have not earned a public
+  field yet.
+
 ## Conventions
 
 - Issue-based tracking (Issue NNNN format)
@@ -87,4 +100,4 @@ tests keep the allow-lists honest as migrations land.
 - History chunk analysis: sequential processing to build consolidated understanding
 - Documentation verification: cross-check claims against actual code state and event timeline
 
-*Last updated: 2026-04-13T01:29:31.935791Z*
+*Last updated: 2026-04-26*

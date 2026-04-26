@@ -1,6 +1,6 @@
 # Plugin Boundaries and Interop Contracts
 
-This document defines the boundary contracts between work service plugins. Each plugin is a sealed, interchangeable piece with a defined protocol, clear responsibilities, and explicit dependency rules.
+This document defines the boundary contracts between work service plugins. The target is that each plugin is a sealed, interchangeable piece with a defined protocol, clear responsibilities, and explicit dependency rules.
 
 ## Plugin Boundary Map
 
@@ -30,6 +30,12 @@ Defined in `src/pollypm/work/service.py`. The central protocol covering:
 Two implementations exist:
 - `SQLiteWorkService` (production, backed by SQLite)
 - `MockWorkService` (testing, in-memory dicts)
+
+Current status: the Protocol, `SQLiteWorkService`, and `MockWorkService` share
+the same public signatures for the task lifecycle, flow progression, context,
+and worker-session methods. The conformance test in
+`tests/test_work_service_protocol_conformance.py` guards the parameters that
+previously drifted (`created_by`, `skip_gates`, and `entry_type`).
 
 ### Gate
 
@@ -91,11 +97,27 @@ The `configure_work_plugins()` function reads this config and instantiates the a
 
 ## Interop Guarantees
 
-1. Any code that accepts `WorkService` works identically with `MockWorkService` or `SQLiteWorkService`
+1. Code should accept `WorkService` and work identically with `MockWorkService` or `SQLiteWorkService`.
 2. Custom gates implementing the `Gate` protocol integrate into the gate registry without modification
 3. Custom sync adapters implementing `SyncAdapter` receive events via the `SyncManager`
 4. The `PluginRegistry` enforces that all required plugins are registered before use
 5. The `configure_work_plugins()` loader handles missing config by selecting built-in defaults
+
+## Recently Tightened Boundaries
+
+The 2026-04-26 boundary pass retired several patterns that should not come
+back:
+
+- Rail plugins should use typed `RailContext` fields before reaching for
+  `extras`.
+- Dashboard rendering must not fire the `morning_briefing` plugin directly.
+- Cross-plugin calls into `task_assignment_notify` go through
+  `task_assignment_notify.api`.
+- Job queue commands go through public `JobQueue` methods instead of `_lock` or
+  `_conn`.
+- Work DB resolution lives in `pollypm.work.db_resolver`, not the work CLI.
+- Shared event summary packing lives in `pollypm.events`, not activity-feed
+  plugin internals.
 
 ## Rail Plugin References
 

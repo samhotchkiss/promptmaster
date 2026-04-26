@@ -332,16 +332,20 @@ Users can modify these rules files per-project. A project that does not need tmu
 
 ## Automated Plugin Validation
 
-Every plugin must pass a validation harness before activation. This ensures that plugins conform to their declared interface and do not introduce runtime errors into the system.
+Every plugin must pass a validation harness before activation. The current harness is structural: it catches missing metadata, non-callable factories, unsafe instantiation for factory types that can be constructed without runtime context, missing required methods, and non-callable hooks.
 
 ### Validation Harness
 
 When a plugin is loaded, PollyPM runs it through a validation harness that:
 
-1. **Exercises all interface methods** defined by the plugin type (e.g., a checkpoint strategy plugin must implement `create_checkpoint`, `load_checkpoint`, `prune`, etc.)
-2. **Provides test inputs** appropriate for each method — synthetic but structurally valid data that exercises the method's expected input/output contract
-3. **Validates return types and structure** — the harness checks that return values match the expected schema
-4. **Tests error handling** — the harness passes known-invalid inputs and verifies the plugin raises appropriate errors rather than crashing or returning garbage
+1. **Checks plugin structure**: name and API version must be present.
+2. **Checks registered factories**: provider, runtime, heartbeat, scheduler, agent-profile, recovery-policy, transcript-source, and launch-planner factories must be callable; factories are instantiated only when their current contract can be exercised without runtime context.
+3. **Checks required methods**: instantiated providers/runtimes/etc. must expose the methods the current validator knows about.
+4. **Checks hooks**: observer and filter handlers must be callable.
+
+The harness does not yet call every interface method with synthetic inputs or
+fully validate return shapes. Capability-specific unit and integration tests are
+still required for behavioral coverage.
 
 ### Validation Outcome
 
@@ -353,8 +357,7 @@ Failed validation never causes PollyPM to crash. It produces a clear, actionable
 ### Validation Triggers
 
 - Plugin validation runs on PollyPM startup for all configured plugins
-- Validation re-runs when a plugin file is modified and PollyPM detects the change
-- Users can manually trigger validation via `pm plugin validate <plugin-name>`
+- Users can manually trigger validation via `pm plugins doctor`
 
 
 ## Anti-Patterns
