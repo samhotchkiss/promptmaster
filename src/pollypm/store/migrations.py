@@ -408,7 +408,8 @@ def _format_refuse_start_message(status: MigrationStatus) -> str:
             "without it risks cross-version data corruption."
         ),
         next_action=(
-            f"Apply the pending migration{plural} with pm migrate --apply."
+            f"Apply the pending migration{plural} with pm migrate --apply "
+            "(pm is the PollyPM CLI installed alongside pollypm)."
         ),
         # Three escalating options so the user can pick their comfort
         # level: safe apply, dry-run-first, or emergency bypass for

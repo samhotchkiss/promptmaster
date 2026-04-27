@@ -235,6 +235,7 @@ def test_refuse_start_message_offers_three_options(
     # Each of the three options is named with its command.
     assert "Apply (recommended)" in rendered
     assert "pm migrate --apply" in rendered
+    assert "pm is the PollyPM CLI installed alongside pollypm" in rendered
     assert "Dry-run first" in rendered
     assert "pm migrate --check" in rendered
     assert "Bypass for this shell only (risky)" in rendered
