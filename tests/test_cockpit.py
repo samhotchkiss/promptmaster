@@ -3574,6 +3574,37 @@ def test_cockpit_forwards_l_to_right_pane_only_on_project_surface() -> None:
     assert sent == ["l"]
 
 
+def test_cockpit_pin_toggle_round_trips_and_reports_state() -> None:
+    """``p`` toggles the pin AND surfaces a hint about the new state (#858)."""
+    app = PollyCockpitApp.__new__(PollyCockpitApp)
+    app.hint = _CaptureWidget()
+    app._refresh_rows = lambda: None  # type: ignore[method-assign]
+    app._selected_row_key = lambda: "project:demo"  # type: ignore[method-assign]
+
+    pinned: list[bool] = []
+
+    class _Router:
+        state: bool = False
+
+        def toggle_pinned_project(self, key: str) -> bool:
+            self.state = not self.state
+            pinned.append(self.state)
+            return self.state
+
+    app.router = _Router()  # type: ignore[assignment]
+
+    app.action_toggle_project_pin()
+    assert pinned == [True]
+    assert "Pinned" in app.hint.value
+    assert "demo" in app.hint.value
+
+    app.action_toggle_project_pin()
+    assert pinned == [True, False]
+    assert app.hint.value.startswith("Unpinned"), (
+        f"expected an unpin confirmation, got {app.hint.value!r}"
+    )
+
+
 def test_cockpit_jk_forwards_to_inbox_when_on_list_surface() -> None:
     """j/k from rail forwards to right pane on inbox/activity (#856)."""
     app = PollyCockpitApp.__new__(PollyCockpitApp)

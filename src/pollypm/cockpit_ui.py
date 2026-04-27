@@ -1498,11 +1498,18 @@ class PollyCockpitApp(App[None]):
         key = self._selected_row_key()
         if key is None or not key.startswith("project:"):
             return
+        project_key = key.split(":", 1)[1]
         try:
-            self.router.toggle_pinned_project(key.split(":", 1)[1])
+            now_pinned = self.router.toggle_pinned_project(project_key)
         except Exception as exc:  # noqa: BLE001
             self.hint.update(f"Error: {exc}"[:60])
             return
+        # User feedback so a second ``p`` press is visibly an unpin
+        # rather than feeling like a silent no-op (#858).
+        if now_pinned:
+            self.hint.update(f"Pinned {project_key} — press p again to unpin.")
+        else:
+            self.hint.update(f"Unpinned {project_key}.")
         self._refresh_rows()
 
     def action_new_worker(self) -> None:
