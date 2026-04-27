@@ -262,6 +262,55 @@ def test_upgrade_writes_post_upgrade_flag_after_real_version_change(
     assert isinstance(payload["at"], (int, float))
 
 
+def test_upgrade_skipped_notice_records_zero_notified_sessions(
+    tmp_path, monkeypatch,
+) -> None:
+    """#817: a successful skipped notice phase is not delivery."""
+    import json
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / ".pollypm").mkdir()
+    flag = fake_home / ".pollypm" / "post-upgrade.flag"
+    monkeypatch.setattr(upgrade_mod, "_POST_UPGRADE_FLAG", flag)
+    monkeypatch.setattr(upgrade_mod, "_available_upgrade", lambda channel: None)
+    monkeypatch.setattr(
+        upgrade_mod, "run_migration_check", lambda: (True, "ok"),
+    )
+    monkeypatch.setattr(
+        upgrade_mod.subprocess,
+        "run",
+        lambda *a, **kw: type(
+            "Result",
+            (),
+            {"returncode": 0, "stdout": "", "stderr": ""},
+        )(),
+    )
+    monkeypatch.setattr(upgrade_mod, "_read_new_version", lambda: "9.9.9")
+    monkeypatch.setattr(
+        upgrade_mod,
+        "inject_notice",
+        lambda old, new: (
+            True,
+            "skipped: in-channel <system-update> disabled (see #755)",
+        ),
+    )
+    monkeypatch.setattr(upgrade_mod, "_notified_session_count", lambda: 3)
+
+    result = upgrade_mod.upgrade(
+        channel="stable",
+        installer_overrides={"uv": True},
+    )
+
+    assert result.ok is True
+    assert result.notified is False
+    assert result.notified_count == 0
+    assert result.pending_restart_count == 0
+    payload = json.loads(flag.read_text())
+    assert payload["notified"] == 0
+    assert payload["pending_restart"] == 0
+
+
 def test_upgrade_skips_post_upgrade_flag_when_version_unchanged(
     tmp_path, monkeypatch,
 ) -> None:

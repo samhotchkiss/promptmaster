@@ -668,7 +668,11 @@ def upgrade(
     step("notifying live sessions")
     notify_ok, notify_detail = inject_notice(old_version, new_version)
     step(f"notify: {notify_detail}")
-    notified_count = _notified_session_count() if notify_ok else 0
+    notice_delivered = (
+        notify_ok
+        and not notify_detail.strip().lower().startswith("skipped")
+    )
+    notified_count = _notified_session_count() if notice_delivered else 0
 
     recycled_count = 0
     recycle_scope: str | None = None
@@ -709,7 +713,7 @@ def upgrade(
         old_version=old_version,
         new_version=new_version,
         migration_checked=True,
-        notified=notify_ok,
+        notified=notice_delivered,
         stdout=result.stdout,
         stderr=result.stderr,
         message=f"upgraded {old_version} → {new_version}",
