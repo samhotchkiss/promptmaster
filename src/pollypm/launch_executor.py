@@ -1,0 +1,317 @@
+"""Executor that turns a :class:`LaunchPlan` into supervisor calls.
+
+The audit (#896) cited the gap: ``cli.up()`` consults
+:func:`plan_launch` but then maintains a separate hand-written
+launch flow that does not interpret ``plan.actions``. The state
+machine could drift from production behavior with no failing test.
+This module is the structural fix.
+
+Architecture:
+
+* :class:`LaunchPlanExecutor` accepts a supervisor, a probe, and
+  the config path on construction.
+* :meth:`LaunchPlanExecutor.execute` walks ``plan.actions`` in
+  order and dispatches each one to a typed method.
+* Every action handler is idempotent — running ``ENSURE_MAIN_
+  SESSION`` when the session already exists is a no-op. This
+  matches the contract that :func:`plan_launch` is *declarative*
+  (the action list says what should be true) rather than
+  imperative (a sequence of mutations).
+* The executor returns the final ``exit_code`` from
+  attach/switch_client (typer's ``Exit(code=...)`` value), or
+  ``None`` when the plan ended in ``FOCUS_CONSOLE``.
+
+Tests in :mod:`tests.test_launch_executor` exercise each action
+in isolation against a synthetic supervisor — no live tmux
+required.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Protocol
+
+from pollypm.launch_state import LaunchAction, LaunchPlan, LaunchProbe, LaunchState
+
+
+logger = logging.getLogger(__name__)
+
+
+_COCKPIT_WINDOW_NAME: str = "PollyPM"
+
+
+# ---------------------------------------------------------------------------
+# Supervisor surface (Protocol)
+# ---------------------------------------------------------------------------
+
+
+class _SupervisorLike(Protocol):
+    """Minimum supervisor surface the executor needs."""
+
+    config: object
+    tmux: object
+
+    def bootstrap_tmux(self, **kwargs) -> str: ...
+    def ensure_console_window(self) -> None: ...
+    def focus_console(self) -> None: ...
+    def ensure_heartbeat_schedule(self) -> None: ...
+    def storage_closet_session_name(self) -> str: ...
+
+    # Optional — present on real supervisors but not on every fake.
+    # The executor checks ``hasattr`` before calling.
+    # def console_command(self) -> str: ...
+
+
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class ExecutionResult:
+    """Outcome of executing a :class:`LaunchPlan`.
+
+    ``actions_run`` is the ordered tuple of actions the executor
+    actually dispatched (may be a prefix of ``plan.actions`` if a
+    handler short-circuited). ``exit_code`` is what typer should
+    raise via ``Exit(code=...)``; ``None`` means no ``Exit`` is
+    needed. ``messages`` accumulates user-facing status lines
+    (``cli.up()`` echoes them through typer)."""
+
+    actions_run: tuple[LaunchAction, ...]
+    exit_code: int | None
+    messages: tuple[str, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Executor
+# ---------------------------------------------------------------------------
+
+
+class LaunchPlanExecutor:
+    """Translate a :class:`LaunchPlan` into supervisor calls.
+
+    Handlers are idempotent. ``execute`` walks the plan's action
+    tuple in order; each dispatched handler may return an
+    ``int`` exit code (terminal actions like ``ATTACH_SESSION``)
+    or ``None`` (non-terminal actions). The first non-None exit
+    code becomes the executor's final result; subsequent
+    actions still run because the action list is declarative.
+    """
+
+    def __init__(
+        self,
+        supervisor: _SupervisorLike,
+        *,
+        probe: LaunchProbe,
+        config_path: Path,
+        status_emit: Callable[[str], None] | None = None,
+        rail_daemon_spawner: Callable[[Path], None] | None = None,
+    ) -> None:
+        self.supervisor = supervisor
+        self.probe = probe
+        self.config_path = config_path
+        self._status_emit = status_emit or (lambda _msg: None)
+        self._rail_daemon_spawner = rail_daemon_spawner
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    def execute(self, plan: LaunchPlan) -> ExecutionResult:
+        """Execute every action in ``plan.actions``."""
+        if plan.state is LaunchState.UNSUPPORTED:
+            # Defensive — UNSUPPORTED is supposed to be rejected
+            # by the caller before the executor sees it. If it
+            # leaks through, return an exit_code instead of
+            # mutating tmux.
+            return ExecutionResult(
+                actions_run=(LaunchAction.FAIL_CLOSED,),
+                exit_code=2,
+                messages=(plan.reason,),
+            )
+
+        run: list[LaunchAction] = []
+        messages: list[str] = []
+        exit_code: int | None = None
+
+        for action in plan.actions:
+            handler = self._dispatch.get(action)
+            if handler is None:
+                logger.warning(
+                    "launch executor: no handler for %s — skipping",
+                    action.value,
+                )
+                continue
+            try:
+                action_exit, action_messages = handler(self)
+            except Exception:  # noqa: BLE001 — log and continue
+                logger.exception(
+                    "launch executor: handler for %s raised", action.value,
+                )
+                continue
+            run.append(action)
+            messages.extend(action_messages)
+            if action_exit is not None and exit_code is None:
+                exit_code = action_exit
+
+        return ExecutionResult(
+            actions_run=tuple(run),
+            exit_code=exit_code,
+            messages=tuple(messages),
+        )
+
+    # ------------------------------------------------------------------
+    # Action handlers
+    # ------------------------------------------------------------------
+    #
+    # Each handler returns ``(exit_code | None, messages: list[str])``.
+    # Handlers swallow any expected error and emit a status message;
+    # unexpected errors propagate to ``execute`` which logs and
+    # continues.
+
+    def _on_ensure_storage_closet(self) -> tuple[int | None, list[str]]:
+        # Storage closet is created as a side effect of
+        # bootstrap_tmux. Calling ENSURE_STORAGE_CLOSET directly
+        # is a no-op; the canonical path is BOOTSTRAP_LAUNCHES,
+        # which is always paired with this action when needed.
+        return (None, [])
+
+    def _on_bootstrap_launches(self) -> tuple[int | None, list[str]]:
+        try:
+            controller_account = self.supervisor.bootstrap_tmux(
+                skip_probe=True,
+                on_status=self._status_emit,
+            )
+        except RuntimeError as exc:
+            return (1, [f"bootstrap failed: {exc}"])
+        # Idempotent reconciliation may return any account name
+        # (or "" when no account info is available — fakes).
+        return (None, [f"bootstrap controller={controller_account!r}"])
+
+    def _on_ensure_main_session(self) -> tuple[int | None, list[str]]:
+        # Only meaningful in the RESTORE_FROM_CLOSET path: closet
+        # is alive but the main session vanished. Re-create the
+        # console window with the standard window options.
+        if self.probe.main_session_alive:
+            return (None, [])
+        tmux = self.supervisor.tmux
+        try:
+            console_command = getattr(self.supervisor, "console_command", None)
+            command = console_command() if callable(console_command) else "$SHELL"
+            tmux.create_session(
+                self.probe.main_session_name,
+                _COCKPIT_WINDOW_NAME,
+                command,
+                remain_on_exit=False,
+            )
+            for option in ("allow-passthrough", "window-size", "aggressive-resize"):
+                value = "on" if option != "window-size" else "latest"
+                tmux.set_window_option(
+                    f"{self.probe.main_session_name}:{_COCKPIT_WINDOW_NAME}",
+                    option,
+                    value,
+                )
+        except Exception:  # noqa: BLE001
+            return (None, [])
+        return (None, [
+            f"restored main session {self.probe.main_session_name}"
+        ])
+
+    def _on_ensure_console_window(self) -> tuple[int | None, list[str]]:
+        ensure = getattr(self.supervisor, "ensure_console_window", None)
+        if callable(ensure):
+            ensure()
+        return (None, [])
+
+    def _on_respawn_shell(self) -> tuple[int | None, list[str]]:
+        # The probe carries enough state to identify the dead
+        # console pane; the legacy ensure_console_window path
+        # already covers a respawn so delegate to it. The action
+        # is recorded for observability.
+        return self._on_ensure_console_window()
+
+    def _on_respawn_rail(self) -> tuple[int | None, list[str]]:
+        # The cockpit rail layout owner (CockpitRouter.ensure_
+        # cockpit_layout) is the canonical path to recreate the
+        # rail pane. cli.up() calls it as part of TUI launch;
+        # recording the action here is the observability hook —
+        # tests assert the action was named even when the
+        # downstream layout call is best-effort.
+        return (None, [])
+
+    def _on_schedule_heartbeat(self) -> tuple[int | None, list[str]]:
+        ensure = getattr(self.supervisor, "ensure_heartbeat_schedule", None)
+        if callable(ensure):
+            ensure()
+        return (None, [])
+
+    def _on_start_rail_daemon(self) -> tuple[int | None, list[str]]:
+        if self._rail_daemon_spawner is not None:
+            try:
+                self._rail_daemon_spawner(self.config_path)
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+        return (None, [])
+
+    def _on_attach_session(self) -> tuple[int | None, list[str]]:
+        tmux = self.supervisor.tmux
+        attach = getattr(tmux, "attach_session", None)
+        if not callable(attach):
+            return (None, [])
+        return (
+            int(attach(self.probe.main_session_name) or 0),
+            [],
+        )
+
+    def _on_switch_client(self) -> tuple[int | None, list[str]]:
+        focus = getattr(self.supervisor, "focus_console", None)
+        if callable(focus):
+            focus()
+        tmux = self.supervisor.tmux
+        switch = getattr(tmux, "switch_client", None)
+        if not callable(switch):
+            return (None, [])
+        return (
+            int(switch(self.probe.main_session_name) or 0),
+            [f"Switching to tmux session {self.probe.main_session_name}"],
+        )
+
+    def _on_focus_console(self) -> tuple[int | None, list[str]]:
+        focus = getattr(self.supervisor, "focus_console", None)
+        if callable(focus):
+            focus()
+        return (
+            None,
+            [f"Already inside tmux session {self.probe.main_session_name}"],
+        )
+
+    def _on_fail_closed(self) -> tuple[int | None, list[str]]:
+        return (2, ["fail_closed"])
+
+    # ------------------------------------------------------------------
+    # Dispatch table
+    # ------------------------------------------------------------------
+    @property
+    def _dispatch(self) -> dict[
+        LaunchAction,
+        Callable[
+            ["LaunchPlanExecutor"], tuple[int | None, list[str]]
+        ],
+    ]:
+        return {
+            LaunchAction.ENSURE_STORAGE_CLOSET: type(self)._on_ensure_storage_closet,
+            LaunchAction.BOOTSTRAP_LAUNCHES: type(self)._on_bootstrap_launches,
+            LaunchAction.ENSURE_MAIN_SESSION: type(self)._on_ensure_main_session,
+            LaunchAction.ENSURE_CONSOLE_WINDOW: type(self)._on_ensure_console_window,
+            LaunchAction.RESPAWN_SHELL: type(self)._on_respawn_shell,
+            LaunchAction.RESPAWN_RAIL: type(self)._on_respawn_rail,
+            LaunchAction.SCHEDULE_HEARTBEAT: type(self)._on_schedule_heartbeat,
+            LaunchAction.START_RAIL_DAEMON: type(self)._on_start_rail_daemon,
+            LaunchAction.ATTACH_SESSION: type(self)._on_attach_session,
+            LaunchAction.SWITCH_CLIENT: type(self)._on_switch_client,
+            LaunchAction.FOCUS_CONSOLE: type(self)._on_focus_console,
+            LaunchAction.FAIL_CLOSED: type(self)._on_fail_closed,
+        }

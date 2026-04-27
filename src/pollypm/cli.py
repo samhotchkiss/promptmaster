@@ -45,6 +45,7 @@ from pollypm.config import (
 )
 from pollypm.cli_help import help_with_examples
 from pollypm.cli_features.alerts import alert_app, heartbeat_app, session_app
+from pollypm.launch_executor import LaunchPlanExecutor
 from pollypm.launch_state import (
     LaunchAction,
     LaunchProbe,
@@ -622,7 +623,8 @@ def up(
     # UNSUPPORTED to short-circuit before the launcher mutates
     # ambient state. The probe only reads tmux + config; building it
     # is side-effect-free.
-    plan = plan_launch(_build_launch_probe(supervisor))
+    probe = _build_launch_probe(supervisor)
+    plan = plan_launch(probe)
     typer.echo(f"[launch] {plan.state.value}: {plan.reason}")
     if plan.state is LaunchState.UNSUPPORTED:
         raise typer.BadParameter(plan.reason)
@@ -631,7 +633,8 @@ def up(
     # state store readiness, and Supervisor boot (which runs ensure_layout,
     # ensure_heartbeat_schedule, and ensure_knowledge_extraction_schedule).
     # Test harnesses that mock Supervisor without a core_rail fall back
-    # to the legacy per-call path below.
+    # to ensure_layout for layout scaffolding only; the executor below
+    # owns ensure_heartbeat_schedule via the SCHEDULE_HEARTBEAT action.
     if hasattr(supervisor, "core_rail"):
         supervisor.core_rail.start()
     else:  # pragma: no cover - back-compat for mocked Supervisors in tests
@@ -642,50 +645,25 @@ def up(
         start_transcript_ingestion(supervisor.config)
     session_name = supervisor.config.project.tmux_session
 
-    current_tmux = supervisor.tmux.current_session_name()
+    # #896 — drive every supervisor / tmux mutation through the
+    # state-machine executor so plan.actions is the source of
+    # truth for what runs. The executor handles BOOTSTRAP_LAUNCHES,
+    # ENSURE_*, RESPAWN_*, SCHEDULE_HEARTBEAT, START_RAIL_DAEMON,
+    # ATTACH/SWITCH/FOCUS — every action declared in the plan.
+    executor = LaunchPlanExecutor(
+        supervisor,
+        probe=probe,
+        config_path=config_path,
+        status_emit=_cli_status,
+        rail_daemon_spawner=_spawn_rail_daemon,
+    )
+    result = executor.execute(plan)
+    for message in result.messages:
+        typer.echo(message)
 
-    if not supervisor.tmux.has_session(session_name):
-        storage_alive = supervisor.tmux.has_session(supervisor.storage_closet_session_name())
-        if storage_alive:
-            supervisor.tmux.create_session(
-                session_name, supervisor.CONSOLE_WINDOW, supervisor.console_command(), remain_on_exit=False,
-            )
-            supervisor.tmux.set_window_option(f"{session_name}:{supervisor.CONSOLE_WINDOW}", "allow-passthrough", "on")
-            supervisor.tmux.set_window_option(f"{session_name}:{supervisor.CONSOLE_WINDOW}", "window-size", "latest")
-            supervisor.tmux.set_window_option(f"{session_name}:{supervisor.CONSOLE_WINDOW}", "aggressive-resize", "on")
-            typer.echo(f"Restored tmux session {session_name} (storage-closet still alive)")
-        else:
-            try:
-                controller_account = supervisor.bootstrap_tmux(skip_probe=True, on_status=_cli_status)
-            except RuntimeError as exc:
-                raise typer.BadParameter(str(exc)) from exc
-            controller = supervisor.config.accounts[controller_account]
-            typer.echo(
-                f"Created tmux session {session_name} with controller "
-                f"{controller.email or controller_account} [{controller.provider.value}]"
-            )
-    else:
-        supervisor.ensure_console_window()
-
-    # Back-compat: when CoreRail wasn't available (mocked Supervisor),
-    # run the schedule ensures explicitly so test harnesses and any
-    # third-party Supervisor fakes still see the expected side effects.
-    if not hasattr(supervisor, "core_rail"):  # pragma: no cover
-        supervisor.ensure_heartbeat_schedule()
-        if hasattr(supervisor, "ensure_knowledge_extraction_schedule"):
-            supervisor.ensure_knowledge_extraction_schedule()
-
-    # Spawn the headless rail daemon so heartbeat + recovery keep
-    # ticking even when the cockpit TUI isn't open. Without this,
-    # the rail only runs inside the cockpit process — a cockpit
-    # crash or a user who just uses the CLI would silently lose
-    # auto-recovery, which is exactly how the 2026-04-19 operator
-    # outage stayed dead for 5 hours. Idempotent: no-op if a live
-    # daemon already holds the PID file.
-    _spawn_rail_daemon(config_path)
-
-    # Set up the cockpit layout (split panes) BEFORE the TUI starts,
-    # then launch the TUI into the rail pane.
+    # Cockpit layout (split panes) is best-effort and runs after
+    # the executor's mutations so the layout sees the latest tmux
+    # state.
     from pollypm.cockpit_rail import CockpitRouter
     router = CockpitRouter(config_path)
     try:
@@ -696,17 +674,8 @@ def up(
     except Exception:  # noqa: BLE001
         pass  # layout will be fixed on next cockpit launch
 
-    if current_tmux == session_name:
-        supervisor.focus_console()
-        typer.echo(f"Already inside tmux session {session_name}")
-        return
-
-    if current_tmux:
-        supervisor.focus_console()
-        typer.echo(f"Switching to tmux session {session_name}")
-        raise typer.Exit(code=supervisor.tmux.switch_client(session_name))
-
-    raise typer.Exit(code=supervisor.tmux.attach_session(session_name))
+    if result.exit_code is not None:
+        raise typer.Exit(code=result.exit_code)
 
 
 def _rail_daemon_pid_path() -> Path:

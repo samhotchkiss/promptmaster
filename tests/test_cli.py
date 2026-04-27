@@ -224,7 +224,12 @@ def test_up_ensures_heartbeat_schedule_for_existing_session(monkeypatch, tmp_pat
 
     class FakeTmux:
         def has_session(self, name: str) -> bool:
-            return name == "pollypm"
+            # Both main and storage closet alive — the production
+            # ATTACH_EXISTING shape. Pre-#884 the state machine
+            # only checked main; now it also confirms the closet
+            # is up so RECOVER_MISSING_CLOSET fires when the
+            # closet really is gone.
+            return name in {"pollypm", "pollypm-storage-closet"}
 
         def current_session_name(self):
             return "pollypm"
@@ -263,7 +268,9 @@ def test_up_switches_current_tmux_client_to_polly_session(monkeypatch, tmp_path:
 
     class FakeTmux:
         def has_session(self, name: str) -> bool:
-            return name == "pollypm"
+            # Both main and storage closet alive — the production
+            # ATTACH_EXISTING shape (#884 / #896 wiring).
+            return name in {"pollypm", "pollypm-storage-closet"}
 
         def current_session_name(self):
             return "scratch"

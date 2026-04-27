@@ -435,8 +435,13 @@ def plan_launch(probe: LaunchProbe) -> LaunchPlan:
         return LaunchPlan(
             state=LaunchState.ATTACH_EXISTING,
             context=context,
+            # SCHEDULE_HEARTBEAT is included even on attach: the
+            # heartbeat schedule is idempotent, and a session
+            # that has been attached and detached repeatedly may
+            # have lost its scheduled tick. Cheap to re-arm.
             actions=(
                 LaunchAction.ENSURE_CONSOLE_WINDOW,
+                LaunchAction.SCHEDULE_HEARTBEAT,
                 _attach_action(context),
             ),
             reason="cockpit healthy: attach without respawning the rail",
@@ -450,6 +455,7 @@ def plan_launch(probe: LaunchProbe) -> LaunchPlan:
         context=context,
         actions=(
             LaunchAction.ENSURE_CONSOLE_WINDOW,
+            LaunchAction.SCHEDULE_HEARTBEAT,
             _attach_action(context),
         ),
         reason="cockpit healthy: attach existing session",
