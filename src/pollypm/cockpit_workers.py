@@ -89,7 +89,7 @@ class PollyWorkerRosterApp(App[None]):
         color: #6b7a88;
     }
     #wr-hint {
-        height: 1;
+        height: 2;
         padding: 0 2;
         color: #3e4c5a;
         background: #0c0f12;
@@ -205,10 +205,10 @@ class PollyWorkerRosterApp(App[None]):
             else "[dim]auto off[/dim]"
         )
         self.counters.update(
-            f"[b]{n_working}[/b] [dim]working[/dim]  "
-            f"[b]{n_idle}[/b] [dim]idle[/dim]  "
-            f"[#ff5f6d]{n_stuck}[/#ff5f6d] [dim]stuck[/dim]  "
-            f"[dim]{n_offline} offline[/dim]  \u00b7  {auto_tag}"
+            f"\U0001f7e2 [b]{n_working}[/b] [dim]working[/dim]  "
+            f"\U0001f7e1 [b]{n_idle}[/b] [dim]idle[/dim]  "
+            f"\U0001f534 [#ff5f6d]{n_stuck}[/#ff5f6d] [dim]stuck[/dim]  "
+            f"⚪ [b]{n_offline}[/b] [dim]offline[/dim]  \u00b7  {auto_tag}"
         )
         self.topbar.update(
             "   ".join(
@@ -315,9 +315,12 @@ class PollyWorkerRosterApp(App[None]):
         if row is None:
             self.hint.update(self._DEFAULT_HINT)
             return
-        self.hint.update(
-            f"[dim]{_escape(tooltip)}[/dim]  \u00b7  {self._DEFAULT_HINT}"
-        )
+        if tooltip:
+            self.hint.update(
+                f"[dim]{_escape(tooltip)}[/dim]\n[dim]{self._DEFAULT_HINT}[/dim]"
+            )
+        else:
+            self.hint.update(self._DEFAULT_HINT)
 
     def action_refresh(self) -> None:
         self._refresh()

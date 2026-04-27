@@ -150,7 +150,14 @@ def test_status_dots_for_each_category(roster_env, roster_app) -> None:
             assert dots["unresponsive"][0] == "🔴"
             # Counters line reflects the group tallies.
             counter_text = str(roster_app.counters.render())
-            assert "1" in counter_text  # at least one of each
+            assert "🟢" in counter_text
+            assert "working" in counter_text
+            assert "🟡" in counter_text
+            assert "idle" in counter_text
+            assert "🔴" in counter_text
+            assert "stuck" in counter_text
+            assert "⚪" in counter_text
+            assert "offline" in counter_text
     _run(body())
 
 
@@ -407,6 +414,8 @@ def test_row_highlight_updates_health_tooltip_hint(roster_env, roster_app) -> No
             assert "last heartbeat 7m ago" in hint_text
             assert "2.4M tokens" in hint_text
             assert "session: worker_demo" in hint_text
+            assert "\n" in hint_text
+            assert hint_text.index("session: worker_demo") < hint_text.index("R refresh")
 
     _run(body())
 
