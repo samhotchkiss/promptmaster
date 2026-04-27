@@ -28,12 +28,24 @@ FENCED_BLOCK_RE = re.compile(r"```(?:bash|shell|sh)?\n(.*?)```", re.S)
 # These files are archival, generated, or snapshot-heavy rather than active
 # operator docs, so they are intentionally excluded from the live CLI drift
 # gate.
+#
+# Convention for historical invalid command examples (#903):
+#
+# 1. Archival audits / snapshot docs ("activity-log.md", launch-issue
+#    audits, etc.) live here. They are allowed to cite commands that no
+#    longer exist because their job is to describe past state.
+# 2. Active operator docs MUST NOT cite invalid commands inside
+#    inline-code or fenced blocks — readers will copy/paste them. If
+#    you need to discuss a removed command in active prose, name it
+#    without the backticks (write "the old pm-mail command" instead of
+#    "`pm mail`"), or move the discussion to an archival doc here.
 EXCLUDED_TOP_LEVEL_DOCS = {
     "activity-log.md",
     "decisions.md",
     "deprecated-facts.md",
     "history.md",
     "ideas.md",
+    "launch-issue-audit-2026-04-27.md",
     "project-overview.md",
     "status-report.md",
     "system-state-2026-04-11.md",

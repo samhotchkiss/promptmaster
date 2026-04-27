@@ -179,6 +179,46 @@ def test_up_refuses_unsupported_with_actionable_reason(
     assert "tmux_session" in result.output or "names missing" in result.output
 
 
+def test_probe_plus_planner_attach_existing_no_typer() -> None:
+    """End-to-end probe → planner check that bypasses Typer +
+    monkeypatch + ``runner.invoke``.
+
+    The full-suite ordering issue (#904) traced to the integration
+    test relying on Typer state + the supervisor patch surviving
+    teardown. This regression test calls the same composition
+    (_build_launch_probe → plan_launch) directly so any future flake
+    must surface here first — and at this layer, the inputs and
+    outputs are pure values."""
+    from pollypm.launch_state import LaunchState, plan_launch
+
+    class _FakeTmux:
+        def has_session(self, name: str) -> bool:
+            return name in {"pollypm", "pollypm-storage-closet"}
+
+        def current_session_name(self) -> str:
+            return "pollypm"
+
+    class _FakeSupervisor:
+        def __init__(self) -> None:
+            self.tmux = _FakeTmux()
+            self.config = type(
+                "Config",
+                (),
+                {"project": type("Project", (), {"tmux_session": "pollypm"})()},
+            )()
+
+    probe = cli._build_launch_probe(_FakeSupervisor())
+    # Probe values are deterministic given the fake.
+    assert probe.main_session_name == "pollypm"
+    assert probe.closet_session_name == "pollypm-storage-closet"
+    assert probe.main_session_alive is True
+    assert probe.closet_session_alive is True
+    assert probe.current_tmux_session == "pollypm"
+
+    plan = plan_launch(probe)
+    assert plan.state is LaunchState.ATTACH_EXISTING
+
+
 def test_up_first_launch_state_named(monkeypatch, tmp_path: Path) -> None:
     """When neither main nor closet exists, the state machine
     must classify as FIRST_LAUNCH and ``up()`` must echo it."""

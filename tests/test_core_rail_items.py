@@ -99,7 +99,21 @@ def test_core_rail_items_plugin_loads_from_builtin_dir() -> None:
 
 
 def test_build_items_identical_to_legacy_shape(monkeypatch, tmp_path: Path) -> None:
-    """Visual-parity test — rail items match the legacy hardcoded shape."""
+    """Visual-parity test — rail items match the canonical shape.
+
+    #870 added a separate ``dashboard`` ("Home") row at the top so the
+    "Polly · chat" live pane is distinct from the static dashboard
+    surface — users were opening Polly expecting the dashboard. The
+    canonical top-section therefore starts with ``dashboard`` followed
+    by the chat / inbox / workers / metrics rows, then projects, then
+    settings last.
+
+    The test asserts structural ordering (dashboard first, settings
+    last, polly+russell+inbox sit before project rows) without pinning
+    a specific list-of-keys snapshot — the rail registry intentionally
+    grows as plugins land, and this test should not become a barrier
+    to that.
+    """
     monkeypatch.setattr(
         "pollypm.cockpit._count_inbox_tasks_for_label", lambda config: 1,
     )
@@ -111,6 +125,7 @@ def test_build_items_identical_to_legacy_shape(monkeypatch, tmp_path: Path) -> N
     keys = [item.key for item in items]
 
     # Core rail entries all present.
+    assert "dashboard" in keys
     assert "polly" in keys
     assert "russell" in keys
     assert "inbox" in keys
@@ -118,12 +133,23 @@ def test_build_items_identical_to_legacy_shape(monkeypatch, tmp_path: Path) -> N
     assert "project:demo" in keys
     assert "settings" in keys
 
-    # Order: top section (polly/russell/inbox) first, then projects, settings last.
-    assert items[0].key == "polly"
-    assert items[1].key == "russell"
-    assert items[2].key == "inbox"
-    assert items[2].label == "Inbox (1)"
+    # Order: dashboard first, settings last.
+    assert items[0].key == "dashboard"
     assert items[-1].key == "settings"
+
+    # Top section sits before any project row.
+    project_indices = [i for i, item in enumerate(items) if item.key.startswith("project:")]
+    first_project = min(project_indices)
+    for top_key in ("dashboard", "polly", "russell", "inbox"):
+        assert keys.index(top_key) < first_project, (
+            f"{top_key!r} must precede project rows; "
+            f"got order {keys}"
+        )
+
+    # Inbox count surfaces in its label (drift signal that
+    # _count_inbox_tasks_for_label monkey-patch reached the rail).
+    inbox_item = next(item for item in items if item.key == "inbox")
+    assert inbox_item.label == "Inbox (1)"
 
 
 def test_build_items_preserves_working_project_session_state(
