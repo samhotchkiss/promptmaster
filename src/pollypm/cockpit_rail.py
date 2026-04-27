@@ -2615,8 +2615,30 @@ class PollyCockpitRail:
                 self._write(clear_line + "\r\n")
 
     # Heartbeat ticks and token-ledger syncs flood the events stream
-    # but carry no user-facing signal (#793).
-    _TICKER_SUPPRESSED_EVENT_TYPES = frozenset({"heartbeat", "token_ledger"})
+    # but carry no user-facing signal (#793, #876). Mirrors the
+    # PollyCockpitApp suppression list so the headless rail behaves
+    # the same as the Textual cockpit when the user runs ``pm rail``.
+    _TICKER_SUPPRESSED_EVENT_TYPES = frozenset({
+        "heartbeat",
+        "token_ledger",
+        "lease",
+        "launch",
+        "recovered",
+        "recovery_prompt",
+        "recovery_recommendation",
+        "scheduler",
+        "operator_lease",
+    })
+
+    _TICKER_EVENT_LABELS: dict[str, str] = {
+        "alert": "alert",
+        "task_assigned": "task assigned",
+        "task_completed": "task done",
+        "plan_approved": "plan ok",
+        "plan_rejected": "plan rejected",
+        "rework_requested": "rework",
+        "review_requested": "review",
+    }
 
     def _event_ticker_text(self) -> str:
         # #656 gate: use the router's CockpitPresence so tmux detach
@@ -2642,11 +2664,16 @@ class PollyCockpitRail:
         window_size = min(3, len(events))
         offset = int((time.monotonic() - self._ticker_started_at) // 10)
         cycled = [events[(offset + i) % len(events)] for i in range(window_size)]
-        labels = []
+        labels: list[str] = []
         for event in cycled:
             event_type = getattr(event, "event_type", "event")
-            session_name = getattr(event, "session_name", "") or "system"
-            labels.append(f"{event_type}:{session_name}")
+            label = self._TICKER_EVENT_LABELS.get(
+                event_type, event_type.replace("_", " "),
+            )
+            if label not in labels:
+                labels.append(label)
+        if not labels:
+            return ""
         return "events · " + " · ".join(labels)
 
     def _section_header(self, label: str, width: int) -> RenderRow:

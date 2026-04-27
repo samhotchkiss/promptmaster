@@ -1101,7 +1101,36 @@ class PollyCockpitApp(App[None]):
     # user reading the rail's events strip (#793). Heartbeat ticks and
     # token-ledger syncs run every few seconds; surfacing them as
     # "events" buries actual project activity.
-    _TICKER_SUPPRESSED_EVENT_TYPES = frozenset({"heartbeat", "token_ledger"})
+    # Event types whose appearance in the rail ticker is pure plumbing
+    # noise — the user can't act on them, they cycle every few seconds,
+    # and they push the actual hint line off-screen on the 30-col rail
+    # (#876, #793). The rail is the headline status surface; only event
+    # types that map to "something worth noticing" pass through.
+    _TICKER_SUPPRESSED_EVENT_TYPES = frozenset({
+        "heartbeat",
+        "token_ledger",
+        "lease",
+        "launch",
+        "recovered",
+        "recovery_prompt",
+        "recovery_recommendation",
+        "scheduler",
+        "operator_lease",
+    })
+
+    # Friendly labels for the user-facing event types that *do* surface.
+    # Keys are ``event_type`` strings; values are short noun phrases that
+    # do not include the session name (which is internal and already
+    # makes the ticker too long for the 30-col rail).
+    _TICKER_EVENT_LABELS: dict[str, str] = {
+        "alert": "alert",
+        "task_assigned": "task assigned",
+        "task_completed": "task done",
+        "plan_approved": "plan ok",
+        "plan_rejected": "plan rejected",
+        "rework_requested": "rework",
+        "review_requested": "review",
+    }
 
     def _event_ticker_text(self) -> str:
         # Gate on real tmux-client attachment (not just isatty). When the
@@ -1133,11 +1162,16 @@ class PollyCockpitApp(App[None]):
         # header flickering on every cockpit tick.
         offset = int((time.monotonic() - self._ticker_started_at) // 10)
         cycled = [events[(offset + i) % len(events)] for i in range(window_size)]
-        labels = []
+        labels: list[str] = []
         for event in cycled:
             event_type = getattr(event, "event_type", "event")
-            session_name = getattr(event, "session_name", "") or "system"
-            labels.append(f"{event_type}:{session_name}")
+            label = self._TICKER_EVENT_LABELS.get(
+                event_type, event_type.replace("_", " "),
+            )
+            if label not in labels:
+                labels.append(label)
+        if not labels:
+            return ""
         return "events · " + " · ".join(labels)
 
     def _update_ticker(self) -> None:

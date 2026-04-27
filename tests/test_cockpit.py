@@ -1217,9 +1217,9 @@ def test_cockpit_rail_render_includes_event_ticker(monkeypatch) -> None:
     rail._render([CockpitItem(key="polly", label="Polly", state="idle"), CockpitItem(key="settings", label="Settings", state="idle")])
 
     # #793: heartbeat events are infrastructure noise and must be
-    # filtered before the ticker is built. Only ``session.started``
-    # survives, so the ticker shows just that.
-    assert rail._event_ticker_text() == "events · session.started:polly"
+    # filtered before the ticker is built. #876: surviving events show
+    # a friendly label without the internal session-name suffix.
+    assert rail._event_ticker_text() == "events · session.started"
     assert captured
 
 
@@ -1302,9 +1302,8 @@ def test_cockpit_ui_event_ticker_cycles_and_hides_when_empty(monkeypatch, tmp_pa
     monkeypatch.setattr("pollypm.cockpit_ui.time.monotonic", lambda: 11.0)
 
     # offset=11//10=1; window_size=min(3, 2)=2; cycled = events[1], events[0]
-    assert app._event_ticker_text() == (
-        "events · review:system · commit:worker_demo"
-    )
+    # User-facing labels — no session name suffix, no internal joiner (#876).
+    assert app._event_ticker_text() == "events · review · commit"
 
     app.router = _make_router([])  # type: ignore[assignment]
     assert app._event_ticker_text() == ""
@@ -1312,6 +1311,16 @@ def test_cockpit_ui_event_ticker_cycles_and_hides_when_empty(monkeypatch, tmp_pa
     # Gate closed → ticker empty even with events available.
     app.router = _make_router(
         [_Event("commit", "worker_demo")], attached=False,
+    )  # type: ignore[assignment]
+    assert app._event_ticker_text() == ""
+
+    # All-suppressed events drop the entire ticker (#876).
+    app.router = _make_router(
+        [
+            _Event("lease", "operator"),
+            _Event("launch", "operator"),
+            _Event("token_ledger", "heartbeat"),
+        ],
     )  # type: ignore[assignment]
     assert app._event_ticker_text() == ""
 
