@@ -781,7 +781,9 @@ class TestSweepHandlerGateIntegration:
         alerts = [a for a in store.open_alerts() if a.alert_type == "plan_missing"]
         assert len(alerts) == 1
         assert alerts[0].session_name == "plan_gate-proj"
-        assert "pm project plan proj" in alerts[0].message
+        # #866: alert text now points users at the in-cockpit affordance
+        # (press ``c`` on the project Plan card) instead of a CLI command.
+        assert "press c to ask" in alerts[0].message.lower()
 
         store.close()
 

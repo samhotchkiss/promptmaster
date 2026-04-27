@@ -298,14 +298,14 @@ def _emit_plan_missing_alert(
     # alert view groups it alongside the project's worker alerts.
     session_name = _plan_missing_session_name(project)
     # #760 — actionable single-line copy: name the project + the
-    # blocked task so the reader knows why it matters, end with a
-    # copy-pasteable command. Prior phrasing ("cannot be delegated",
-    # "no approved plan found at docs/plan/plan.md") was developer
-    # jargon that left the user guessing.
+    # blocked task so the reader knows why it matters. The earlier
+    # tail "Try: pm project plan <name>" pushed the user out of the
+    # cockpit to a shell — replaced with the in-cockpit affordance
+    # since c is now wired on the project Plan card (#866, #863).
     message = (
         f"Project '{project}' has no approved plan yet — "
         f"queued task {example_task_id} is waiting on it. "
-        f"Try: pm project plan {project}"
+        f"Open the project and press c to ask the PM to plan it."
     )
     try:
         store.upsert_alert(session_name, "plan_missing", "warn", message)
