@@ -1517,6 +1517,25 @@ def test_clean_hold_reason_strips_action_routing_tag() -> None:
     assert _clean_hold_reason("   ") == ""
 
 
+def test_clean_hold_reason_removes_internal_provisioning_failure() -> None:
+    from pollypm.cockpit_ui import _clean_hold_reason
+
+    reason = (
+        "Awaiting user Phase A approval. Heartbeat re-assigns in a loop "
+        "because tmux session 'pollypm-storage-closet' (task-media-1) "
+        "cannot be provisioned, but worker_media session is alive and "
+        "the work is intact at b4a7e2a. Resume with: pm task resume "
+        "once user replies in the inbox."
+    )
+
+    cleaned = _clean_hold_reason(reason)
+
+    assert "Awaiting user Phase A approval" in cleaned
+    assert "Resume with: pm task resume" in cleaned
+    assert "pollypm-storage-closet" not in cleaned
+    assert "cannot be provisioned" not in cleaned
+
+
 def test_clean_hold_reason_rewrites_known_task_refs_to_hash_form() -> None:
     """Architects and operator-pms sometimes write hold reasons that
     name an upstream task by full ``project_key/N`` ref:
@@ -3099,6 +3118,36 @@ def test_banner_promotes_on_hold_over_active_worker(dashboard_app) -> None:
     assert "active in background" in banner
     # No "1 on hold" duplicate in the suffix — overlap stripped.
     assert banner.count("on hold") == 1
+
+
+def test_banner_elevates_internal_hold_provisioning_failure(dashboard_app) -> None:
+    from types import SimpleNamespace
+
+    fake_data = SimpleNamespace(
+        action_items=[],
+        alert_count=0,
+        active_worker={"session_name": "worker_media", "role": "worker"},
+        task_counts={"on_hold": 1},
+        task_buckets={
+            "on_hold": [
+                {
+                    "task_number": 1,
+                    "hold_reason": (
+                        "Awaiting user Phase A approval. Heartbeat re-assigns "
+                        "in a loop because tmux session 'pollypm-storage-closet' "
+                        "(task-media-1) cannot be provisioned."
+                    ),
+                }
+            ],
+        },
+        inbox_count=0,
+    )
+
+    banner = dashboard_app._render_project_state_banner(fake_data, "▸ 1 on hold")
+
+    assert banner.startswith("Needs repair:")
+    assert "task #1 worker pane could not be provisioned" in banner
+    assert "pollypm-storage-closet" not in banner
 
 
 def test_banner_paused_drops_overlap_when_only_on_hold(dashboard_app) -> None:

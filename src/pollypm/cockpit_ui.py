@@ -9075,6 +9075,7 @@ def _clean_hold_reason(
     if not reason:
         return ""
     text = reason.replace("[Action] ", "").replace("[Action]", "")
+    text = _drop_internal_hold_failure_sentences(text)
     elided_self = False
     if title_map:
         def _replace(match: _re.Match[str]) -> str:
@@ -9101,6 +9102,38 @@ def _clean_hold_reason(
             text = _re.sub(r":\s+(?=[—\-,.;]\s|$)", " ", text)
             text = _re.sub(r"\s{2,}", " ", text)
     return text.strip()
+
+
+def _hold_reason_has_internal_failure(reason: str) -> bool:
+    lower = (reason or "").lower()
+    return (
+        "cannot be provisioned" in lower
+        or "re-assigns in a loop" in lower
+        or ("tmux session" in lower and "provision" in lower)
+    )
+
+
+def _drop_internal_hold_failure_sentences(reason: str) -> str:
+    if not reason or not _hold_reason_has_internal_failure(reason):
+        return reason
+    parts = _re.split(r"(?<=[.!?])\s+", reason)
+    kept = [
+        part for part in parts
+        if part and not _hold_reason_has_internal_failure(part)
+    ]
+    return " ".join(kept).strip()
+
+
+def _project_hold_failure_summary(data: object) -> str:
+    buckets = getattr(data, "task_buckets", {}) or {}
+    for item in buckets.get("on_hold", []) or []:
+        reason = str(item.get("hold_reason") or "")
+        if not _hold_reason_has_internal_failure(reason):
+            continue
+        num = item.get("task_number")
+        task_label = f"task #{num}" if num is not None else "an on-hold task"
+        return f"{task_label} worker pane could not be provisioned; heartbeat is retrying"
+    return ""
 
 
 def _banner_count_after_action_overlap(
@@ -9982,7 +10015,7 @@ class PollyProjectDashboardApp(App[None]):
         summary = self._render_project_state_banner(data, counts)
         self.action_bar.remove_class("-attention")
         self.action_bar.remove_class("-critical")
-        if data.alert_count:
+        if data.alert_count or _project_hold_failure_summary(data):
             self.action_bar.add_class("-critical")
         elif data.action_items or review_count or data.inbox_count or on_hold_count:
             self.action_bar.add_class("-attention")
@@ -9991,6 +10024,9 @@ class PollyProjectDashboardApp(App[None]):
     def _render_project_state_banner(
         self, data: ProjectDashboardData, counts: str,
     ) -> str:
+        internal_failure = _project_hold_failure_summary(data)
+        if internal_failure:
+            return f"Needs repair: {internal_failure}"
         count_suffix = f" · {counts[2:]}" if counts.startswith("▸ ") else f" · {counts}"
         if data.action_items:
             item = data.action_items[0]
