@@ -32,6 +32,11 @@ WORK_STATUS_TO_GITHUB_LABEL: dict[str, str] = {
     WorkStatus.DRAFT.value: TRACKER_STATE_TO_GITHUB_LABEL["00-not-ready"],
     WorkStatus.QUEUED.value: TRACKER_STATE_TO_GITHUB_LABEL["01-ready"],
     WorkStatus.IN_PROGRESS.value: TRACKER_STATE_TO_GITHUB_LABEL["02-in-progress"],
+    # #777 — REWORK is "actively assigned, re-doing rejected work".
+    # Same GitHub label as IN_PROGRESS for the six-label tracker
+    # contract; the cockpit / inbox surfaces the rework provenance
+    # via the work_status itself, not via a tracker label.
+    WorkStatus.REWORK.value: TRACKER_STATE_TO_GITHUB_LABEL["02-in-progress"],
     WorkStatus.REVIEW.value: TRACKER_STATE_TO_GITHUB_LABEL["03-needs-review"],
     WorkStatus.DONE.value: TRACKER_STATE_TO_GITHUB_LABEL["05-completed"],
     WorkStatus.CANCELLED.value: TRACKER_STATE_TO_GITHUB_LABEL["05-completed"],

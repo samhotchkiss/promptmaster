@@ -20,6 +20,10 @@ STATUS_TO_FOLDER: dict[str, str] = {
     WorkStatus.DRAFT.value: "00-not-ready",
     WorkStatus.QUEUED.value: "01-ready",
     WorkStatus.IN_PROGRESS.value: "02-in-progress",
+    # #777 — REWORK is "actively assigned, re-doing rejected work".
+    # Same folder as IN_PROGRESS for filesystem-sync purposes; the
+    # cockpit / inbox surfaces the rework provenance separately.
+    WorkStatus.REWORK.value: "02-in-progress",
     WorkStatus.REVIEW.value: "03-needs-review",
     WorkStatus.DONE.value: "05-completed",
     WorkStatus.CANCELLED.value: "05-completed",

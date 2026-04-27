@@ -278,7 +278,13 @@ class TestReject:
         svc.node_done(task.task_id, "pete", _valid_work_output())
 
         result = svc.reject(task.task_id, "polly", "Needs more tests")
-        assert result.work_status == WorkStatus.IN_PROGRESS
+        # #777 — reviewer rejection now lands the task in an
+        # explicit REWORK state instead of bouncing back to
+        # IN_PROGRESS. The rework node + assignee are still active
+        # so a worker can re-claim and continue, but the cockpit /
+        # inbox can now distinguish "fresh implement" from "rework
+        # after rejection".
+        assert result.work_status == WorkStatus.REWORK
         assert result.current_node_id == "implement"
 
         # New execution at implement with visit=2
@@ -288,6 +294,25 @@ class TestReject:
         assert impl_execs[0].status == ExecutionStatus.COMPLETED
         assert impl_execs[1].visit == 2
         assert impl_execs[1].status == ExecutionStatus.ACTIVE
+
+    def test_rework_can_advance_via_node_done(self, svc):
+        """#777 — after rejection, the worker re-runs the implement
+        node and calls node_done. REWORK must be a valid source
+        state for the node-done transition (otherwise the worker
+        gets a "task must be in_progress" error and can't recover).
+        """
+        task = _create_task(svc)
+        _claim_task(svc, task)
+        svc.node_done(task.task_id, "pete", _valid_work_output())
+        rejected = svc.reject(task.task_id, "polly", "needs more tests")
+        assert rejected.work_status == WorkStatus.REWORK
+
+        # Worker re-does the implement node and signals done. The
+        # transition should succeed — the previously-rejecting
+        # status (REWORK) is a legitimate source for node_done.
+        re_done = svc.node_done(task.task_id, "pete", _valid_work_output())
+        # Next node is review again, so status moves to REVIEW.
+        assert re_done.work_status == WorkStatus.REVIEW
 
     def test_reject_without_reason_rejected(self, svc):
         task = _create_task(svc)

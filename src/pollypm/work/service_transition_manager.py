@@ -556,12 +556,14 @@ class WorkTransitionManager:
 
         if task.work_status not in (
             WorkStatus.IN_PROGRESS,
+            WorkStatus.REWORK,
             WorkStatus.QUEUED,
             WorkStatus.REVIEW,
         ):
             raise InvalidTransitionError(
                 f"Cannot hold task in '{task.work_status.value}' state. "
-                f"Task must be in 'in_progress', 'review', or 'queued' state."
+                f"Task must be in 'in_progress', 'rework', 'review', "
+                f"or 'queued' state."
             )
 
         if task.work_status == WorkStatus.REVIEW:
@@ -677,11 +679,14 @@ class WorkTransitionManager:
     ) -> Task:
         task = self.service.get(task_id)
 
-        if task.work_status != WorkStatus.IN_PROGRESS:
+        if task.work_status not in (
+            WorkStatus.IN_PROGRESS,
+            WorkStatus.REWORK,  # #777 — rework node_done is a normal transition
+        ):
             raise InvalidTransitionError(
                 f"Cannot complete node on task in "
                 f"'{task.work_status.value}' state. "
-                f"Task must be in 'in_progress' state."
+                f"Task must be in 'in_progress' or 'rework' state."
             )
 
         flow, node = self.service._get_current_flow_node(task)
@@ -1000,12 +1005,18 @@ class WorkTransitionManager:
             )
             reject_assignee = self.service._resolve_node_assignee(task, reject_target)
 
+            # #777 — explicit REWORK state instead of bouncing back
+            # to IN_PROGRESS. Reject-target node is still active
+            # (so the worker can re-claim) but the status now
+            # carries the rework signal so cockpit / inbox can
+            # surface "this came from a rejection" instead of
+            # presenting a freshly-claimed-looking task.
             self.service._conn.execute(
                 "UPDATE work_tasks SET work_status = ?, assignee = ?, "
                 "current_node_id = ?, updated_at = ? "
                 "WHERE project = ? AND task_number = ?",
                 (
-                    WorkStatus.IN_PROGRESS.value,
+                    WorkStatus.REWORK.value,
                     reject_assignee,
                     node.reject_node_id,
                     now,
@@ -1032,7 +1043,7 @@ class WorkTransitionManager:
                 task.project,
                 task.task_number,
                 WorkStatus.REVIEW.value,
-                WorkStatus.IN_PROGRESS.value,
+                WorkStatus.REWORK.value,
                 actor,
                 reason,
             )

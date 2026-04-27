@@ -395,7 +395,10 @@ class MockWorkService:
         task = self._tasks.get(task_id)
         if task is None:
             raise TaskNotFoundError(f"Task '{task_id}' not found.")
-        if task.work_status != WorkStatus.IN_PROGRESS:
+        # #777 — REWORK is a valid source state for node_done; the
+        # worker re-runs the implement node after rejection, calls
+        # node_done, and the task advances normally.
+        if task.work_status not in (WorkStatus.IN_PROGRESS, WorkStatus.REWORK):
             raise InvalidTransitionError(
                 f"Cannot complete node on task in '{task.work_status.value}' state."
             )
@@ -492,7 +495,9 @@ class MockWorkService:
             raise InvalidTransitionError(f"Reject node '{reject_node_id}' not found.")
 
         old = task.work_status.value
-        task.work_status = WorkStatus.IN_PROGRESS
+        # #777 — explicit REWORK state instead of bouncing back to
+        # IN_PROGRESS. Mirror of the SQLite path.
+        task.work_status = WorkStatus.REWORK
         task.current_node_id = reject_node_id
         task.updated_at = _now()
 

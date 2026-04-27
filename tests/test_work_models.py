@@ -35,12 +35,17 @@ from pollypm.work.models import (
 
 
 class TestWorkStatusEnum:
-    def test_all_eight_states_exist(self):
+    def test_all_lifecycle_states_exist(self):
+        # ``rework`` (#777) — explicit state for reviewer-rejected
+        # tasks awaiting a re-do, instead of bouncing back to
+        # ``in_progress`` and hiding the rework provenance from
+        # the cockpit.
         values = {s.value for s in WorkStatus}
         assert values == {
             "draft",
             "queued",
             "in_progress",
+            "rework",
             "blocked",
             "on_hold",
             "review",

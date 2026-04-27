@@ -20,11 +20,35 @@ from typing import Any
 
 
 class WorkStatus(enum.Enum):
-    """Eight-state lifecycle for a task."""
+    """Lifecycle states for a task.
+
+    The state set was originally eight values (draft / queued /
+    in_progress / blocked / on_hold / review / done / cancelled).
+    #777 adds explicit ``REWORK`` so reviewer-rejected tasks live in
+    a distinct state instead of being silently bounced back to
+    ``IN_PROGRESS``. The bounceback hid the rework history from the
+    cockpit (a rejected task looked identical to a fresh claim) and
+    made forward-progress logic rely on hidden coupling between the
+    work DB row, the worker session, and UI decoration.
+
+    ``REWORK`` semantics:
+    * Set by :meth:`reject` when the reviewer rejects a review-node
+      execution. The task's ``current_node_id`` advances to the
+      flow's ``reject_node_id`` (typically the worker's implement
+      node), exactly as before; only the status is now distinct.
+    * Treated as non-terminal everywhere — the task is still
+      claimable / advanceable (a follow-up worker claims it and
+      transitions back to ``IN_PROGRESS`` via the regular claim
+      path).
+    * Surfaces in the cockpit as "rework needed" so the user can
+      see at a glance that this task came from a rejection, not a
+      fresh start.
+    """
 
     DRAFT = "draft"
     QUEUED = "queued"
     IN_PROGRESS = "in_progress"
+    REWORK = "rework"
     BLOCKED = "blocked"
     ON_HOLD = "on_hold"
     REVIEW = "review"

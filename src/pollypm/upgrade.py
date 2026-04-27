@@ -394,8 +394,8 @@ def _perform_recycle(
     """
     log = step or (lambda _msg: None)
     try:
-        from pollypm.config import DEFAULT_CONFIG_PATH, load_config
-        from pollypm.supervisor import Supervisor
+        from pollypm.config import DEFAULT_CONFIG_PATH
+        from pollypm.service_api import PollyPMService
     except Exception:  # noqa: BLE001
         log(f"recycle ({scope}): pollypm runtime imports failed")
         return (0, 0)
@@ -405,8 +405,10 @@ def _perform_recycle(
         return (0, 0)
 
     try:
-        config = load_config(DEFAULT_CONFIG_PATH)
-        supervisor = Supervisor(config)
+        # Route through the service_api boundary — direct
+        # ``from pollypm.supervisor import Supervisor`` outside core
+        # is deprecated (see ``tests/test_import_boundary.py``).
+        supervisor = PollyPMService(DEFAULT_CONFIG_PATH).load_supervisor()
     except Exception as exc:  # noqa: BLE001
         log(f"recycle ({scope}): supervisor init failed ({exc})")
         return (0, 0)
@@ -727,15 +729,18 @@ def _notified_session_count() -> int:
     the upgrade flow on a count probe.
     """
     try:
-        from pollypm.config import DEFAULT_CONFIG_PATH, load_config
-        from pollypm.supervisor import Supervisor
+        from pollypm.config import DEFAULT_CONFIG_PATH
+        from pollypm.service_api import PollyPMService
     except Exception:  # noqa: BLE001
         return 0
     if not DEFAULT_CONFIG_PATH.is_file():
         return 0
     try:
-        config = load_config(DEFAULT_CONFIG_PATH)
-        supervisor = Supervisor(config)
+        # Route through the service_api boundary — direct supervisor
+        # imports outside ``pollypm.core/`` are deprecated.
+        supervisor = PollyPMService(DEFAULT_CONFIG_PATH).load_supervisor(
+            readonly_state=True,
+        )
         launches, _windows, _alerts, _leases, _errors = supervisor.status()
     except Exception:  # noqa: BLE001
         return 0
