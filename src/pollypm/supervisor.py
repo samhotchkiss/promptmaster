@@ -2576,11 +2576,22 @@ class Supervisor:
         target = f"{session_name}:{self._CONSOLE_WINDOW}"
         panes = self.session_service.tmux.list_panes(target)
         rail_pane = min(panes, key=lambda p: int(getattr(p, "pane_left", 0)))
+        if self._cockpit_rail_pane_is_running(rail_pane):
+            return
         loop_cmd = (
             f"while true; do {cockpit_cmd}; "
             f'echo "[Rail exited — restarting in 2s]"; sleep 2; done'
         )
         self.session_service.tmux.respawn_pane(rail_pane.pane_id, loop_cmd)
+
+    @staticmethod
+    def _cockpit_rail_pane_is_running(pane) -> bool:
+        if getattr(pane, "pane_dead", False):
+            return False
+        command = str(getattr(pane, "pane_current_command", "") or "").strip()
+        if not command:
+            return False
+        return command not in {"bash", "zsh", "sh", "fish", "login"}
 
     def _controller_candidates(self) -> list[str]:
         ordered = [self.config.pollypm.controller_account, *self.config.pollypm.failover_accounts]

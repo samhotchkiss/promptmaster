@@ -1521,3 +1521,42 @@ def test_start_cockpit_tui_respawns_rail_pane_with_restart_loop(monkeypatch, tmp
     assert command.startswith("while true; do ")
     assert "pm cockpit" in command
     assert "[Rail exited" in command
+
+
+def test_start_cockpit_tui_skips_respawn_when_rail_is_running(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    panes = [
+        type(
+            "Pane",
+            (),
+            {
+                "pane_id": "%left",
+                "pane_left": 0,
+                "pane_current_command": "python",
+                "pane_dead": False,
+            },
+        )(),
+        type(
+            "Pane",
+            (),
+            {
+                "pane_id": "%right",
+                "pane_left": 42,
+                "pane_current_command": "python",
+                "pane_dead": False,
+            },
+        )(),
+    ]
+    respawns: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(supervisor.session_service.tmux, "list_panes", lambda target: panes)
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "respawn_pane",
+        lambda target, command: respawns.append((target, command)),
+    )
+
+    supervisor.start_cockpit_tui("pollypm")
+
+    assert respawns == []
