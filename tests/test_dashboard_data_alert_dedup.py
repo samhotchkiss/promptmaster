@@ -172,13 +172,19 @@ def test_briefing_pluralizes_counts_correctly(tmp_path) -> None:
 
     now = datetime.now(UTC)
 
-    def _build_briefing(commits, completed, inbox_count, recoveries) -> str:
-        """Inline copy of the briefing prose builder for unit testing."""
+    def _build_briefing(commits, completed, inbox_count) -> str:
+        """Inline copy of the briefing prose builder for unit testing.
+
+        Mirrors the production logic in ``dashboard_data.gather`` so the
+        plural-handling regression stays covered. Recoveries are not
+        surfaced in the briefing (#854): they are internal recovery-loop
+        plumbing, not user-facing activity.
+        """
         def _plural(count: int, singular: str, plural: str | None = None) -> str:
             word = singular if count == 1 else (plural or f"{singular}s")
             return f"{count} {word}"
 
-        if not (commits or completed or inbox_count or recoveries):
+        if not (commits or completed or inbox_count):
             return ""
         parts: list[str] = []
         if commits:
@@ -193,23 +199,20 @@ def test_briefing_pluralizes_counts_correctly(tmp_path) -> None:
             parts.append(
                 f"{_plural(inbox_count, 'inbox item')} waiting for you"
             )
-        if recoveries:
-            parts.append(
-                _plural(recoveries, "session recovery", "session recoveries")
-            )
-        return "While you were away: " + ", ".join(parts) + "."
+        return "Last 24 hours: " + ", ".join(parts) + "."
 
     # Singular case — no parenthetical-s.
     out = _build_briefing(
         commits=[CommitInfo("h1", "msg", "a", 0.0, "demo")],
         completed=[CompletedItem("t", "issue", "demo", 0.0)],
         inbox_count=1,
-        recoveries=1,
     )
     assert "1 commit across 1 project" in out
     assert "1 issue completed" in out
     assert "1 inbox item waiting" in out
-    assert "1 session recovery" in out
+    assert out.startswith("Last 24 hours:"), f"unexpected greeting: {out!r}"
+    # Recovery counts must not surface in the user-facing briefing.
+    assert "recovery" not in out.lower()
     # The bare singular forms must not contain the legacy parens.
     assert "(s)" not in out
     assert "(ies)" not in out
@@ -226,12 +229,11 @@ def test_briefing_pluralizes_counts_correctly(tmp_path) -> None:
             CompletedItem("t2", "issue", "demo", 0.0),
         ],
         inbox_count=4,
-        recoveries=2,
     )
     assert "3 commits across 2 projects" in out2
     assert "2 issues completed" in out2
     assert "4 inbox items waiting" in out2
-    assert "2 session recoveries" in out2
+    assert "recovery" not in out2.lower()
     assert "(s)" not in out2
     assert "(ies)" not in out2
 

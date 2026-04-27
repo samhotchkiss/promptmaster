@@ -612,8 +612,15 @@ def gather(config: PollyPMConfig, store: StateStore) -> DashboardData:
         word = singular if count == 1 else (plural or f"{singular}s")
         return f"{count} {word}"
 
+    # 24h activity briefing. The earlier "While you were away" framing
+    # presumed every cockpit launch was a return from a trip — including
+    # the literal first-ever launch on a fresh install (#854). Use a
+    # neutral 24-hour heading instead. Recovery counts are internal
+    # plumbing (see #879 for elevation policy) and are deliberately not
+    # surfaced here so the dashboard reflects what the user did, not
+    # what the supervisor patched up behind the scenes.
     briefing = ""
-    if commits or completed or inbox_count or recoveries:
+    if commits or completed or inbox_count:
         parts: list[str] = []
         if commits:
             projects_touched = len({c.project for c in commits})
@@ -627,11 +634,7 @@ def gather(config: PollyPMConfig, store: StateStore) -> DashboardData:
             parts.append(
                 f"{_plural(inbox_count, 'inbox item')} waiting for you"
             )
-        if recoveries:
-            parts.append(
-                _plural(recoveries, "session recovery", "session recoveries")
-            )
-        briefing = "While you were away: " + ", ".join(parts) + "."
+        briefing = "Last 24 hours: " + ", ".join(parts) + "."
 
     # Late import keeps dashboard_data out of the cockpit_alerts import
     # graph (cockpit_alerts → cockpit_palette → cockpit, which pulls
