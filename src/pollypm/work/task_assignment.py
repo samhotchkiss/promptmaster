@@ -135,7 +135,12 @@ _ROLE_STATIC_NAMES: dict[str, tuple[str, ...]] = {
 _PROJECT_SCOPED_ROLES: frozenset[str] = frozenset({"worker", "architect"})
 
 
-def role_candidate_names(role: str, project: str) -> list[str]:
+def role_candidate_names(
+    role: str,
+    project: str,
+    *,
+    task_number: int | None = None,
+) -> list[str]:
     """Return the ordered list of session names a role *could* map to.
 
     Callers match the first candidate that actually has a live session.
@@ -144,10 +149,26 @@ def role_candidate_names(role: str, project: str) -> list[str]:
     convention so drift between docs and shipping code doesn't break
     lookup. Process-wide singletons (reviewer / operator / heartbeat /
     triage) map to their fixed session names via ``_ROLE_STATIC_NAMES``.
+
+    When ``task_number`` is supplied for the ``worker`` role (#921), the
+    canonical per-task window name (``task-<project>-<N>``, written by
+    :func:`pollypm.work.session_manager.task_window_name`) is prepended
+    to the candidate list. Per-task workers are the post-#919 shipping
+    convention; the legacy long-lived ``worker-<project>`` /
+    ``worker_<project>`` sessions remain accepted as fallbacks so a
+    project that still runs a long-lived worker (e.g. booktalk's pre-
+    existing setup) keeps working.
     """
     key = role.strip().lower()
     if key in _PROJECT_SCOPED_ROLES:
-        return [f"{key}-{project}", f"{key}_{project}"]
+        names: list[str] = []
+        if key == "worker" and task_number is not None:
+            # Per-task worker sessions take priority — that's the
+            # post-#919 canonical form. ``task-<project>-<N>`` mirrors
+            # :func:`pollypm.work.session_manager.task_window_name`.
+            names.append(f"task-{project}-{int(task_number)}")
+        names.extend([f"{key}-{project}", f"{key}_{project}"])
+        return names
     if key.startswith("critic_") or key.startswith("critic-"):
         # Planner-spawned per-task critic sessions carry the role name
         # verbatim. Pass through so exact-name lookup picks them up.
@@ -207,9 +228,16 @@ class SessionRoleIndex:
         actor_type: ActorType,
         actor_name: str,
         project: str,
+        *,
+        task_number: int | None = None,
     ) -> object | None:
         """Return a ``SessionHandle`` for the expected actor, or ``None``
         if no live session matches.
+
+        ``task_number`` (#921) — when supplied for a worker-role lookup,
+        ``role_candidate_names`` prepends the canonical per-task window
+        name ``task-<project>-<N>`` so the post-#919 per-task worker
+        session counts as fulfilling the worker role for that task.
         """
         if actor_type is ActorType.HUMAN:
             # Humans don't have sessions — caller escalates.
@@ -223,7 +251,9 @@ class SessionRoleIndex:
             effective = actor_name
             if actor_type is ActorType.PROJECT_MANAGER and not effective:
                 effective = "operator"
-            candidates = role_candidate_names(effective, project)
+            candidates = role_candidate_names(
+                effective, project, task_number=task_number,
+            )
 
         matches: list[object] = []
         for name in candidates:

@@ -187,7 +187,16 @@ def notify(
         return {"outcome": "no_session_service", "task_id": event.task_id}
 
     index = SessionRoleIndex(session_svc, work_service=services.work_service)
-    handle = index.resolve(event.actor_type, event.actor_name, event.project)
+    # #921: pass ``task_number`` so the resolver picks up post-#919
+    # per-task worker windows (``task-<project>-<N>``) in addition to
+    # the legacy ``worker-<project>`` / ``worker_<project>`` long-lived
+    # sessions.
+    handle = index.resolve(
+        event.actor_type,
+        event.actor_name,
+        event.project,
+        task_number=event.task_number,
+    )
 
     if handle is None:
         _escalate_no_session(event, msg_store or store)
@@ -239,6 +248,23 @@ def notify(
             msg_store.clear_alert("task_assignment", _alert_type_for(event))
         except Exception:  # noqa: BLE001
             pass
+        # #921: also clear the sweep-level ``(worker-<project>, no_session)``
+        # alert raised by ``_emit_no_session_alert``. That alert is
+        # keyed by the candidate session name we *would* expect, not by
+        # the actual matched name (which for a per-task session is
+        # ``task-<project>-<N>``), so we walk the role candidates.
+        from pollypm.work.models import ActorType as _ActorType
+
+        if event.actor_type is _ActorType.ROLE:
+            from pollypm.work.task_assignment import role_candidate_names
+
+            for candidate in role_candidate_names(
+                event.actor_name, event.project,
+            ):
+                try:
+                    msg_store.clear_alert(candidate, "no_session")
+                except Exception:  # noqa: BLE001
+                    pass
 
     message = format_ping_for_role(event)
 

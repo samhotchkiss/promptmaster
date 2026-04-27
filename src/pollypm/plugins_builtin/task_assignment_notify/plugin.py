@@ -124,6 +124,7 @@ def _session_created_listener(event) -> None:
                     task_event.actor_type,
                     task_event.actor_name,
                     task_event.project,
+                    task_number=task_event.task_number,
                 )
                 if handle is None:
                     continue

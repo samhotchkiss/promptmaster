@@ -316,6 +316,7 @@ class TmuxSessionService:
 
         # Build handles from StateStore session records
         handles: list[SessionHandle] = []
+        emitted_names: set[str] = set()
         try:
             sessions = self._store.list_sessions()
         except Exception:  # noqa: BLE001
@@ -332,6 +333,36 @@ class TmuxSessionService:
                 tmux_session=getattr(window, "session", self.storage_closet_session_name()) if window else self.storage_closet_session_name(),
                 cwd=session.cwd,
             ))
+            emitted_names.add(session.name)
+
+        # #921: synthesize handles for per-task worker windows. The
+        # SessionManager (``provision_worker``) creates ``task-<project>-<N>``
+        # tmux windows in the storage closet but does not register them
+        # in the StateStore sessions table — those rows are reserved for
+        # the static launch plan. Without this synthesis,
+        # ``SessionRoleIndex.resolve()`` (which scans this list) cannot
+        # find the per-task session, so the task_assignment notify path
+        # falls into ``no_session`` even though the spawned worker is
+        # alive in the closet.
+        storage_closet = self.storage_closet_session_name()
+        for window in windows.values():
+            name = getattr(window, "name", "") or ""
+            if not name.startswith("task-"):
+                continue
+            if name in emitted_names:
+                continue
+            if getattr(window, "pane_dead", False):
+                continue
+            handles.append(SessionHandle(
+                name=name,
+                provider="claude",
+                account="",
+                window_name=name,
+                pane_id=getattr(window, "pane_id", None),
+                tmux_session=getattr(window, "session", storage_closet),
+                cwd=getattr(window, "pane_current_path", "") or "",
+            ))
+            emitted_names.add(name)
         return handles
 
     # ------------------------------------------------------------------

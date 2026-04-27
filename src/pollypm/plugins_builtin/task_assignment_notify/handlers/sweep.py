@@ -192,7 +192,14 @@ def _target_session_is_idle(
         return True
     try:
         index = SessionRoleIndex(session_svc, work_service=services.work_service)
-        handle = index.resolve(event.actor_type, event.actor_name, event.project)
+        # #921: include ``task_number`` so per-task ``task-<proj>-<N>``
+        # windows resolve as the worker session.
+        handle = index.resolve(
+            event.actor_type,
+            event.actor_name,
+            event.project,
+            task_number=event.task_number,
+        )
     except Exception:  # noqa: BLE001
         logger.debug(
             "task_assignment sweep: resolve failed for %s", event.task_id,

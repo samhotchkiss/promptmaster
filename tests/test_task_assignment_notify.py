@@ -420,6 +420,72 @@ class TestSweeper:
             "New work" in text for _name, text in svc.sent
         )
 
+    def test_sweeper_recognizes_per_task_session_for_in_progress(
+        self, tmp_path, monkeypatch,
+    ):
+        """#921: when an in_progress task has a live ``task-<proj>-<N>``
+        session in the storage closet, the sweep must NOT raise
+        ``no_session`` for it. The session counts as the worker for
+        that ``(project, role=worker)`` lookup.
+        """
+        # Only the per-task session is "live" in the FakeSessionService.
+        # Tasks numbered from 1 within a project's DB; we wire the
+        # window name from the task's actual number so the test stays
+        # honest about the naming contract regardless of allocation order.
+        work, store, _ = self._make_services(tmp_path, [])
+        bus.clear_listeners()
+        task = work.create(
+            title="Add charts",
+            description="Implement",
+            type="task",
+            project="blackjack-trainer",
+            flow_template="standard",
+            roles={"worker": "agent-1", "reviewer": "agent-2"},
+            priority="normal",
+        )
+        work.queue(task.task_id, "pm")
+        # Move into in_progress so the sweep visits the in_progress branch.
+        work.claim(task.task_id, "worker")
+        live_window = f"task-{task.project}-{task.task_number}"
+        svc = FakeSessionService(handles=[FakeHandle(live_window)])
+
+        def _fake_loader(*, config_path=None):
+            return _RuntimeServices(
+                session_service=svc,
+                state_store=store,
+                work_service=work,
+                project_root=tmp_path,
+                msg_store=store,
+            )
+
+        monkeypatch.setattr(
+            "pollypm.plugins_builtin.task_assignment_notify.handlers.sweep.load_runtime_services",
+            _fake_loader,
+        )
+
+        result = task_assignment_sweep_handler({})
+        assert result["outcome"] == "swept"
+        # The sweep must NOT classify this task as ``no_session``.
+        assert result["by_outcome"].get("no_session", 0) == 0
+        # And the per-task session received the kickoff fan-out — not
+        # the legacy ``worker-<project>`` name.
+        assert any(
+            name == f"task-{task.project}-{task.task_number}"
+            for name, _text in svc.sent
+        )
+        # No sweep-level no_session alert was raised.
+        sweep_alerts = [
+            a for a in store.open_alerts()
+            if a.alert_type == "no_session"
+        ]
+        assert sweep_alerts == []
+        # No per-task no_session_for_assignment alert either.
+        per_task_alerts = [
+            a for a in store.open_alerts()
+            if a.alert_type.startswith("no_session_for_assignment:")
+        ]
+        assert per_task_alerts == []
+
     def test_sweeper_skips_already_notified_within_cooldown(
         self, tmp_path, monkeypatch,
     ):
@@ -1508,3 +1574,253 @@ class TestRejectBounceDedupe:
         round = json.loads(json.dumps(payload))
         restored = _event_from_payload(round)
         assert restored.execution_version == 4
+
+
+# ---------------------------------------------------------------------------
+# #921 — per-task worker session recognition
+# ---------------------------------------------------------------------------
+
+
+class TestPerTaskWorkerRecognition:
+    """The post-#919 ``task-<project>-<N>`` window must count as the
+    worker session for ``(project=<project>, role=worker)`` for that
+    task. Without this, ``pm task claim`` spawns a worker that the
+    notify path can't see, ``no_session`` alerts fire spuriously, and
+    the kickoff message never reaches the spawned pane.
+    """
+
+    def test_role_candidates_prepend_per_task_window(self):
+        # Worker role with a task_number gets the canonical per-task
+        # form first, then the legacy long-lived names as fallbacks.
+        assert role_candidate_names(
+            "worker", "blackjack-trainer", task_number=3,
+        ) == [
+            "task-blackjack-trainer-3",
+            "worker-blackjack-trainer",
+            "worker_blackjack-trainer",
+        ]
+
+    def test_role_candidates_no_task_number_unchanged(self):
+        # Without a task_number the legacy candidate list is preserved
+        # — nothing else needs to know about per-task naming.
+        assert role_candidate_names("worker", "demo") == [
+            "worker-demo", "worker_demo",
+        ]
+
+    def test_resolver_picks_task_window_over_legacy_worker(self):
+        # When both legacy and per-task sessions are present, the
+        # resolver prefers the per-task one.
+        svc = FakeSessionService(handles=[
+            FakeHandle("worker-blackjack-trainer"),
+            FakeHandle("task-blackjack-trainer-3"),
+        ])
+        index = SessionRoleIndex(svc)
+        handle = index.resolve(
+            ActorType.ROLE, "worker", "blackjack-trainer", task_number=3,
+        )
+        assert handle is not None
+        assert handle.name == "task-blackjack-trainer-3"
+
+    def test_resolver_falls_back_to_legacy_worker_when_no_task_window(self):
+        # A project that still runs a long-lived worker (booktalk-style)
+        # is unaffected: when no per-task window matches, the legacy
+        # ``worker-<project>`` resolves as before.
+        svc = FakeSessionService(handles=[FakeHandle("worker-booktalk")])
+        index = SessionRoleIndex(svc)
+        handle = index.resolve(
+            ActorType.ROLE, "worker", "booktalk", task_number=7,
+        )
+        assert handle is not None
+        assert handle.name == "worker-booktalk"
+
+    def test_resolver_does_not_match_sibling_task_window(self):
+        # The candidate is task-<project>-<N> exactly. A different
+        # task_number for the same project must NOT match.
+        svc = FakeSessionService(handles=[
+            FakeHandle("task-blackjack-trainer-3"),
+        ])
+        index = SessionRoleIndex(svc)
+        handle = index.resolve(
+            ActorType.ROLE, "worker", "blackjack-trainer", task_number=4,
+        )
+        assert handle is None
+
+
+class TestNotifyRoutesToPerTaskSession:
+    """The work-push contract: when a task is in_progress with a fresh
+    per-task session live, ``notify()`` sends the kickoff message to
+    the per-task session — not the legacy ``worker-<project>`` name."""
+
+    def test_notify_sends_to_task_window_for_in_progress(self, state_store):
+        svc = FakeSessionService(handles=[
+            FakeHandle("task-blackjack-trainer-3"),
+        ])
+        services = _RuntimeServices(
+            session_service=svc, state_store=state_store,
+            work_service=None, project_root=Path("."),
+        )
+        event = TaskAssignmentEvent(
+            task_id="blackjack-trainer/3",
+            project="blackjack-trainer",
+            task_number=3,
+            title="Add charts",
+            current_node="implement",
+            current_node_kind="work",
+            actor_type=ActorType.ROLE,
+            actor_name="worker",
+            work_status="in_progress",
+            priority="normal",
+            transitioned_at=datetime.now(timezone.utc),
+            transitioned_by="tester",
+        )
+        outcome = notify(event, services=services)
+        assert outcome["outcome"] == "sent"
+        assert outcome["session"] == "task-blackjack-trainer-3"
+        assert len(svc.sent) == 1
+        target, message = svc.sent[0]
+        assert target == "task-blackjack-trainer-3"
+        # Kickoff payload mirrors the legacy long-lived worker — task
+        # description + the resume pointer.
+        assert "Resume work" in message
+        assert "[blackjack-trainer/3]" in message
+
+    def test_notify_does_not_raise_no_session_when_per_task_lives(
+        self, state_store,
+    ):
+        # Even though no ``worker-<project>`` session is registered,
+        # the live ``task-<project>-<N>`` window must satisfy the
+        # ``(project, role=worker)`` lookup so the notify path
+        # succeeds without escalating ``no_session_for_assignment``.
+        svc = FakeSessionService(handles=[
+            FakeHandle("task-blackjack-trainer-3"),
+        ])
+        services = _RuntimeServices(
+            session_service=svc, state_store=state_store,
+            work_service=None, project_root=Path("."),
+        )
+        event = TaskAssignmentEvent(
+            task_id="blackjack-trainer/3",
+            project="blackjack-trainer",
+            task_number=3,
+            title="Add charts",
+            current_node="implement",
+            current_node_kind="work",
+            actor_type=ActorType.ROLE,
+            actor_name="worker",
+            work_status="in_progress",
+            priority="normal",
+            transitioned_at=datetime.now(timezone.utc),
+            transitioned_by="tester",
+        )
+        outcome = notify(event, services=services)
+        assert outcome["outcome"] == "sent"
+        alerts = state_store.open_alerts()
+        per_task = [
+            a for a in alerts
+            if a.alert_type == "no_session_for_assignment:blackjack-trainer/3"
+        ]
+        assert per_task == []
+
+    def test_tmux_session_service_list_synthesizes_per_task_handles(
+        self, tmp_path,
+    ):
+        """The session service must surface ``task-<project>-<N>``
+        windows that live in the storage closet but aren't recorded in
+        the static StateStore sessions table. Without this, the
+        SessionRoleIndex (which reads ``session_service.list()``) can't
+        find the per-task worker even though tmux knows about it.
+        """
+        from types import SimpleNamespace
+
+        from pollypm.session_services.tmux import TmuxSessionService
+        from pollypm.tmux.client import TmuxWindow
+
+        class FakeTmux:
+            def list_all_windows(self):
+                return [
+                    TmuxWindow(
+                        session="pollypm-storage-closet",
+                        index=1,
+                        name="task-blackjack-trainer-3",
+                        active=True,
+                        pane_id="%42",
+                        pane_current_command="claude",
+                        pane_current_path="/tmp/worktree",
+                        pane_dead=False,
+                    ),
+                    TmuxWindow(
+                        session="pollypm-storage-closet",
+                        index=2,
+                        name="pm-operator",
+                        active=False,
+                        pane_id="%43",
+                        pane_current_command="claude",
+                        pane_current_path="/tmp/operator",
+                        pane_dead=False,
+                    ),
+                ]
+
+        class FakeStore:
+            def list_sessions(self):
+                return []
+
+        config = SimpleNamespace(
+            project=SimpleNamespace(
+                tmux_session="pollypm",
+                snapshots_dir=tmp_path / "snapshots",
+                root_dir=tmp_path,
+            ),
+            sessions={},
+        )
+        service = TmuxSessionService(config=config, store=FakeStore())
+        service.tmux = FakeTmux()
+        # Disable cockpit-mounted override path for this isolated test.
+        service._mounted_window_override = lambda: None
+
+        handles = service.list()
+        names = {h.name for h in handles}
+        # The per-task window appears as a synthetic handle.
+        assert "task-blackjack-trainer-3" in names
+        # Non-task windows are NOT synthesized (they're only included
+        # via the StateStore session records path).
+        assert "pm-operator" not in names
+
+    def test_successful_notify_clears_sweep_no_session_alert(self, state_store):
+        # Pre-existing sweep-level alert from a prior tick where the
+        # per-task session wasn't yet live. Once notify resolves and
+        # sends, both the per-task ``no_session_for_assignment:<id>``
+        # and the role-level ``(worker-<project>, no_session)`` alerts
+        # must clear so heartbeat output stops flagging the (now-live)
+        # worker.
+        state_store.upsert_alert(
+            "worker-blackjack-trainer",
+            "no_session",
+            "warn",
+            "stub",
+        )
+        svc = FakeSessionService(handles=[
+            FakeHandle("task-blackjack-trainer-3"),
+        ])
+        services = _RuntimeServices(
+            session_service=svc, state_store=state_store,
+            work_service=None, project_root=Path("."),
+            msg_store=state_store,
+        )
+        event = TaskAssignmentEvent(
+            task_id="blackjack-trainer/3",
+            project="blackjack-trainer",
+            task_number=3,
+            title="Add charts",
+            current_node="implement",
+            current_node_kind="work",
+            actor_type=ActorType.ROLE,
+            actor_name="worker",
+            work_status="in_progress",
+            priority="normal",
+            transitioned_at=datetime.now(timezone.utc),
+            transitioned_by="tester",
+        )
+        outcome = notify(event, services=services)
+        assert outcome["outcome"] == "sent"
+        open_types = {a.alert_type for a in state_store.open_alerts()}
+        assert "no_session" not in open_types
