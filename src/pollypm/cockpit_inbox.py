@@ -991,6 +991,59 @@ def _gather_worker_roster(config) -> list[WorkerRosterRow]:
                 )
             )
 
+    # Surface long-running control sessions from the storage-closet
+    # (architect-*, worker-*, pm-*) that aren't tracked as per-task
+    # workers in any project's work-service DB. Without this, the
+    # Workers panel could read '0 sessions' while the storage-closet
+    # had nine live windows (#871). Each unmatched window becomes a
+    # synthetic roster row labelled by its tmux window name so the
+    # user can at least see what is running.
+    if storage_windows:
+        already_tracked = {row.tmux_window for row in rows}
+        for window_name, window in storage_windows.items():
+            if window_name in already_tracked:
+                continue
+            if not (
+                window_name.startswith("architect-")
+                or window_name.startswith("worker-")
+                or window_name.startswith("pm-")
+            ):
+                continue
+            kind, _, label = window_name.partition("-")
+            project_key = label or "[workspace]"
+            is_dead = bool(getattr(window, "pane_dead", False))
+            status = "offline" if is_dead else "idle"
+            health, health_tooltip = _worker_health_snapshot(
+                status=status,
+                last_heartbeat_iso=None,
+                token_total=0,
+                session_name=window_name,
+                current_node=None,
+            )
+            rows.append(
+                WorkerRosterRow(
+                    project_key=project_key,
+                    project_name=label or "[workspace]",
+                    session_name=window_name,
+                    status=status,
+                    health=health,
+                    health_tooltip=health_tooltip,
+                    task_id=None,
+                    task_number=None,
+                    task_title=f"{kind.title()} session",
+                    current_node=None,
+                    turn_label="",
+                    last_commit_label="",
+                    token_total=0,
+                    tmux_window=window_name,
+                    last_heartbeat=None,
+                    worktree_path=None,
+                    branch_name=None,
+                    just_shipped=False,
+                    shipment_token=None,
+                )
+            )
+
     if supervisor is not None:
         try:
             supervisor.store.close()
