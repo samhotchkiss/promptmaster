@@ -665,6 +665,7 @@ class PollyCockpitApp(App[None]):
         Binding("g,home", "cursor_first", "First", show=False, priority=True),
         Binding("G,end", "cursor_last", "Last", show=False, priority=True),
         Binding("q,Q,ctrl+q", "request_quit", "Quit", priority=True),
+        Binding("escape", "back_to_home", "Back to Home", show=False, priority=True),
         Binding("w,W,ctrl+w", "detach", "Detach", priority=True),
     ]
 
@@ -1468,7 +1469,44 @@ class PollyCockpitApp(App[None]):
         except Exception:  # noqa: BLE001
             pass
 
+    # Surfaces where ``q``/``Esc`` should mean "back to Home" instead of
+    # "quit the cockpit" (#864). The user expectation: only Home accepts
+    # the destructive shutdown shortcut; sub-surfaces back out first so a
+    # user mid-session does not have to navigate via the rail just to
+    # leave Settings or Inbox.
+    _HOME_RETURN_FROM_KEYS: frozenset[str] = frozenset(
+        {"settings", "inbox", "activity", "workers"}
+    )
+
+    def _is_on_home(self) -> bool:
+        return self.selected_key not in self._HOME_RETURN_FROM_KEYS and not (
+            self.selected_key.startswith("project:")
+        )
+
+    def _navigate_home(self) -> bool:
+        """Switch to the Home (dashboard / polly) surface. Return True on success."""
+        try:
+            self.router.route_selected("polly")
+            self.selected_key = "polly"
+            self._last_router_selected_key = self.router.selected_key()
+        except Exception as exc:  # noqa: BLE001
+            self.hint.update(f"Error: {exc}"[:60])
+            return False
+        self._refresh_rows()
+        return True
+
+    def action_back_to_home(self) -> None:
+        if self._is_on_home():
+            return
+        self._navigate_home()
+
     def action_request_quit(self) -> None:
+        # Sub-surface: ``q`` means "back to Home" first. Only confirm-quit
+        # from Home itself so the destructive shortcut is gated by the
+        # surface that already framed itself as the cockpit's landing.
+        if not self._is_on_home():
+            self._navigate_home()
+            return
         result = self.router.tmux.run(
             "confirm-before",
             "-p",

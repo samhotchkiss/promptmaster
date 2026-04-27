@@ -3425,3 +3425,98 @@ def test_cockpit_app_shows_palette_tip_on_first_launch(monkeypatch, tmp_path: Pa
 
     assert notices == [("Tip: press `:` to open the command palette.", 10.0)]
     assert app.router.marked == 1
+
+
+def _build_back_to_home_app() -> tuple[PollyCockpitApp, list[tuple[str, str] | str]]:
+    """Construct a minimal cockpit app for back-to-home tests."""
+    app = PollyCockpitApp.__new__(PollyCockpitApp)
+    calls: list[tuple[str, str] | str] = []
+
+    class _Router:
+        selected = "polly"
+
+        def route_selected(self, key: str) -> None:
+            calls.append(("route", key))
+            self.selected = key
+
+        def selected_key(self) -> str:
+            return self.selected
+
+    app.router = _Router()  # type: ignore[assignment]
+    app.hint = _CaptureWidget()
+    app._refresh_rows = lambda: calls.append("refresh")  # type: ignore[method-assign]
+    return app, calls
+
+
+def test_cockpit_q_from_settings_returns_to_home_not_quit() -> None:
+    """``q`` on a sub-surface goes Home; only Home triggers shutdown confirm (#864)."""
+    app, calls = _build_back_to_home_app()
+    app.selected_key = "settings"
+    app._last_router_selected_key = "settings"
+
+    # Spy on the would-be confirm call: never reached on a sub-surface.
+    confirm_called: list[bool] = []
+
+    class _Tmux:
+        def run(self, *_args, **_kwargs):  # noqa: ANN001, ANN002, ANN003
+            confirm_called.append(True)
+            class _R:
+                returncode = 0
+                stdout = ""
+            return _R()
+
+    app.router.tmux = _Tmux()  # type: ignore[attr-defined]
+
+    app.action_request_quit()
+
+    assert ("route", "polly") in calls
+    assert app.selected_key == "polly"
+    assert confirm_called == [], "should not show quit confirm from a sub-surface"
+
+
+def test_cockpit_q_from_home_still_prompts_for_quit() -> None:
+    """At Home, ``q`` keeps the destructive shutdown confirm path (#864)."""
+    app, calls = _build_back_to_home_app()
+    app.selected_key = "polly"
+    app._last_router_selected_key = "polly"
+
+    confirm_called: list[bool] = []
+
+    class _Tmux:
+        def run(self, *_args, **_kwargs):  # noqa: ANN001, ANN002, ANN003
+            confirm_called.append(True)
+            class _R:
+                returncode = 1  # user said "no"
+                stdout = ""
+            return _R()
+
+    app.router.tmux = _Tmux()  # type: ignore[attr-defined]
+
+    app.action_request_quit()
+
+    assert confirm_called == [True], "Home should still prompt for confirm"
+    # Did not navigate anywhere — the user only saw the confirm prompt.
+    assert ("route", "polly") not in calls
+
+
+def test_cockpit_escape_routes_back_to_home_from_settings() -> None:
+    """Esc from a sub-surface returns to Home (#864)."""
+    app, calls = _build_back_to_home_app()
+    app.selected_key = "inbox"
+    app._last_router_selected_key = "inbox"
+
+    app.action_back_to_home()
+
+    assert ("route", "polly") in calls
+    assert app.selected_key == "polly"
+
+
+def test_cockpit_escape_at_home_is_noop() -> None:
+    """Esc at Home is a no-op — does not re-route or refresh (#864)."""
+    app, calls = _build_back_to_home_app()
+    app.selected_key = "polly"
+    app._last_router_selected_key = "polly"
+
+    app.action_back_to_home()
+
+    assert calls == [], f"expected no-op at home but saw {calls}"
