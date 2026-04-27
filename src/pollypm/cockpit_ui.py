@@ -1373,6 +1373,7 @@ class PollyCockpitApp(App[None]):
     def action_new_worker(self) -> None:
         key = self._selected_row_key()
         if key is None or not key.startswith("project:"):
+            self.hint.update("Select a project first, then press n to launch a worker.")
             return
         project_key = key.split(":", 1)[1]
         self.hint.update(f"Launching worker for {project_key}...")
@@ -5921,6 +5922,11 @@ class PollyInboxApp(App[None]):
             )
         if chip_bits:
             self.filter_chips.update("  ".join(chip_bits))
+            self.filter_chips.display = True
+        elif self._filter_bar_visible:
+            self.filter_chips.update(
+                "[dim]Filter: type to narrow messages · Esc closes[/dim]"
+            )
             self.filter_chips.display = True
         else:
             self.filter_chips.update("")

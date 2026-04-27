@@ -474,6 +474,27 @@ def test_toast_renders_full_message_under_220_chars() -> None:
     assert "(truncated" not in body
 
 
+def test_narrow_toast_preserves_trailing_try_command() -> None:
+    """Rail-width toasts must not clip the recovery command."""
+    from pollypm.cockpit_alerts import AlertToast
+
+    toast = AlertToast(
+        alert_id=1,
+        severity="warn",
+        message=(
+            "[Alert] Project 'booktalk' needs planning. "
+            "Try: pm project plan booktalk"
+        ),
+        width_chars=28,
+    )
+    body = toast._render_body()
+
+    assert "Project 'booktalk' needs planning" in body
+    assert "Try:" in body
+    assert "pm project plan booktalk" in body
+    assert "press [b]a[/b] for full text" in body
+
+
 def test_toast_truncation_advertises_press_a_for_full_text() -> None:
     """Above the 220-char cap, the tail switches from "press a to view
     all" to an explicit "(truncated — press a for full text)" so the

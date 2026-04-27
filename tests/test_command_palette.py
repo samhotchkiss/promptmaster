@@ -448,3 +448,27 @@ def test_palette_binding_present_on_inbox_and_dashboard_and_rail(
     assert _has_palette_keys(PollyInboxApp)
     assert _has_palette_keys(PollyProjectDashboardApp)
     assert _has_palette_keys(PollyWorkerRosterApp)
+
+
+def test_keyboard_help_keeps_rail_movement_labels_together(
+    single_project_config: Path,
+) -> None:
+    """The rail help overlay should show both cursor keys before it scrolls."""
+    from pollypm.cockpit_palette import (
+        KeyboardHelpModal,
+        _collect_keybindings_for_screen,
+    )
+    from pollypm.cockpit_ui import PollyCockpitApp
+
+    app = PollyCockpitApp(single_project_config)
+    sections = _collect_keybindings_for_screen(app)
+    screen_rows = dict(sections[0][1])
+
+    assert screen_rows["j / ↓"] == "Down"
+    assert screen_rows["k / ↑"] == "Up"
+    first_keys = [key for key, _desc in sections[0][1][:4]]
+    assert "j / ↓" in first_keys
+    assert "k / ↑" in first_keys
+
+    body = KeyboardHelpModal(sections, screen_title="Cockpit")._render_body()
+    assert "[b]k / ↑[/b]\n      [dim]Up[/dim]" in body

@@ -180,6 +180,10 @@ def alert_should_toast(alert_type: str) -> bool:
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_TRAILING_COMMAND_RE = re.compile(
+    r"\b(?:try|run):\s*`?([^`]+?)`?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _alert_toast_icon(severity: str) -> str:
@@ -317,6 +321,9 @@ class AlertToast(Static):
     def _render_body(self) -> str:
         icon = _alert_toast_icon(self.severity)
         text = _sanitize_alert_message(self.message)
+        compact = self._render_compact_command_body(icon, text)
+        if compact is not None:
+            return compact
         # Issue #6 \u2014 the previous 57-char hard cap chopped most alert
         # messages mid-word (e.g. "[Alert] Project 'media' has no..."
         # with the actionable detail invisible). The toast can wrap to
@@ -333,6 +340,33 @@ class AlertToast(Static):
             body += "\n[dim](truncated \u2014 press [b]a[/b] for full text)[/dim]"
         elif self.show_action_hint:
             body += "\n[dim]press [b]a[/b] to view all \u00b7 esc to dismiss[/dim]"
+        else:
+            body += "\n[dim]esc/click to dismiss[/dim]"
+        return body
+
+    def _render_compact_command_body(self, icon: str, text: str) -> str | None:
+        """Keep actionable ``Try: ...`` commands visible in narrow rails."""
+        if self.width_chars is None or self.width_chars > 34:
+            return None
+        match = _TRAILING_COMMAND_RE.search(text)
+        if match is None:
+            return None
+
+        command = match.group(1).strip()
+        if not command:
+            return None
+        summary = text[: match.start()].strip(" \t\n.:-—")
+        if len(summary) > 48:
+            summary = summary[:45].rstrip() + "…"
+        summary = summary or "action needed"
+
+        body = (
+            f"{icon}  [b]{_escape_markup(summary)}[/b]\n"
+            "[dim]Try:[/dim]\n"
+            f"[b]{_escape_markup(command)}[/b]"
+        )
+        if self.show_action_hint:
+            body += "\n[dim]press [b]a[/b] for full text[/dim]"
         else:
             body += "\n[dim]esc/click to dismiss[/dim]"
         return body

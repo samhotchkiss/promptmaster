@@ -563,6 +563,23 @@ def _format_binding_keys(key_field: str) -> str:
     return " / ".join(pretty) if pretty else key_field
 
 
+def _binding_help_priority(norm_keys: set[str]) -> int:
+    """Keep high-frequency movement keys visible before lower-traffic rows."""
+    if norm_keys & {"enter", "o"}:
+        return 10
+    if norm_keys & {"j", "down"}:
+        return 20
+    if norm_keys & {"k", "up"}:
+        return 21
+    if norm_keys & {"g", "home"}:
+        return 22
+    if norm_keys & {"G", "end"}:
+        return 23
+    if norm_keys & {"q", "escape", "ctrl+q"}:
+        return 90
+    return 50
+
+
 def _selected_inbox_labels(app: App) -> list[str]:
     """Return labels on the currently-selected inbox item, if any."""
     selected_id = getattr(app, "_selected_task_id", None)
@@ -581,8 +598,8 @@ def _collect_keybindings_for_screen(
     """Return ordered ``(category, [(key, description), ...])`` sections."""
     sections: list[tuple[str, list[tuple[str, str]]]] = []
 
-    screen_rows: list[tuple[str, str]] = []
-    for binding in getattr(app, "BINDINGS", None) or []:
+    screen_rows: list[tuple[int, int, str, str]] = []
+    for order, binding in enumerate(getattr(app, "BINDINGS", None) or []):
         key_field = getattr(binding, "key", "") or ""
         desc = getattr(binding, "description", "") or ""
         if not key_field:
@@ -591,10 +608,18 @@ def _collect_keybindings_for_screen(
         if norm_keys & {"question_mark", "colon", "ctrl+k"}:
             continue
         screen_rows.append(
-            (_format_binding_keys(key_field), desc or "(no description)")
+            (
+                _binding_help_priority(norm_keys),
+                order,
+                _format_binding_keys(key_field),
+                desc or "(no description)",
+            )
         )
     if screen_rows:
-        sections.append(("This screen", screen_rows))
+        screen_rows.sort(key=lambda row: (row[0], row[1]))
+        sections.append(
+            ("This screen", [(key, desc) for _priority, _order, key, desc in screen_rows])
+        )
 
     if type(app).__name__ == "PollyCockpitApp":
         sections.append(("Rail glyphs", list(_RAIL_GLYPH_HELP)))

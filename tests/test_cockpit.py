@@ -1304,6 +1304,21 @@ def test_cockpit_ui_bindings_expose_activity_and_pin_legend() -> None:
     assert bindings["p"] == "Pin Project"
 
 
+def test_cockpit_new_worker_non_project_selection_updates_hint() -> None:
+    app = PollyCockpitApp.__new__(PollyCockpitApp)
+    updates: list[str] = []
+    app._selected_row_key = lambda: "inbox"  # type: ignore[method-assign]
+    app.hint = type(
+        "Hint",
+        (),
+        {"update": lambda _self, text: updates.append(text)},
+    )()
+
+    app.action_new_worker()
+
+    assert updates == ["Select a project first, then press n to launch a worker."]
+
+
 def test_toggle_pinned_project_preserves_insertion_recency(tmp_path: Path) -> None:
     """#677 acceptance: most-recently-pinned sorts first. Each new pin
     prepends so it beats older pins in rail ordering."""

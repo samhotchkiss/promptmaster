@@ -303,12 +303,14 @@ class PollyActivityFeedApp(App[None]):
         Binding("F", "toggle_follow", "Follow"),
         Binding("c", "clear_filters", "Clear"),
         Binding("R,u", "refresh", "Refresh", show=False),
+        Binding("a", "view_alerts", "Alerts", show=False),
         Binding("enter", "open_detail", "Open"),
         Binding("question_mark", "show_keyboard_help", "Help", priority=True),
         Binding("q,escape", "back_or_cancel", "Back"),
     ]
 
     _TYPEAHEAD_RESERVED_KEYS = frozenset({
+        "a",
         "c",
         "g",
         "j",
