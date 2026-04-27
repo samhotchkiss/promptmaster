@@ -225,6 +225,51 @@ def _target_session_is_idle(
         return True
 
 
+def _kickoff_pending(work_service: Any, event: TaskAssignmentEvent) -> bool:
+    """Return True when this worker kickoff has not yet been delivered.
+
+    #922: gates the sweep's "force the first push" branch. We only
+    care about the ``actor_type=ROLE, actor_name=worker`` case — the
+    legacy long-lived workers (reviewer / operator / heartbeat) and
+    agent-pinned nodes don't suffer from the bootstrap race because
+    their target session is already running when the assignment
+    fires.
+
+    Returns False on any error or when the work service doesn't
+    expose ``kickoff_sent_at`` (test doubles, pre-#922 builds) — that
+    keeps the existing idle-gated + throttled behaviour as the
+    fallback. A queued task carries no execution row yet (visit=0),
+    which the helper also treats as "not pending" — the ``queued``
+    branch already pings reliably via the in-process listener +
+    sweep, and we don't want to forcibly re-fire it past the dedupe.
+    """
+    if event.work_status not in _ACTIVE_WORKER_STATUSES:
+        return False
+    from pollypm.work.models import ActorType
+
+    if event.actor_type is not ActorType.ROLE:
+        return False
+    if (event.actor_name or "").strip().lower() != "worker":
+        return False
+    getter = getattr(work_service, "kickoff_sent_at", None)
+    if not callable(getter):
+        return False
+    try:
+        stamped = getter(
+            event.project,
+            event.task_number,
+            event.current_node,
+            event.execution_version or None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: kickoff_sent_at lookup failed for %s",
+            event.task_id, exc_info=True,
+        )
+        return False
+    return stamped in (None, "")
+
+
 def _emit_no_session_alert(
     services: Any,
     *,
@@ -457,10 +502,23 @@ def _sweep_work_service(
             event = _build_event_for_task(work, task)
             if event is None:
                 continue
+            # #922: a worker kickoff that's still un-delivered (no
+            # ``kickoff_sent_at`` stamp on the active execution row)
+            # bypasses the idle gate AND the notify dedupe. The race
+            # we're fixing is "in-process listener fired during claim
+            # before the per-task pane existed (or while it was still
+            # bootstrapping), so the first 'Resume work' ping never
+            # landed; the standard sweep path then either skips with
+            # ``skipped_active_turn`` (claude bullet ⏺ in pane text)
+            # or dedupes against a poisoned record_notification row".
+            # Forcing the kickoff here is safe because the stamp is
+            # idempotent — once set, future ticks fall back to the
+            # normal idle-gated + 5-min-throttled path.
+            kickoff_pending = _kickoff_pending(work, event)
             # #246: for in_progress tasks, only ping if the worker
             # session is idle. An active turn means they're working;
             # resume pings are for the restart / crash-recovery case.
-            if status in _IDLE_GATED_STATUSES:
+            if status in _IDLE_GATED_STATUSES and not kickoff_pending:
                 if not _target_session_is_idle(event, services):
                     by_outcome["skipped_active_turn"] = (
                         by_outcome.get("skipped_active_turn", 0) + 1
@@ -500,10 +558,20 @@ def _sweep_work_service(
                     continue
 
             totals["considered"] += 1
+            # #922: when the kickoff hasn't been delivered yet, drop
+            # the throttle to 0 so the dedupe table doesn't suppress
+            # the first push. ``notify()`` stamps ``kickoff_sent_at``
+            # on success, after which the next sweep tick falls back
+            # to the normal throttle.
+            effective_throttle = 0 if kickoff_pending else throttle_override
             result = notify(
-                event, services=services, throttle_seconds=throttle_override,
+                event, services=services, throttle_seconds=effective_throttle,
             )
             outcome = str(result.get("outcome", "unknown"))
+            if kickoff_pending and outcome == "sent":
+                by_outcome["forced_kickoff"] = (
+                    by_outcome.get("forced_kickoff", 0) + 1
+                )
             by_outcome[outcome] = by_outcome.get(outcome, 0) + 1
             _record_sweeper_ping(
                 work,

@@ -148,6 +148,15 @@ CREATE TABLE IF NOT EXISTS work_node_executions (
     decision_reason TEXT,
     started_at TEXT,
     completed_at TEXT,
+    -- #922: per-execution kickoff delivery marker. Stamped by
+    -- task_assignment notify() after the canonical "Resume work" ping
+    -- lands on the worker session. The heartbeat sweep treats NULL as
+    -- "kickoff not yet delivered for this visit" and forces the send
+    -- past the idle/dedupe gates so the first push survives the
+    -- claim → bootstrap race. A reject-bounce that opens a new visit
+    -- gets a fresh row with kickoff_sent_at=NULL, which correctly
+    -- re-fires the kickoff for the resumed work.
+    kickoff_sent_at TEXT,
     FOREIGN KEY (task_project, task_number)
         REFERENCES work_tasks(project, task_number),
     UNIQUE (task_project, task_number, node_id, visit)
@@ -228,6 +237,7 @@ def create_work_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(WORK_SCHEMA)
     _ensure_flow_node_columns(conn)
     _ensure_context_entry_columns(conn)
+    _ensure_node_execution_columns(conn)
     _run_work_migrations(conn)
 
 
@@ -244,6 +254,30 @@ def _ensure_flow_node_columns(conn: sqlite3.Connection) -> None:
     }
     if "agent_name" not in cols:
         conn.execute("ALTER TABLE work_flow_nodes ADD COLUMN agent_name TEXT")
+
+
+def _ensure_node_execution_columns(conn: sqlite3.Connection) -> None:
+    """Backfill optional columns on work_node_executions for legacy DBs.
+
+    SQLite lacks IF NOT EXISTS on ADD COLUMN, and CREATE TABLE IF NOT
+    EXISTS is a no-op for already-present tables, so columns added in
+    later migrations need an explicit guard. Mirrors the existing
+    ``_ensure_flow_node_columns`` / ``_ensure_context_entry_columns``
+    pattern.
+
+    The migration list still records a version bump for ``kickoff_sent_at``
+    (#922) so a fresh DB tags itself as v7. This helper handles the
+    case where a v6 DB has the column added by the WORK_SCHEMA refresh
+    *before* migration v7 attempts the ALTER TABLE — that would
+    otherwise raise ``duplicate column name``.
+    """
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(work_node_executions)")
+    }
+    if "kickoff_sent_at" not in cols:
+        conn.execute(
+            "ALTER TABLE work_node_executions ADD COLUMN kickoff_sent_at TEXT"
+        )
 
 
 def _ensure_context_entry_columns(conn: sqlite3.Connection) -> None:
@@ -365,6 +399,20 @@ _WORK_MIGRATIONS: list[tuple[int, str, list[str]]] = [
             # ``CODEX_HOME`` for Codex). NULL means "fall back to the
             # ambient process env" — preserves pre-#809 behaviour.
             "ALTER TABLE work_sessions ADD COLUMN provider_home TEXT",
+        ],
+    ),
+    (
+        7,
+        "Track per-execution kickoff delivery so the heartbeat sweep can "
+        "force the first 'Resume work' ping past the bootstrap race (#922)",
+        [
+            # The ``kickoff_sent_at`` column is actually added by
+            # ``_ensure_node_execution_columns`` (which runs BEFORE this
+            # migration list), because SQLite lacks IF NOT EXISTS on
+            # ADD COLUMN and the WORK_SCHEMA refresh already places the
+            # column on freshly-created tables. This migration entry
+            # exists so the schema-version row records the v7 bump for
+            # both fresh and pre-v7 databases.
         ],
     ),
 ]

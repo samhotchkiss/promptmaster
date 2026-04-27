@@ -1733,6 +1733,76 @@ class SQLiteWorkService:
         """
         return read_current_node_visit(self, project, task_number, node_id)
 
+    def kickoff_sent_at(
+        self,
+        project: str,
+        task_number: int,
+        node_id: str,
+        visit: int | None = None,
+    ) -> str | None:
+        """Return the ISO timestamp the kickoff ping was delivered, if any.
+
+        ``visit`` defaults to the current (latest) execution visit so the
+        sweep can ask "has the kickoff for the active execution landed
+        yet?" without wiring the visit counter through every call site.
+        Returns ``None`` when no row exists or the row's ``kickoff_sent_at``
+        is unstamped — both cases are "delivery still required" for the
+        sweep's force-kickoff path (#922).
+        """
+        if visit is None:
+            visit = self.current_node_visit(project, task_number, node_id)
+        # Visit 0 is the implicit zeroth visit for queued tasks that
+        # haven't been claimed yet — no execution row exists, so the
+        # kickoff hasn't been delivered.
+        if not visit:
+            return None
+        row = self._conn.execute(
+            "SELECT kickoff_sent_at FROM work_node_executions "
+            "WHERE task_project = ? AND task_number = ? "
+            "AND node_id = ? AND visit = ?",
+            (project, task_number, node_id, visit),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["kickoff_sent_at"]
+
+    def mark_kickoff_sent(
+        self,
+        project: str,
+        task_number: int,
+        node_id: str,
+        visit: int | None = None,
+    ) -> None:
+        """Stamp the active execution row with the kickoff delivery time.
+
+        Called by the task-assignment notifier (#922) after a worker
+        kickoff ping lands successfully. The stamp is per-execution-visit
+        so a reject-bounce (which opens a fresh ``work_node_executions``
+        row at the next visit) gets a NULL ``kickoff_sent_at`` and the
+        sweep re-delivers the kickoff for the resumed work.
+
+        Best-effort: silent no-op when no execution row exists yet (e.g.
+        a queued task whose start node hasn't been entered).
+        """
+        if visit is None:
+            visit = self.current_node_visit(project, task_number, node_id)
+        if not visit:
+            return
+        try:
+            self._conn.execute(
+                "UPDATE work_node_executions SET kickoff_sent_at = ? "
+                "WHERE task_project = ? AND task_number = ? "
+                "AND node_id = ? AND visit = ?",
+                (_now(), project, task_number, node_id, visit),
+            )
+            self._conn.commit()
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "mark_kickoff_sent failed for %s/%d node=%s visit=%d",
+                project, task_number, node_id, visit,
+                exc_info=True,
+            )
+
     def _advance_to_node(
         self,
         task: Task,

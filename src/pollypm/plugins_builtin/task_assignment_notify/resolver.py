@@ -310,12 +310,72 @@ def notify(
                 event.task_id, exc_info=True,
             )
 
+    # #922: stamp the per-execution kickoff marker so the heartbeat
+    # sweep stops force-pushing this kickoff. The flag is keyed by
+    # ``(project, task_number, node, visit)`` — a reject-bounce that
+    # opens a fresh visit gets a NULL stamp and re-delivers correctly.
+    _mark_kickoff_delivered(event, services.work_service)
+
     return {
         "outcome": "sent",
         "task_id": event.task_id,
         "session": target_name,
         "execution_version": execution_version,
     }
+
+
+def _is_worker_kickoff_event(event: TaskAssignmentEvent) -> bool:
+    """Return True when this event represents a worker-role kickoff.
+
+    The kickoff_sent stamp (#922) is meaningful only for worker pings
+    landing on per-task ``task-<project>-<N>`` panes. Reviewer / operator
+    / agent pings already work via the long-lived shared sessions, so
+    they don't need the force-push gate.
+    """
+    from pollypm.work.models import ActorType
+
+    if event.actor_type is not ActorType.ROLE:
+        return False
+    if (event.actor_name or "").strip().lower() != "worker":
+        return False
+    # Review nodes are reviewer territory; the kickoff race only bites
+    # the work / rework path on a freshly-spawned per-task pane.
+    if event.current_node_kind == "review":
+        return False
+    return True
+
+
+def _mark_kickoff_delivered(
+    event: TaskAssignmentEvent,
+    work_service: Any | None,
+) -> None:
+    """Best-effort: stamp the active execution row's kickoff_sent_at.
+
+    Called from ``notify()`` after a successful send. Silently no-ops
+    when the work service doesn't expose ``mark_kickoff_sent`` (test
+    doubles), when the event isn't a worker kickoff, or when the
+    service raises — the dedupe table still suppresses duplicates so a
+    missing stamp at worst lets the next sweep tick re-fire once.
+    """
+    if work_service is None:
+        return
+    if not _is_worker_kickoff_event(event):
+        return
+    marker = getattr(work_service, "mark_kickoff_sent", None)
+    if not callable(marker):
+        return
+    try:
+        marker(
+            event.project,
+            event.task_number,
+            event.current_node,
+            event.execution_version or None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment_notify: mark_kickoff_sent failed for %s",
+            event.task_id, exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------

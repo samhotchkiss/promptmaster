@@ -263,10 +263,10 @@ def test_legacy_db_gets_hot_query_indexes_and_schema_bump(conn):
     version = conn.execute(
         "SELECT COALESCE(MAX(version), 0) FROM work_schema_version"
     ).fetchone()[0]
-    # Migration 6 (#809) adds ``provider`` + ``provider_home`` columns
-    # to ``work_sessions`` so per-task transcript archival can locate
-    # the right Claude/Codex tree at teardown.
-    assert version == 6
+    # Migration 7 (#922) records the kickoff_sent_at column bump on
+    # work_node_executions so the heartbeat sweep can force the first
+    # 'Resume work' ping past the bootstrap race.
+    assert version == 7
 
 
 def test_migration_6_adds_provider_columns_to_work_sessions(conn):
@@ -276,3 +276,29 @@ def test_migration_6_adds_provider_columns_to_work_sessions(conn):
     cols = {row[1] for row in conn.execute("PRAGMA table_info(work_sessions)")}
     assert "provider" in cols
     assert "provider_home" in cols
+
+
+def test_migration_7_adds_kickoff_sent_at_to_work_node_executions(conn):
+    """#922: legacy DBs without ``kickoff_sent_at`` get it on migrate."""
+    # Build a v6-shaped DB so the migration walk has to apply v7.
+    conn.executescript(
+        """
+        CREATE TABLE work_schema_version (
+            version INTEGER NOT NULL,
+            description TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        );
+        INSERT INTO work_schema_version (version, description, applied_at)
+        VALUES (6, 'pre-#922', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    create_work_tables(conn)
+
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(work_node_executions)")
+    }
+    assert "kickoff_sent_at" in cols
+    version = conn.execute(
+        "SELECT COALESCE(MAX(version), 0) FROM work_schema_version"
+    ).fetchone()[0]
+    assert version == 7

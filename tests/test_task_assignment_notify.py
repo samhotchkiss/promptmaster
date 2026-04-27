@@ -748,7 +748,15 @@ class TestSweeperInProgressBranch:
             [FakeHandle("worker-proj")],
             busy={"worker-proj"},
         )
-        self._queue_and_claim(work)
+        task = self._queue_and_claim(work)
+        # #922: the worker has already received the initial kickoff
+        # (otherwise the sweep would force-push past the busy gate to
+        # break the bootstrap-race). Stamp the marker so the busy-gate
+        # behaviour is what's actually under test.
+        reloaded = work.get(task.task_id)
+        work.mark_kickoff_sent(
+            reloaded.project, reloaded.task_number, reloaded.current_node_id,
+        )
 
         def _fake_loader(*, config_path=None):
             return _RuntimeServices(
@@ -782,6 +790,15 @@ class TestSweeperInProgressBranch:
             session_name="worker-proj", task_id=task.task_id,
             project="proj", message="previous ping", delivery_status="sent",
             execution_version=1,
+        )
+        # #922: also stamp kickoff_sent_at so the sweep's "force the
+        # first push" branch doesn't bypass dedupe. The previous ping
+        # we simulated above is exactly that delivery — without the
+        # stamp the sweep would (correctly) treat the task as still
+        # awaiting kickoff and re-fire past the dedupe.
+        reloaded = work.get(task.task_id)
+        work.mark_kickoff_sent(
+            reloaded.project, reloaded.task_number, reloaded.current_node_id,
         )
 
         def _fake_loader(*, config_path=None):
