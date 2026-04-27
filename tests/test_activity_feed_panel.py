@@ -314,7 +314,9 @@ def test_badge_provider_counts_unread(tmp_path: Path) -> None:
 
     reg = registry.items_for_section("workflows")[0]
     badge = reg.badge_provider(RailContext())
-    assert badge == 2
+    # #873: badge is now a "<n> new" string so the user can tell the
+    # number is "events since last visit", not an unlabelled total.
+    assert badge == "2 new"
 
 
 def test_handler_persists_last_seen_cursor(tmp_path: Path) -> None:

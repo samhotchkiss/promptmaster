@@ -113,10 +113,13 @@ def _badge_provider_factory(config: Any):
     """Return a ``badge_provider`` closure for rail registration.
 
     Counts events that arrived after the cursor file's saved id. When
-    the count is zero the rail shows no badge.
+    the count is zero the rail shows no badge. The badge is returned as
+    a ``"<n> new"`` string so users can tell the number is "events
+    since last visit" rather than an unlabelled total that mysteriously
+    decrements as the cursor advances (#873).
     """
 
-    def _provider(_ctx: RailContext) -> int | None:
+    def _provider(_ctx: RailContext) -> str | None:
         projector = build_projector(config)
         if projector is None:
             return None
@@ -129,7 +132,9 @@ def _badge_provider_factory(config: Any):
             return None
         last_seen = _load_last_seen_id(config)
         count = new_event_count(projector, last_seen)
-        return count if count > 0 else None
+        if count <= 0:
+            return None
+        return f"{count} new"
 
     return _provider
 
