@@ -30,6 +30,17 @@ from pollypm.cockpit_interaction import (
 # ---------------------------------------------------------------------------
 # Test doubles
 # ---------------------------------------------------------------------------
+#
+# #901 — earlier versions of this file replaced
+# ``pollypm.cockpit_interaction.Input`` with a sibling class at module
+# import time, which leaked into every later test in the same pytest
+# process. The fix is to make ``_FakeInput`` a *real subclass* of
+# ``textual.widgets.Input`` so the production ``isinstance(...,
+# Input)`` check passes naturally — no module mutation, no fixture
+# teardown needed. ``__new__`` skips Textual's ``__init__`` so we can
+# build a valid Input instance without booting an event loop.
+
+from textual.widgets import Input as _TextualInput  # noqa: E402
 
 
 class _FakeApp:
@@ -45,20 +56,17 @@ class _FakeApp:
         self.focused = focused
 
 
-class _FakeInput:
+class _FakeInput(_TextualInput):
     """Stand-in for ``textual.widgets.Input``.
 
-    The arming helper checks ``isinstance(self.focused, Input)``, so
-    the test stub must be a real subclass of the imported Input.
-    """
+    Subclassing the real Textual Input means the production
+    ``isinstance(self.focused, Input)`` check returns True without
+    monkey-patching the production module. Construct via ``__new__``
+    so we never trigger Textual's ``__init__`` (which expects an
+    event loop)."""
 
-    pass
-
-
-# Make the stub pass the isinstance() check the helper performs.
-import pollypm.cockpit_interaction as _ci  # noqa: E402
-
-_ci.Input = _FakeInput  # type: ignore[assignment]
+    def __new__(cls) -> "_FakeInput":  # type: ignore[override]
+        return _TextualInput.__new__(cls)
 
 
 def _now_factory(start: float = 1000.0):
@@ -173,6 +181,33 @@ def test_input_focus_returns_false() -> None:
     # No arm — typing into a search box must not leave a primed
     # destructive action behind.
     assert is_action_armed(app, "approve_task", target_id="t1", now=now) is False
+
+
+def test_input_focus_returns_false_with_real_textual_input() -> None:
+    """#901 regression — production ``isinstance(..., Input)`` check
+    must work against a real ``textual.widgets.Input`` instance, not
+    only the test stub. This test bypasses ``_FakeInput`` entirely
+    and constructs the real widget so a future contract change that
+    silently restricts the type check still surfaces here."""
+    real_input = _TextualInput.__new__(_TextualInput)
+    app = _FakeApp(focused=real_input)
+    now, _ = _now_factory()
+
+    fired = destructive_action_safe(
+        app, "approve_task", target_id="t1", selection=set(), now=now
+    )
+    assert fired is False
+    assert is_action_armed(app, "approve_task", target_id="t1", now=now) is False
+
+
+def test_production_input_global_is_unmodified() -> None:
+    """#901 regression — the production module must NOT be mutated
+    by importing this test file. Earlier versions reassigned
+    ``pollypm.cockpit_interaction.Input`` at module load and
+    silently broke later tests' Input-focus checks."""
+    import pollypm.cockpit_interaction as _ci
+
+    assert _ci.Input is _TextualInput
 
 
 def test_explicit_selection_fires_immediately() -> None:

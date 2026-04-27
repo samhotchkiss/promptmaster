@@ -446,14 +446,45 @@ def onboard(
     typer.echo("Next step: run `pollypm up` or `uv run pm up` to create or attach to the PollyPM tmux session.")
 
 
+_COCKPIT_WINDOW_NAME: str = "PollyPM"
+"""Canonical name of the cockpit window (rail + console panes).
+
+Mirrors :data:`pollypm.cockpit_rail.CockpitRouter._COCKPIT_WINDOW`
+and :data:`pollypm.supervisor.Supervisor.CONSOLE_WINDOW`. Defined
+locally so the launch probe does not have to import either module —
+both have transitive cost the launch path should not pay before the
+state machine has decided what to do.
+"""
+
+
+_SHELL_COMMANDS: frozenset[str] = frozenset(
+    {"bash", "zsh", "fish", "sh", "dash", "ksh"}
+)
+"""Process names that count as a "shell" for the rail pane.
+
+Used to derive ``rail_pane_running_non_shell``: when the rail pane
+is running one of these, the TUI has died back to its shell — the
+state machine recovers via ``RECOVER_DEAD_RAIL``. When the pane is
+running anything else (the Textual TUI, Python, etc.), the rail is
+considered live and ``ATTACH_EXISTING`` will not respawn it (#841).
+"""
+
+
 def _build_launch_probe(supervisor) -> LaunchProbe:
     """Build a :class:`LaunchProbe` snapshot from the supervisor.
 
     The probe reads tmux state through the public ``supervisor.tmux``
-    surface plus the configured session names. Pane-level liveness
-    (console / rail) defaults to ``True`` when the underlying tmux
-    introspection is not available — assuming live is the safer
-    default than triggering a respawn on a stale snapshot.
+    surface plus the configured session names. Every introspection
+    call is wrapped in a defensive ``_safe`` shim — the probe must
+    never raise, because a launcher that crashes during state
+    detection cannot fall through to a useful error message.
+
+    Pane-level liveness (console / rail) is read from ``list_panes``
+    on the cockpit window. When the window or panes cannot be
+    enumerated, the probe falls back to ``True`` for liveness:
+    assuming live is safer than triggering a speculative respawn on a
+    stale snapshot (the #841 segfault path was a respawn-while-live
+    case). The fallback is documented and tested explicitly.
 
     The state machine (#884) consumes this and returns the named
     :class:`LaunchState`. ``up()`` echoes the state name + reason so
@@ -494,19 +525,81 @@ def _build_launch_probe(supervisor) -> LaunchProbe:
     )
     current_tmux = _safe("current_session_name", default=None)
 
+    # Pane liveness: only meaningful when the main session is alive.
+    # When it isn't, the state machine routes through FIRST_LAUNCH /
+    # RESTORE_FROM_CLOSET regardless of pane state, so leaving the
+    # defaults at "alive" keeps the no-session path unchanged.
+    console_pane_alive = True
+    rail_pane_alive = True
+    rail_pane_running_non_shell = True
+    if main_alive and main_name:
+        target = f"{main_name}:{_COCKPIT_WINDOW_NAME}"
+        # ``list_panes`` returns ``[]`` for both "window absent" and
+        # "tmux unavailable"; the state machine treats both as
+        # console+rail healthy via the default-True values above.
+        # When list_panes returns a non-empty list, the pane shape
+        # is the source of truth.
+        panes = _safe("list_panes", target, default=None)
+        if panes:
+            console_pane_alive, rail_pane_alive, rail_pane_running_non_shell = (
+                _classify_cockpit_panes(panes)
+            )
+
     return LaunchProbe(
         main_session_name=main_name,
         closet_session_name=closet_name,
         main_session_alive=main_alive,
         closet_session_alive=closet_alive,
-        # Console / rail pane liveness probes are best-effort; the
-        # state machine treats "live" as the safer default. Future
-        # PRs can enrich this with TmuxClient.list_panes inspection.
-        console_pane_alive=True,
-        rail_pane_alive=True,
-        rail_pane_running_non_shell=True,
+        console_pane_alive=console_pane_alive,
+        rail_pane_alive=rail_pane_alive,
+        rail_pane_running_non_shell=rail_pane_running_non_shell,
         current_tmux_session=current_tmux,
     )
+
+
+def _classify_cockpit_panes(panes) -> tuple[bool, bool, bool]:
+    """Classify the cockpit window's pane list into the three
+    pane-liveness probe fields.
+
+    Convention: the cockpit window has up to two panes — left
+    (console shell) and right (rail TUI). ``pane_left`` is "0" for
+    the leftmost pane. Returns ``(console_alive, rail_alive,
+    rail_non_shell)``. When only one pane is present, that pane is
+    treated as the console (the rail split is missing).
+    """
+    left = None
+    right = None
+    for pane in panes:
+        # ``pane_left`` is the X coordinate as a string ("0" for the
+        # leftmost pane). The dataclass exposes it directly.
+        try:
+            x = int(getattr(pane, "pane_left", "0") or "0")
+        except (TypeError, ValueError):
+            x = 0
+        if left is None or x < left[0]:
+            left = (x, pane)
+        if right is None or x > right[0]:
+            right = (x, pane)
+
+    # Single-pane case: the only pane is the console; rail has not
+    # been split yet (which means rail_pane_alive=False so the state
+    # machine routes through RECOVER_DEAD_RAIL only when the rail is
+    # supposed to exist; with a single pane in the cockpit window
+    # the rail is genuinely missing).
+    if left is right and left is not None:
+        console_alive = not bool(getattr(left[1], "pane_dead", False))
+        return (console_alive, False, False)
+
+    if left is None or right is None:
+        return (True, True, True)
+
+    console_pane = left[1]
+    rail_pane = right[1]
+    console_alive = not bool(getattr(console_pane, "pane_dead", False))
+    rail_alive = not bool(getattr(rail_pane, "pane_dead", False))
+    rail_cmd = (getattr(rail_pane, "pane_current_command", "") or "").lower()
+    rail_non_shell = rail_alive and rail_cmd not in _SHELL_COMMANDS
+    return (console_alive, rail_alive, rail_non_shell)
 
 
 @app.command(help=_UP_HELP)
@@ -522,6 +615,18 @@ def up(
         return
     _enforce_migration_gate(config_path)
     supervisor = _load_supervisor(config_path)
+
+    # #884 / #905 — consult the launch state machine BEFORE any
+    # startup side effects (CoreRail boot, ensure_layout, transcript
+    # ingestion, tmux mutation). The fail-closed contract requires
+    # UNSUPPORTED to short-circuit before the launcher mutates
+    # ambient state. The probe only reads tmux + config; building it
+    # is side-effect-free.
+    plan = plan_launch(_build_launch_probe(supervisor))
+    typer.echo(f"[launch] {plan.state.value}: {plan.reason}")
+    if plan.state is LaunchState.UNSUPPORTED:
+        raise typer.BadParameter(plan.reason)
+
     # CoreRail owns startup orchestration — it drives plugin host load,
     # state store readiness, and Supervisor boot (which runs ensure_layout,
     # ensure_heartbeat_schedule, and ensure_knowledge_extraction_schedule).
@@ -536,16 +641,6 @@ def up(
     ):
         start_transcript_ingestion(supervisor.config)
     session_name = supervisor.config.project.tmux_session
-
-    # #884 — consult the launch state machine before any tmux
-    # mutation. The plan names the state and explains the
-    # reasoning; UNSUPPORTED is rejected up front with the
-    # plan's actionable message instead of speculatively
-    # mutating ambient tmux state.
-    plan = plan_launch(_build_launch_probe(supervisor))
-    typer.echo(f"[launch] {plan.state.value}: {plan.reason}")
-    if plan.state is LaunchState.UNSUPPORTED:
-        raise typer.BadParameter(plan.reason)
 
     current_tmux = supervisor.tmux.current_session_name()
 

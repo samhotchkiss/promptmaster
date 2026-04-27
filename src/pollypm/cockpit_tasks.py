@@ -2126,13 +2126,26 @@ class PollyTasksApp(App[None]):
         except Exception:  # noqa: BLE001 — notify is best-effort
             pass
 
+    def _fire_approve_task(self) -> None:
+        """Submit approval for the currently-selected task.
+
+        The fire method is the post-arming, post-search-redirect
+        path. Keyboard ``a`` (``action_approve_task``) runs the
+        arming + search-redirect gate first; the on-screen Approve
+        button calls this directly because a visible button click
+        is already explicit intent (#900)."""
+        if not self._selected_task_id:
+            return
+        self._review_task(self._selected_task_id, decision="approve")
+
     def action_approve_task(self) -> None:
         # #840 fix — single-letter `a` is destructive in a screen that
         # also has a visible search input. `destructive_action_safe`
         # combines the Input-focus check with explicit-selection
         # detection and an "arm then confirm" two-press flow so a
         # bench cursor sitting on a real task cannot approve it on a
-        # single keystroke.
+        # single keystroke. The on-screen Approve button bypasses
+        # this gate via :meth:`_fire_approve_task` (#900).
         if self._has_search_filter():
             self.action_focus_search()
             return
@@ -2146,7 +2159,7 @@ class PollyTasksApp(App[None]):
         ):
             self._notify_arm_hint("approve")
             return
-        self._review_task(self._selected_task_id, decision="approve")
+        self._fire_approve_task()
 
     def action_toggle_task_selection(self) -> None:
         if isinstance(getattr(self, "focused", None), Input):
@@ -2188,8 +2201,29 @@ class PollyTasksApp(App[None]):
             reason="Bulk rejected from task cockpit",
         )
 
+    def _fire_reject_task(self) -> None:
+        """Open the reject-reason modal for the currently-selected task.
+
+        Post-arming, post-search-redirect. Keyboard ``x``
+        (``action_reject_task``) runs the gate first; the on-screen
+        Reject button calls this directly (#900)."""
+        if not self._selected_task_id:
+            return
+        task_id = self._selected_task_id
+        modal = _TaskRejectReasonModal()
+        self._active_reject_modal = modal
+
+        def _after(reason: str | None) -> None:
+            self._active_reject_modal = None
+            if reason is None:
+                return
+            self._review_task(task_id, decision="reject", reason=reason)
+
+        self.push_screen(modal, _after)
+
     def action_reject_task(self) -> None:
-        # #840 fix — see ``action_approve_task`` above.
+        # #840 fix — see ``action_approve_task`` above. Button-click
+        # path bypasses arming via :meth:`_fire_reject_task` (#900).
         if self._has_search_filter():
             self.action_focus_search()
             return
@@ -2203,17 +2237,7 @@ class PollyTasksApp(App[None]):
         ):
             self._notify_arm_hint("reject")
             return
-        task_id = self._selected_task_id
-        modal = _TaskRejectReasonModal()
-        self._active_reject_modal = modal
-
-        def _after(reason: str | None) -> None:
-            self._active_reject_modal = None
-            if reason is None:
-                return
-            self._review_task(task_id, decision="reject", reason=reason)
-
-        self.push_screen(modal, _after)
+        self._fire_reject_task()
 
     def action_toggle_resubmission_diff(self) -> None:
         if not self._selected_task_id:
@@ -2302,14 +2326,19 @@ class PollyTasksApp(App[None]):
         if self._pending_review_action is not None and self.approve_button.has_class("-undo"):
             self.action_undo_pending_review()
             return
-        self.action_approve_task()
+        # #900 — the visible Approve button is explicit intent and
+        # already protected by the existing 5-second undo banner. It
+        # must not inherit the keyboard arming flow (#881). Call the
+        # fire method directly so a single click opens the undo banner.
+        self._fire_approve_task()
 
     @on(Button.Pressed, "#task-reject")
     def _on_press_reject(self) -> None:
         if self._pending_review_action is not None and self.reject_button.has_class("-undo"):
             self.action_undo_pending_review()
             return
-        self.action_reject_task()
+        # #900 — single-click reject opens the reason modal.
+        self._fire_reject_task()
 
     @on(Button.Pressed, "#task-bulk-approve")
     def _on_press_bulk_approve(self) -> None:

@@ -1607,6 +1607,65 @@ def test_task_app_banner_includes_progress_bar_and_success_state(env, monkeypatc
     _run(body())
 
 
+def test_task_approve_button_fires_on_single_click(env, monkeypatch) -> None:
+    """#900 — visible Approve button is explicit intent and must NOT
+    inherit the #881 keyboard arming. One click opens the undo
+    banner; the existing 5-second pending-review window is the
+    canonical safety net for accidental clicks."""
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    task = _task(node_id="critic_panel", status=WorkStatus.REVIEW)
+    fake_svc = _FakeSvc(tasks_factory=lambda: [task], flow=_flow())
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+    monkeypatch.setattr("pollypm.cockpit_tasks._PENDING_UNDO_SECONDS", 60.0)
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            # Single click must open the undo banner — not arm.
+            app.approve_button.press()
+            await pilot.pause()
+            assert app._pending_review_action is not None
+            banner = str(app.query_one("#tasks-banner", Static).render())
+            assert "APPROVED" in banner
+            assert "Undo" in banner
+
+    _run(body())
+
+
+def test_task_reject_button_fires_on_single_click(env, monkeypatch) -> None:
+    """#900 — visible Reject button is explicit intent. One click
+    opens the reject-reason modal; no arming."""
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    task = _task(node_id="critic_panel", status=WorkStatus.REVIEW)
+    fake_svc = _FakeSvc(tasks_factory=lambda: [task], flow=_flow())
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            app.reject_button.press()
+            await pilot.pause()
+            # Single click pushes the reject-reason modal — the
+            # arming gate would have refused on first press.
+            assert app._active_reject_modal is not None
+
+    _run(body())
+
+
 def test_task_app_reject_banner_uses_reject_class(env, monkeypatch) -> None:
     """Rejecting paints the banner red (distinct color class) so the
     user immediately reads the decision visually."""
