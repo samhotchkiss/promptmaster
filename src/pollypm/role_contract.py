@@ -132,9 +132,13 @@ _OPERATOR_GUIDE = (
 _REVIEWER_GUIDE = (
     "src/pollypm/plugins_builtin/core_agent_profiles/profiles/russell.md"
 )
-_ARCHITECT_GUIDE = (
-    "src/pollypm/plugins_builtin/core_agent_profiles/profiles/architect.md"
-)
+# The architect role's persona is built inline in
+# ``pollypm.plugins_builtin.core_agent_profiles.profiles`` rather than
+# from a standalone Markdown file. The legacy heartbeat persona-drift
+# table named ``architect.md`` but that file does not exist on disk —
+# the contract audit (#888) caught the drift. Setting guide_path=None
+# matches reality; the remediation message just omits the guide line.
+_ARCHITECT_GUIDE: str | None = None
 # Worker has no canonical operating guide because its identity is
 # defined per-task by the launcher prompt, not a free-floating
 # profile. Heartbeat drift on a worker pane falls back to a
