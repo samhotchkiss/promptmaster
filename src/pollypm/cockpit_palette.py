@@ -374,6 +374,32 @@ def _dispatch_palette_tag(app: App, tag: str | None) -> None:
                 f"Queue next: run `pm task next --project {project_key}`.",
             )
             return
+        # Project lifecycle commands (#875). Each surfaces a clear
+        # next-step instruction so the user is not stuck wondering how
+        # to add or activate a project from inside the cockpit. The
+        # cockpit can't fork a CLI prompt, so we point the user at the
+        # exact command and clipboard-friendly form.
+        if tag == "project.add":
+            _palette_notify(
+                app,
+                "Add project: run `pm add-project <path-to-repo>` in a shell, "
+                "then re-open the cockpit.",
+            )
+            return
+        if tag == "project.scan":
+            _palette_notify(
+                app,
+                "Scan for projects: run `pm scan-projects <root>` to walk a "
+                "directory tree for git repos PollyPM doesn't track yet.",
+            )
+            return
+        if tag == "project.send_operator":
+            _palette_notify(
+                app,
+                'Send Polly a request: run `pm send operator "<your task>"` '
+                "from a shell — Polly the operator will pick it up.",
+            )
+            return
     except Exception as exc:  # noqa: BLE001
         _palette_notify(app, f"Command failed: {exc}")
 

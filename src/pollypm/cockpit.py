@@ -1159,6 +1159,32 @@ def build_palette_commands(
         tag="session.shortcuts",
     ))
 
+    # Project lifecycle (#875). The cockpit was previously a read-only
+    # surface for projects — adding one required dropping to a shell.
+    # Surface the affordance in the palette so a fresh user can get
+    # going from inside the cockpit.
+    commands.append(PaletteCommand(
+        title="Add a project to PollyPM",
+        subtitle="Run pm add-project <path> in a terminal",
+        category="Project",
+        keybind=None,
+        tag="project.add",
+    ))
+    commands.append(PaletteCommand(
+        title="Scan for unregistered projects",
+        subtitle="Walk a directory tree for git repos PollyPM doesn't track yet",
+        category="Project",
+        keybind=None,
+        tag="project.scan",
+    ))
+    commands.append(PaletteCommand(
+        title="Send Polly a request",
+        subtitle="Hand a job to the operator via pm send operator",
+        category="Project",
+        keybind=None,
+        tag="project.send_operator",
+    ))
+
     # System.
     commands.append(PaletteCommand(
         title="Run pm doctor",
