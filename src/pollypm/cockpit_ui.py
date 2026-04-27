@@ -8975,32 +8975,45 @@ def _format_blocked_dep(
 
 
 def _action_card_click_hint(action_items: list[dict]) -> str:
-    """Return one line of click-discoverability copy for the Action
+    """Return one line of action-card discoverability copy for the Action
     Needed cards.
 
-    With a single card, "this card" is unambiguous; with multiple, we
-    pluralise. Cards backed by an inbox thread (no project task ref)
-    open the inbox thread instead of a task — call that out so the
-    user isn't confused when the click lands somewhere other than
-    the task pane.
+    With a single card, "this card" is unambiguous; with multiple,
+    we pluralise. Cards backed by an inbox thread (no project task
+    ref) open the inbox thread instead of a task — call that out so
+    the user isn't confused when the click lands somewhere other than
+    the task pane. The first clause names the numbered keyboard
+    shortcuts for the visible control row so the dashboard does not
+    read as mouse-only.
     """
     if not action_items:
         return ""
-    refs = [str(item.get("primary_ref") or "") for item in action_items]
+    visible = action_items[:2]
+    key_hint = (
+        "Use 1/2/3 for the buttons below"
+        if len(visible) == 1
+        else "Use 1-3 for the first card and 4-6 for the second"
+    )
+    refs = [str(item.get("primary_ref") or "") for item in visible]
     has_task = any(_PROJECT_TASK_REF_RE.fullmatch(ref) for ref in refs if ref)
     has_thread = any(not _PROJECT_TASK_REF_RE.fullmatch(ref) for ref in refs)
-    if len(action_items) == 1:
+    if len(visible) == 1:
         target = (
             "the source task"
             if has_task and not has_thread
             else "the inbox thread"
         )
-        return f"Click this card to open {target}."
+        return f"{key_hint}, or click this card to open {target}."
     if has_task and not has_thread:
-        return "Click any card to open its source task."
+        return f"{key_hint}, or click any card to open its source task."
     if has_thread and not has_task:
-        return "Click any card to open its inbox thread."
-    return "Click any card to open its source task or inbox thread."
+        return f"{key_hint}, or click any card to open its inbox thread."
+    return f"{key_hint}, or click any card to open its source task or inbox thread."
+
+
+def _dashboard_action_key(index: int, slot: str) -> str:
+    offset = {"primary": 1, "secondary": 2, "other": 3}[slot]
+    return str(index * 3 + offset)
 
 
 _ROUTING_TAG_PREFIXES = ("[action]", "[alert]")
@@ -9569,6 +9582,12 @@ class PollyProjectDashboardApp(App[None]):
         Binding("p", "open_plan", "Plan"),
         Binding("i", "jump_inbox", "Inbox"),
         Binding("l", "jump_activity", "Log"),
+        Binding("1", "action_card_1", "First card primary action"),
+        Binding("2", "action_card_2", "First card secondary action"),
+        Binding("3", "action_card_3", "First card reply"),
+        Binding("4", "action_card_4", "Second card primary action"),
+        Binding("5", "action_card_5", "Second card secondary action"),
+        Binding("6", "action_card_6", "Second card reply"),
         Binding("v", "open_explainer", "Explainer", show=False),
         Binding("o", "open_editor", "Editor", show=False),
         Binding("j", "plan_scroll_down", "Scroll down", show=False),
@@ -9590,6 +9609,10 @@ class PollyProjectDashboardApp(App[None]):
 
     _DEFAULT_HINT = (
         "c chat \u00b7 p plan \u00b7 i inbox \u00b7 l log \u00b7 q home"
+    )
+    _ACTION_HINT = (
+        "1 primary \u00b7 2 secondary \u00b7 3 reply \u00b7 c chat "
+        "\u00b7 i inbox \u00b7 q home"
     )
     _PLAN_VIEW_HINT = (
         "j/k scroll \u00b7 g/G top/bottom \u00b7 v explainer "
@@ -9943,7 +9966,7 @@ class PollyProjectDashboardApp(App[None]):
             self.inbox_body.update(full_inbox_text)
         self._sync_action_controls(data)
 
-        self.hint.update(self._DEFAULT_HINT)
+        self.hint.update(self._ACTION_HINT if data.action_items else self._DEFAULT_HINT)
 
     def _update_action_bar(self, data: ProjectDashboardData) -> None:
         review_count = int(data.task_counts.get("review", 0))
@@ -10774,13 +10797,16 @@ class PollyProjectDashboardApp(App[None]):
                 task_id if _PROJECT_TASK_REF_RE.fullmatch(task_id) else None
             )
             self.action_primary_buttons[idx].label = str(
-                item.get("primary_label") or "Approve it anyway"
+                f"{_dashboard_action_key(idx, 'primary')} "
+                f"{item.get('primary_label') or 'Approve it anyway'}"
             )
             self.action_secondary_buttons[idx].label = str(
-                item.get("secondary_label") or "Wait"
+                f"{_dashboard_action_key(idx, 'secondary')} "
+                f"{item.get('secondary_label') or 'Wait'}"
             )
             self.action_other_inputs[idx].placeholder = str(
-                item.get("other_placeholder") or "Tell Polly what to do instead..."
+                f"{_dashboard_action_key(idx, 'other')} "
+                f"{item.get('other_placeholder') or 'Tell Polly what to do instead...'}"
             )
 
     def _action_item_at(self, index: int) -> dict | None:
@@ -10982,6 +11008,42 @@ class PollyProjectDashboardApp(App[None]):
             exclusive=True,
             group="proj_jump_to_pm",
         )
+
+    def _perform_numbered_action(self, key_number: int) -> None:
+        index = (key_number - 1) // 3
+        slot_number = (key_number - 1) % 3
+        if self._action_item_at(index) is None:
+            self.notify("That action is no longer available.", severity="warning")
+            return
+        if slot_number == 0:
+            self._perform_dashboard_action(index, "primary")
+            return
+        if slot_number == 1:
+            self._perform_dashboard_action(index, "secondary")
+            return
+        try:
+            self.action_other_inputs[index].focus()
+        except Exception:  # noqa: BLE001
+            return
+        self.hint.update("Type your reply and press Enter")
+
+    def action_action_card_1(self) -> None:
+        self._perform_numbered_action(1)
+
+    def action_action_card_2(self) -> None:
+        self._perform_numbered_action(2)
+
+    def action_action_card_3(self) -> None:
+        self._perform_numbered_action(3)
+
+    def action_action_card_4(self) -> None:
+        self._perform_numbered_action(4)
+
+    def action_action_card_5(self) -> None:
+        self._perform_numbered_action(5)
+
+    def action_action_card_6(self) -> None:
+        self._perform_numbered_action(6)
 
     def _dispatch_to_pm_sync(
         self, cockpit_key: str, context_line: str, pm_label: str,

@@ -452,10 +452,10 @@ def test_status_yellow_when_workspace_action_message_exists(
             assert "Give Polly deployment access" in rendered
             assert "Decision" in rendered
             assert "approve the code work now" in rendered
-            assert dashboard_app.action_primary_buttons[0].label.plain == "Approve it anyway"
+            assert dashboard_app.action_primary_buttons[0].label.plain == "1 Approve it anyway"
             assert (
                 dashboard_app.action_secondary_buttons[0].label.plain
-                == "Wait until environment is set"
+                == "2 Wait until environment is set"
             )
 
             routed: list[str] = []
@@ -546,8 +546,9 @@ def test_plan_review_action_uses_contextual_review_plan_button(
             assert "A full project plan is ready for your review" in rendered
             assert "Open the plan review surface" in rendered
             assert "Waiting on you:" in str(dashboard_app.action_bar.render())
-            assert dashboard_app.action_primary_buttons[0].label.plain == "Review plan"
-            assert dashboard_app.action_secondary_buttons[0].label.plain == "Open task"
+            assert dashboard_app.action_primary_buttons[0].label.plain == "1 Review plan"
+            assert dashboard_app.action_secondary_buttons[0].label.plain == "2 Open task"
+            assert "1 primary" in str(dashboard_app.hint.render())
 
             # Audit fix: the "Review plan" primary button now routes
             # directly to the underlying plan_project task instead of
@@ -557,9 +558,14 @@ def test_plan_review_action_uses_contextual_review_plan_button(
             routed_inbox: list[str] = []
             dashboard_app.action_jump_inbox = lambda: routed_inbox.append("inbox")  # type: ignore[method-assign]
             dashboard_app._route_to_task = lambda task_id: routed_tasks.append(task_id)  # type: ignore[method-assign]
-            dashboard_app._perform_dashboard_action(0, "primary")
+            await pilot.press("1")
+            await pilot.pause()
             assert routed_tasks == ["demo/3"]
             assert routed_inbox == []
+
+            await pilot.press("3")
+            await pilot.pause()
+            assert dashboard_app.action_other_inputs[0].has_focus
 
     _run(body())
 
@@ -944,8 +950,8 @@ def test_user_prompt_payload_drives_dashboard_copy_and_buttons(
             assert "Add the Bookshop API key" in rendered
             assert "Internal details" not in rendered
             assert "Waiting on you:" in str(dashboard_app.action_bar.render())
-            assert dashboard_app.action_primary_buttons[0].label.plain == "Open task"
-            assert dashboard_app.action_secondary_buttons[0].label.plain == "Discuss"
+            assert dashboard_app.action_primary_buttons[0].label.plain == "1 Open task"
+            assert dashboard_app.action_secondary_buttons[0].label.plain == "2 Discuss"
 
     _run(body())
 
@@ -1459,12 +1465,12 @@ def test_action_card_click_hint_collapses_per_item_duplication() -> None:
     # Single task-backed card: precise singular.
     assert _action_card_click_hint(
         [{"primary_ref": "polly_remote/12"}]
-    ) == "Click this card to open the source task."
+    ) == "Use 1/2/3 for the buttons below, or click this card to open the source task."
 
     # Single thread-backed card.
     assert _action_card_click_hint(
         [{"primary_ref": "blocker-summary:42"}]
-    ) == "Click this card to open the inbox thread."
+    ) == "Use 1/2/3 for the buttons below, or click this card to open the inbox thread."
 
     # Two task-backed cards: pluralise.
     assert _action_card_click_hint(
@@ -1472,7 +1478,7 @@ def test_action_card_click_hint_collapses_per_item_duplication() -> None:
             {"primary_ref": "polly_remote/12"},
             {"primary_ref": "polly_remote/9"},
         ]
-    ) == "Click any card to open its source task."
+    ) == "Use 1-3 for the first card and 4-6 for the second, or click any card to open its source task."
 
     # Mixed: hedge.
     assert _action_card_click_hint(
@@ -1480,7 +1486,7 @@ def test_action_card_click_hint_collapses_per_item_duplication() -> None:
             {"primary_ref": "polly_remote/12"},
             {"primary_ref": "blocker-summary:42"},
         ]
-    ) == "Click any card to open its source task or inbox thread."
+    ) == "Use 1-3 for the first card and 4-6 for the second, or click any card to open its source task or inbox thread."
 
 
 def test_clean_hold_reason_strips_action_routing_tag() -> None:
