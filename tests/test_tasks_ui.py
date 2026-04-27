@@ -1525,6 +1525,9 @@ def test_task_app_approve_undo_banner_and_auto_merge(env, monkeypatch) -> None:
     async def body() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
+            # #881 — single-letter `a` arms the destructive action on
+            # first press. The second press within 3s confirms.
+            await pilot.press("a")
             await pilot.press("a")
             await pilot.pause()
             banner = str(app.query_one("#tasks-banner", Static).render())
@@ -1548,6 +1551,7 @@ def test_task_app_approve_undo_banner_and_auto_merge(env, monkeypatch) -> None:
             assert not app.approve_button.has_class("-undo")
             assert app.reject_button.disabled is False
 
+            await pilot.press("a")
             await pilot.press("a")
             await asyncio.sleep(0.3)
             await pilot.pause()
@@ -1582,6 +1586,8 @@ def test_task_app_banner_includes_progress_bar_and_success_state(env, monkeypatc
     async def body() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
+            # #881 — arm + confirm.
+            await pilot.press("a")
             await pilot.press("a")
             await pilot.pause()
 
@@ -1658,6 +1664,8 @@ def test_task_reject_modal_quick_pick_and_follow_up_reason(env, monkeypatch) -> 
     async def body() -> None:
         async with app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
+            # #881 — single-letter `x` arms; second press confirms.
+            await pilot.press("x")
             await pilot.press("x")
             await pilot.pause()
             app.screen.query_one("#task-reject-tests", Button).press()
@@ -1669,6 +1677,7 @@ def test_task_reject_modal_quick_pick_and_follow_up_reason(env, monkeypatch) -> 
             app.action_undo_pending_review()
             await pilot.pause()
 
+            await pilot.press("x")
             await pilot.press("x")
             await pilot.pause()
             app.screen.query_one("#task-reject-fix", Button).press()

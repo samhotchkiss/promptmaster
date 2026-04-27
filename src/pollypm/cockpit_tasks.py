@@ -17,6 +17,16 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Static, TabbedContent, TabPane
 
 from pollypm.approval_notifications import notify_task_approved
+from pollypm.cockpit_interaction import (
+    ActionKind,
+    BindingScope,
+    CockpitBinding,
+    FocusKind,
+    REGISTRY as _COCKPIT_INTERACTION_REGISTRY,
+    ScreenContract,
+    cancel_arming,
+    destructive_action_safe,
+)
 from pollypm.cockpit_task_priority import (
     priority_glyph,
     priority_label,
@@ -2099,13 +2109,42 @@ class PollyTasksApp(App[None]):
             reason=reason,
         )
 
+    def _notify_arm_hint(self, label: str) -> None:
+        """Surface a transient hint after a destructive-action arm.
+
+        ``destructive_action_safe`` returns ``False`` on the first
+        press without an explicit selection. The user has to know
+        that — silent refusal would feel like a frozen UI. The hint
+        also tells them exactly how to confirm.
+        """
+        try:
+            self.notify(
+                f"Press the same key again within 3s to {label}.",
+                severity="warning",
+                timeout=3.0,
+            )
+        except Exception:  # noqa: BLE001 — notify is best-effort
+            pass
+
     def action_approve_task(self) -> None:
-        if isinstance(getattr(self, "focused", None), Input):
-            return
+        # #840 fix — single-letter `a` is destructive in a screen that
+        # also has a visible search input. `destructive_action_safe`
+        # combines the Input-focus check with explicit-selection
+        # detection and an "arm then confirm" two-press flow so a
+        # bench cursor sitting on a real task cannot approve it on a
+        # single keystroke.
         if self._has_search_filter():
             self.action_focus_search()
             return
         if not self._selected_task_id:
+            return
+        if not destructive_action_safe(
+            self,
+            "approve_task",
+            target_id=self._selected_task_id,
+            selection=self._selected_task_ids,
+        ):
+            self._notify_arm_hint("approve")
             return
         self._review_task(self._selected_task_id, decision="approve")
 
@@ -2150,12 +2189,19 @@ class PollyTasksApp(App[None]):
         )
 
     def action_reject_task(self) -> None:
-        if isinstance(getattr(self, "focused", None), Input):
-            return
+        # #840 fix — see ``action_approve_task`` above.
         if self._has_search_filter():
             self.action_focus_search()
             return
         if not self._selected_task_id:
+            return
+        if not destructive_action_safe(
+            self,
+            "reject_task",
+            target_id=self._selected_task_id,
+            selection=self._selected_task_ids,
+        ):
+            self._notify_arm_hint("reject")
             return
         task_id = self._selected_task_id
         modal = _TaskRejectReasonModal()
@@ -2341,4 +2387,110 @@ class PollyTasksApp(App[None]):
         task_id = self._current_task_key()
         if task_id is None:
             return
+        # Cursor moved — clear any armed destructive action so a
+        # stale arm cannot survive into a different row (#840).
+        cancel_arming(self)
         self._show_detail(task_id)
+
+
+# ---------------------------------------------------------------------------
+# Cockpit interaction contract registration (#881)
+# ---------------------------------------------------------------------------
+#
+# Tasks is the canonical screen the contract was designed around: it
+# has a visible search Input, opens with DataTable focus, and binds
+# destructive single-key actions (`a`, `x`). The arming requirement
+# is therefore mandatory.
+
+_TASKS_CONTRACT_BINDINGS: tuple[CockpitBinding, ...] = (
+    CockpitBinding(
+        keys=("slash",),
+        action="focus_search",
+        description="Search",
+        kind=ActionKind.READ,
+        show_in_help=False,
+    ),
+    CockpitBinding(
+        keys=("r",),
+        action="refresh",
+        description="Refresh",
+        kind=ActionKind.READ,
+    ),
+    CockpitBinding(
+        keys=("a",),
+        action="approve_task",
+        description="Approve",
+        kind=ActionKind.DESTRUCTIVE,
+    ),
+    CockpitBinding(
+        keys=("x",),
+        action="reject_task",
+        description="Reject",
+        kind=ActionKind.DESTRUCTIVE,
+    ),
+    CockpitBinding(
+        keys=("c",),
+        action="clear_filters",
+        description="Clear Filters",
+        kind=ActionKind.WRITE,
+        show_in_help=False,
+    ),
+    CockpitBinding(
+        keys=("space",),
+        action="toggle_task_selection",
+        description="Select",
+        kind=ActionKind.WRITE,
+        show_in_help=False,
+    ),
+    CockpitBinding(
+        keys=("A",),
+        action="bulk_approve_selected",
+        description="Approve Selected",
+        kind=ActionKind.DESTRUCTIVE,
+        show_in_help=False,
+    ),
+    CockpitBinding(
+        keys=("X",),
+        action="bulk_reject_selected",
+        description="Reject Selected",
+        kind=ActionKind.DESTRUCTIVE,
+        show_in_help=False,
+    ),
+    CockpitBinding(
+        keys=("d",),
+        action="toggle_resubmission_diff",
+        description="Review Diff",
+        kind=ActionKind.READ,
+        show_in_help=False,
+    ),
+    CockpitBinding(
+        keys=("z",),
+        action="undo_pending_review",
+        description="Undo",
+        kind=ActionKind.WRITE,
+        show_in_help=False,
+    ),
+    CockpitBinding(
+        keys=("escape",),
+        action="back",
+        description="Back",
+        kind=ActionKind.NAVIGATION,
+    ),
+)
+
+
+_COCKPIT_INTERACTION_REGISTRY.register(
+    ScreenContract(
+        screen_name="PollyTasksApp",
+        initial_focus=FocusKind.TABLE,
+        has_visible_input=True,
+        bindings=_TASKS_CONTRACT_BINDINGS,
+        arming_required_for_destructive=True,
+        notes=(
+            "Tasks opens with DataTable focus and renders a search Input. "
+            "Single-key `a`/`x` are destructive and route through "
+            "`destructive_action_safe`. Bulk `A`/`X` are inherently armed "
+            "by requiring a non-empty `_selected_task_ids` set."
+        ),
+    )
+)
