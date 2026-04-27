@@ -581,6 +581,23 @@ def test_message_column_strips_routing_tag_from_alert_summary(
     _run(body())
 
 
+def test_actionable_summary_truncation_preserves_try_command() -> None:
+    """Long alert rows must keep the command tail visible."""
+    from pollypm.cockpit_activity import _truncate_summary
+
+    summary = (
+        "Task demo/5 was routed to the worker role but no matching session is "
+        "running because the scheduler could not find a live pane. "
+        "Try: pm task claim demo/5"
+    )
+
+    rendered = _truncate_summary(summary, width=96)
+
+    assert rendered.endswith("Try: pm task claim demo/5")
+    assert "Try: pm task" in rendered
+    assert not rendered.endswith("Try: pm task")
+
+
 def test_message_column_blank_when_summary_equals_event_verb(
     activity_env, activity_app,
 ) -> None:
