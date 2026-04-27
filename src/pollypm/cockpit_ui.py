@@ -1022,7 +1022,7 @@ class PollyCockpitApp(App[None]):
                     self.nav.index = restore_index
                 finally:
                     self._suspend_selection_events = False
-        self.settings_row.set_class(self.selected_key == "settings", "active-view")
+        self._apply_active_view_to_rows()
         if any(item.key == "settings" for item in self._items):
             self.settings_row.display = True
         else:
@@ -1041,6 +1041,15 @@ class PollyCockpitApp(App[None]):
         if isinstance(child, RailItem):
             return child.cockpit_key
         return None
+
+    def _apply_active_view_to_rows(self) -> None:
+        for key, row in self._row_widgets.items():
+            active = key == self.selected_key
+            if row.has_class("active-view") == active:
+                continue
+            row.set_class(active, "active-view")
+            row.update_body()
+        self.settings_row.set_class(self.selected_key == "settings", "active-view")
 
     # Internal infrastructure events that have no signal value to a
     # user reading the rail's events strip (#793). Heartbeat ticks and
@@ -1295,6 +1304,7 @@ class PollyCockpitApp(App[None]):
         if key is not None:
             self.selected_key = key
             self._last_nav_change = self._tick_count
+            self._apply_active_view_to_rows()
 
     def action_cursor_down(self) -> None:
         if self.nav.index is None:

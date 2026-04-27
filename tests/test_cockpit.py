@@ -2903,6 +2903,53 @@ def test_cockpit_ui_arrow_and_enter_route_selected(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+def test_cockpit_cursor_sync_moves_visible_marker_without_full_refresh() -> None:
+    app = PollyCockpitApp.__new__(PollyCockpitApp)
+    app.selected_key = "polly"
+    app._tick_count = 7
+    app._last_nav_change = -10
+
+    class _Row:
+        def __init__(self, active: bool) -> None:
+            self.classes = {"active-view"} if active else set()
+            self.updates = 0
+
+        def has_class(self, name: str) -> bool:
+            return name in self.classes
+
+        def set_class(self, enabled: bool, name: str) -> None:
+            if enabled:
+                self.classes.add(name)
+            else:
+                self.classes.discard(name)
+
+        def update_body(self) -> None:
+            self.updates += 1
+
+    class _SettingsRow:
+        def __init__(self) -> None:
+            self.active = False
+
+        def set_class(self, enabled: bool, name: str) -> None:
+            assert name == "active-view"
+            self.active = enabled
+
+    polly = _Row(active=True)
+    inbox = _Row(active=False)
+    app._row_widgets = {"polly": polly, "inbox": inbox}  # type: ignore[assignment]
+    app.settings_row = _SettingsRow()  # type: ignore[assignment]
+    app._selected_row_key = lambda: "inbox"  # type: ignore[method-assign]
+
+    app._sync_selected_from_nav()
+
+    assert app.selected_key == "inbox"
+    assert app._last_nav_change == 7
+    assert "active-view" not in polly.classes
+    assert "active-view" in inbox.classes
+    assert polly.updates == 1
+    assert inbox.updates == 1
+
+
 def test_cockpit_app_resize_schedules_layout_recovery() -> None:
     app = PollyCockpitApp.__new__(PollyCockpitApp)
     scheduled: list[str] = []
