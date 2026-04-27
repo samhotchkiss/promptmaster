@@ -148,3 +148,124 @@ def test_dashboard_body_action_copy_on_hold_alone_is_not_enough() -> None:
         "  paused: ran out of budget for tonight, will resume tomorrow.\n"
     )
     assert not _dashboard_body_has_action_copy(body.lower())
+
+
+def test_blocked_with_incoming_dependency_does_not_warn(tmp_path) -> None:
+    """A blocked task that has an INCOMING dependency row (something
+    blocks it) must NOT trip ``blocked_without_context``.
+
+    Booktalk live (2026-04-26): tasks #9, #11, #14 were genuinely
+    blocked by prerequisites (e.g. ``from 7 → to 9``) but the
+    invariant queried the OUTGOING direction (``from = task``,
+    "this task is a prerequisite for someone else") and warned
+    even though the dependency context was right there in the
+    schema. Reverse the query direction; the warning now only
+    fires when there's truly no schema-level explanation.
+    """
+    import sqlite3
+    from scripts.release_invariants import check_project_tasks
+
+    proj_dir = tmp_path / "demo"
+    (proj_dir / ".pollypm").mkdir(parents=True)
+    db = proj_dir / ".pollypm" / "state.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE work_tasks (
+            project TEXT, task_number INTEGER, title TEXT, type TEXT,
+            labels TEXT, work_status TEXT, flow_template_id TEXT,
+            current_node_id TEXT, assignee TEXT, priority TEXT,
+            roles TEXT, created_at TEXT, created_by TEXT, updated_at TEXT
+        );
+        CREATE TABLE work_task_dependencies (
+            from_project TEXT, from_task_number INTEGER,
+            to_project TEXT, to_task_number INTEGER,
+            kind TEXT, created_at TEXT
+        );
+        CREATE TABLE work_context_entries (
+            task_project TEXT, task_number INTEGER, entry_type TEXT,
+            actor TEXT, text TEXT, created_at TEXT
+        );
+        CREATE TABLE work_node_executions (
+            task_project TEXT, task_number INTEGER, node_id TEXT,
+            output_json TEXT
+        );
+        INSERT INTO work_tasks (project, task_number, work_status, labels, roles)
+            VALUES ('demo', 1, 'done', '[]', '{}');
+        INSERT INTO work_tasks (project, task_number, work_status, labels, roles)
+            VALUES ('demo', 2, 'blocked', '[]', '{}');
+        -- Task 2 depends on task 1 (1 must finish first).
+        INSERT INTO work_task_dependencies VALUES
+            ('demo', 1, 'demo', 2, 'blocks', '2026-04-26T00:00:00Z');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Build a minimal project shim that check_project_tasks accepts.
+    class _FakeProject:
+        key = "demo"
+        path = proj_dir
+
+    findings = check_project_tasks(
+        config_path=tmp_path / "pollypm.toml",
+        project=_FakeProject(),
+        project_key="demo",
+    )
+    blocked_warns = [f for f in findings if f.code == "blocked_without_context"]
+    assert blocked_warns == [], (
+        f"unexpected blocked_without_context warnings: {blocked_warns!r}"
+    )
+
+
+def test_blocked_with_no_dependency_or_context_still_warns(tmp_path) -> None:
+    """The other direction: a blocked task with neither incoming deps
+    nor a context entry is genuinely orphaned and must still warn.
+    """
+    import sqlite3
+    from scripts.release_invariants import check_project_tasks
+
+    proj_dir = tmp_path / "demo"
+    (proj_dir / ".pollypm").mkdir(parents=True)
+    db = proj_dir / ".pollypm" / "state.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE work_tasks (
+            project TEXT, task_number INTEGER, title TEXT, type TEXT,
+            labels TEXT, work_status TEXT, flow_template_id TEXT,
+            current_node_id TEXT, assignee TEXT, priority TEXT,
+            roles TEXT, created_at TEXT, created_by TEXT, updated_at TEXT
+        );
+        CREATE TABLE work_task_dependencies (
+            from_project TEXT, from_task_number INTEGER,
+            to_project TEXT, to_task_number INTEGER,
+            kind TEXT, created_at TEXT
+        );
+        CREATE TABLE work_context_entries (
+            task_project TEXT, task_number INTEGER, entry_type TEXT,
+            actor TEXT, text TEXT, created_at TEXT
+        );
+        CREATE TABLE work_node_executions (
+            task_project TEXT, task_number INTEGER, node_id TEXT,
+            output_json TEXT
+        );
+        INSERT INTO work_tasks (project, task_number, work_status, labels, roles)
+            VALUES ('demo', 1, 'blocked', '[]', '{}');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    class _FakeProject:
+        key = "demo"
+        path = proj_dir
+
+    findings = check_project_tasks(
+        config_path=tmp_path / "pollypm.toml",
+        project=_FakeProject(),
+        project_key="demo",
+    )
+    blocked_warns = [f for f in findings if f.code == "blocked_without_context"]
+    assert len(blocked_warns) == 1
+    assert "demo/1" in blocked_warns[0].detail

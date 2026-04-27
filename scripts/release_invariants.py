@@ -198,9 +198,20 @@ def check_project_tasks(
                     "WHERE task_project=? AND task_number=? LIMIT 1",
                     (project_key, row["task_number"]),
                 ).fetchone()
+                # A blocked task has INCOMING dependencies — it depends
+                # on tasks that haven't finished yet. The schema models
+                # this as ``from_project/from_task_number`` (the
+                # prerequisite) → ``to_project/to_task_number`` (the
+                # dependent). The original query checked the OUTGOING
+                # direction (``from = this_task``, "I'm a prerequisite
+                # for someone else"), which is unrelated to whether
+                # this task is itself blocked. Booktalk/9 (live,
+                # 2026-04-26) had two real prerequisites (``from 7
+                # → to 9`` and ``from 8 → to 9``) but the invariant
+                # warned anyway because it asked the wrong direction.
                 deps = conn.execute(
                     "SELECT 1 FROM work_task_dependencies "
-                    "WHERE from_project=? AND from_task_number=? LIMIT 1",
+                    "WHERE to_project=? AND to_task_number=? LIMIT 1",
                     (project_key, row["task_number"]),
                 ).fetchone()
                 if context is None and deps is None:
