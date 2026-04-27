@@ -9,7 +9,10 @@ from pollypm.release_gate import (
     ReleaseReport,
     closure_comment_complete,
     gate_cockpit_interaction_audit_clean,
+    gate_security_checklist,
     gate_signal_routing_emitters_migrated,
+    gate_storage_legacy_writers,
+    gate_task_invariant_metadata_complete,
     parse_closure_comment,
     run_release_gate,
 )
@@ -107,6 +110,93 @@ def test_signal_routing_emitters_gate_is_warning_when_unmigrated() -> None:
     if not result.passed:
         assert result.severity is GateSeverity.WARNING
         assert "migrated" in result.summary or "missing" in result.summary
+
+
+def test_security_checklist_gate_passes_on_current_tree() -> None:
+    """#893 / #895 — the security checklist gate must pass on the
+    current tree once the worktree probe targets the real API name
+    (#895) and notification_staging is tracked under #704."""
+    result = gate_security_checklist()
+    assert result.passed, result.detail
+
+
+def test_security_checklist_gate_blocks_on_synthetic_failure(monkeypatch) -> None:
+    """The gate must surface as BLOCKING when a checklist line
+    fails. Patches the underlying audit helper to inject a failure."""
+    import pollypm.release_gate as rg
+
+    monkeypatch.setattr(
+        "pollypm.security_checklist.audit_security_checklist",
+        lambda: ("[plugin_install] plugin_trust_module_exists: synthetic",),
+    )
+    result = rg.gate_security_checklist()
+    assert result.passed is False
+    assert result.severity is GateSeverity.BLOCKING
+    assert "synthetic" in result.detail
+
+
+def test_storage_legacy_writers_gate_is_warning_during_migration() -> None:
+    """notification_staging is currently tracked under #704 — the
+    gate must surface as WARNING (not BLOCKING) so the gate does
+    not block v1 while the migration is documented + in flight."""
+    result = gate_storage_legacy_writers()
+    if not result.passed:
+        assert result.severity is GateSeverity.WARNING
+
+
+def test_storage_legacy_writers_gate_blocks_on_untracked(monkeypatch) -> None:
+    """If a writer is untracked AND unisolated, the gate blocks."""
+    import pollypm.release_gate as rg
+
+    monkeypatch.setattr(
+        "pollypm.storage_contracts.audit_legacy_writers",
+        lambda: ("rogue_writer (shadows task): untracked",),
+    )
+    result = rg.gate_storage_legacy_writers()
+    assert result.passed is False
+    assert result.severity is GateSeverity.BLOCKING
+
+
+def test_task_invariant_metadata_gate_passes_on_current_tree() -> None:
+    """Every WorkStatus member has metadata today (#886)."""
+    result = gate_task_invariant_metadata_complete()
+    assert result.passed, result.detail
+
+
+def test_task_invariant_metadata_gate_blocks_on_missing(monkeypatch) -> None:
+    """Synthesizing a missing-status report blocks the gate."""
+    import pollypm.release_gate as rg
+
+    monkeypatch.setattr(
+        "pollypm.task_invariants.all_statuses_have_metadata",
+        lambda: ("MYSTERY_STATUS",),
+    )
+    result = rg.gate_task_invariant_metadata_complete()
+    assert result.passed is False
+    assert result.severity is GateSeverity.BLOCKING
+
+
+def test_run_release_gate_blocked_when_security_failures(monkeypatch) -> None:
+    """End-to-end: a security checklist failure flows through to
+    a BLOCKED report (#893 acceptance criterion 5)."""
+    monkeypatch.setattr(
+        "pollypm.security_checklist.audit_security_checklist",
+        lambda: ("[plugin_install] x: forced",),
+    )
+    report = run_release_gate()
+    assert report.blocked is True
+    failing_names = {r.name for r in report.failures}
+    assert "security_checklist" in failing_names
+
+
+def test_default_gates_include_security_checklist() -> None:
+    """The audit's #893 acceptance criterion 1: DEFAULT_GATES must
+    include the launch-hardening checks documented by the new
+    specs."""
+    names = {gate.__name__ for gate in DEFAULT_GATES}
+    assert "gate_security_checklist" in names
+    assert "gate_storage_legacy_writers" in names
+    assert "gate_task_invariant_metadata_complete" in names
 
 
 # ---------------------------------------------------------------------------

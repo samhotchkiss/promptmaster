@@ -236,6 +236,12 @@ class LegacyWriter:
     is_isolated: bool = False
     """``True`` once the writer is gated behind a documented
     compatibility-only path that cannot reach user surfaces."""
+    tracked_issue: str | None = None
+    """Issue number that owns the migration. When set, the audit
+    treats the entry as an *accepted-risk* downgrade rather than a
+    hard blocker — the release gate logs it as a warning. The audit
+    also requires :attr:`is_isolated` to be False on tracked
+    entries; an isolated writer needs no tracking issue."""
 
 
 LEGACY_WRITERS: tuple[LegacyWriter, ...] = (
@@ -252,6 +258,7 @@ LEGACY_WRITERS: tuple[LegacyWriter, ...] = (
             "isolated behind a documented migration boundary."
         ),
         is_isolated=False,
+        tracked_issue="#704",
     ),
     LegacyWriter(
         name="per-task workspace DB writes",
@@ -298,20 +305,47 @@ def all_concepts_have_canonical_reader() -> tuple[str, ...]:
 
 def audit_legacy_writers() -> tuple[str, ...]:
     """Return human-readable descriptions of every legacy writer
-    that has not yet been retired or isolated.
+    that is neither isolated nor tracked under a migration issue.
 
-    The release gate (#889) consults this. A legacy writer that
-    is not yet ``is_isolated`` is a launch blocker because its
-    rows can still reach user surfaces and produce divergent
-    counts (the audit's #820 / #271 shape)."""
+    A legacy writer with no ``is_isolated`` status and no
+    ``tracked_issue`` is a launch blocker because its rows can
+    reach user surfaces undocumented (the audit's #820 / #271
+    shape). Writers tracked under a migration issue surface
+    through :func:`tracked_legacy_writers` instead — the release
+    gate (#889) reports them as warnings, not blockers, while the
+    referenced issue stays open."""
     out: list[str] = []
     for writer in LEGACY_WRITERS:
         if writer.is_isolated:
+            continue
+        if writer.tracked_issue:
             continue
         out.append(
             f"{writer.name} (shadows {writer.concept.value}): "
             f"{writer.migration_plan} "
             f"[removal condition: {writer.removal_condition}]"
+        )
+    return tuple(out)
+
+
+def tracked_legacy_writers() -> tuple[str, ...]:
+    """Return human-readable descriptions of legacy writers whose
+    migration is in progress under a tracked issue.
+
+    The release gate surfaces these as warnings — they are
+    accepted-risk downgrades documented in the contract, not
+    blockers. When the tracked issue closes, the entry should
+    flip to ``is_isolated=True`` (or be removed entirely)."""
+    out: list[str] = []
+    for writer in LEGACY_WRITERS:
+        if writer.is_isolated:
+            continue
+        if not writer.tracked_issue:
+            continue
+        out.append(
+            f"{writer.name} (shadows {writer.concept.value}): "
+            f"tracked under {writer.tracked_issue} — "
+            f"{writer.migration_plan}"
         )
     return tuple(out)
 

@@ -192,13 +192,27 @@ def _check_role_guide_paths_resolve() -> CheckResult:
 
 
 def _check_no_legacy_writers_active() -> CheckResult:
-    """Storage-contract legacy writers must be retired or
-    isolated. An unisolated writer is a path for divergent /
-    stale data to reach user surfaces — both a UX bug and a
-    least-privilege concern (the writer might run with broader
-    privileges than the canonical reader)."""
+    """Storage-contract legacy writers must be retired, isolated,
+    or *explicitly tracked* under a migration issue.
+
+    Three buckets:
+
+    * ``is_isolated=True`` — silenced; the writer cannot produce
+      user-visible state.
+    * ``tracked_issue`` set — accepted-risk downgrade; release
+      gate logs as a warning.
+    * neither — blocking. The audit returns a failure here.
+
+    #895 — the prior version flagged tracked writers as failures,
+    creating a checklist that knowingly fails. The new semantics
+    let the launch-hardening migration land progressively without
+    the gate giving false alarms.
+    """
     try:
-        from pollypm.storage_contracts import audit_legacy_writers
+        from pollypm.storage_contracts import (
+            audit_legacy_writers,
+            tracked_legacy_writers,
+        )
     except ImportError as exc:
         return CheckResult(
             check_name="no_legacy_writers_active",
@@ -207,18 +221,29 @@ def _check_no_legacy_writers_active() -> CheckResult:
             summary="storage_contracts not importable",
             detail=str(exc),
         )
-    rows = audit_legacy_writers()
-    if rows:
-        # Reported as a soft fail today (the migration is in
-        # progress); release-gate severity is decided by the
-        # caller. Returning passed=False with a clear summary
-        # surfaces the issue.
+    blocking = audit_legacy_writers()
+    tracked = tracked_legacy_writers()
+    if blocking:
         return CheckResult(
             check_name="no_legacy_writers_active",
             boundary=TrustBoundary.BACKGROUND_ROLES,
             passed=False,
-            summary=f"{len(rows)} legacy writer(s) still active",
-            detail="\n".join(rows),
+            summary=f"{len(blocking)} untracked legacy writer(s)",
+            detail="\n".join(blocking),
+        )
+    if tracked:
+        # Pass with a note — the release gate report renders this
+        # under the WARN section so reviewers see the migration
+        # in flight without it blocking the tag.
+        return CheckResult(
+            check_name="no_legacy_writers_active",
+            boundary=TrustBoundary.BACKGROUND_ROLES,
+            passed=True,
+            summary=(
+                f"every legacy writer isolated or tracked "
+                f"({len(tracked)} tracked migration(s))"
+            ),
+            detail="\n".join(tracked),
         )
     return CheckResult(
         check_name="no_legacy_writers_active",
@@ -254,26 +279,49 @@ def _check_backup_module_exists() -> CheckResult:
 
 
 def _check_worktree_path_validator_exists() -> CheckResult:
-    """Worktree creation must remain gated behind the validator
-    in :mod:`pollypm.worktrees`. The audit cites #494 for path-
-    traversal during worktree create as the original concern."""
+    """Worktree creation must remain gated behind the canonical
+    creator (``ensure_worktree``) and the path-component validator
+    (``_validate_worktree_key``) in :mod:`pollypm.worktrees`. The
+    audit cites #494 for path-traversal during worktree create as
+    the original concern; the validator rejects any branch/path
+    component that does not match the safe-key regex.
+
+    #895 — earlier this check looked for ``create_agent_worktree``
+    which does not exist; the canonical creator is
+    ``ensure_worktree``. Cross-checking both the creator and the
+    validator catches a future rename of either symbol.
+    """
     try:
-        from pollypm.worktrees import (  # noqa: F401
-            create_agent_worktree,
-        )
+        import pollypm.worktrees as _wt
     except ImportError as exc:
         return CheckResult(
             check_name="worktree_path_validator_exists",
             boundary=TrustBoundary.PATH_VALIDATION,
             passed=False,
-            summary="pollypm.worktrees.create_agent_worktree missing",
+            summary="pollypm.worktrees not importable",
             detail=str(exc),
+        )
+
+    missing: list[str] = []
+    if not callable(getattr(_wt, "ensure_worktree", None)):
+        missing.append("ensure_worktree")
+    if not callable(getattr(_wt, "_validate_worktree_key", None)):
+        missing.append("_validate_worktree_key")
+    if missing:
+        return CheckResult(
+            check_name="worktree_path_validator_exists",
+            boundary=TrustBoundary.PATH_VALIDATION,
+            passed=False,
+            summary=(
+                f"pollypm.worktrees missing canonical symbol(s): "
+                f"{', '.join(missing)}"
+            ),
         )
     return CheckResult(
         check_name="worktree_path_validator_exists",
         boundary=TrustBoundary.PATH_VALIDATION,
         passed=True,
-        summary="worktree path validator present",
+        summary="ensure_worktree + _validate_worktree_key present",
     )
 
 

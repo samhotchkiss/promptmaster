@@ -263,6 +263,117 @@ def gate_signal_routing_emitters_migrated() -> GateResult:
     )
 
 
+def gate_security_checklist() -> GateResult:
+    """Run the launch security checklist (#892) and report any
+    failing line as a blocking gate failure.
+
+    #893 — earlier the security checklist existed as a free-
+    standing module that the release gate did not consult, so
+    the gate could report OK while the checklist had failures.
+    Wiring it in here closes that loop."""
+    try:
+        from pollypm.security_checklist import audit_security_checklist
+    except Exception as exc:  # noqa: BLE001
+        return GateResult(
+            name="security_checklist",
+            passed=False,
+            summary="security_checklist not importable",
+            detail=str(exc),
+        )
+    failures = audit_security_checklist()
+    if failures:
+        return GateResult(
+            name="security_checklist",
+            passed=False,
+            severity=GateSeverity.BLOCKING,
+            summary=f"{len(failures)} security check(s) failing",
+            detail="\n".join(failures),
+        )
+    return GateResult(
+        name="security_checklist",
+        passed=True,
+        summary="security checklist clean",
+    )
+
+
+def gate_storage_legacy_writers() -> GateResult:
+    """Refuse to tag while a legacy storage writer is neither
+    isolated nor tracked under a migration issue (#887, #893).
+
+    Tracked migrations (e.g., ``notification_staging`` under
+    #704) surface via :func:`tracked_legacy_writers` and the
+    release-gate report renders them as warnings. Untracked
+    blocking writers fail the gate."""
+    try:
+        from pollypm.storage_contracts import (
+            audit_legacy_writers,
+            tracked_legacy_writers,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return GateResult(
+            name="storage_legacy_writers",
+            passed=False,
+            summary="storage_contracts not importable",
+            detail=str(exc),
+        )
+    blocking = audit_legacy_writers()
+    if blocking:
+        return GateResult(
+            name="storage_legacy_writers",
+            passed=False,
+            severity=GateSeverity.BLOCKING,
+            summary=f"{len(blocking)} untracked legacy writer(s)",
+            detail="\n".join(blocking),
+        )
+    tracked = tracked_legacy_writers()
+    if tracked:
+        return GateResult(
+            name="storage_legacy_writers",
+            passed=False,
+            severity=GateSeverity.WARNING,
+            summary=f"{len(tracked)} tracked migration(s) in flight",
+            detail="\n".join(tracked),
+        )
+    return GateResult(
+        name="storage_legacy_writers",
+        passed=True,
+        summary="all legacy writers isolated",
+    )
+
+
+def gate_task_invariant_metadata_complete() -> GateResult:
+    """Refuse to tag if a ``WorkStatus`` value lacks a
+    :class:`StateMetadata` entry (#886).
+
+    Used to catch the case where a new state is added to the
+    ``WorkStatus`` enum but the canonical transition table is not
+    updated. The audit ``all_statuses_have_metadata`` returns the
+    list of missing names."""
+    try:
+        from pollypm.task_invariants import all_statuses_have_metadata
+    except Exception as exc:  # noqa: BLE001
+        return GateResult(
+            name="task_invariant_metadata",
+            passed=False,
+            summary="task_invariants not importable",
+            detail=str(exc),
+        )
+    missing = all_statuses_have_metadata()
+    if missing:
+        return GateResult(
+            name="task_invariant_metadata",
+            passed=False,
+            severity=GateSeverity.BLOCKING,
+            summary=f"{len(missing)} status(es) missing metadata",
+            detail=", ".join(missing),
+        )
+    return GateResult(
+        name="task_invariant_metadata",
+        passed=True,
+        summary="every WorkStatus has canonical metadata",
+    )
+
+
 def gate_cockpit_interaction_audit_clean() -> GateResult:
     """Verify the cockpit interaction registry has no contract
     violations (#881)."""
@@ -368,9 +479,17 @@ DEFAULT_GATES: tuple[Gate, ...] = (
     gate_main_branch_green,
     gate_cockpit_interaction_audit_clean,
     gate_signal_routing_emitters_migrated,
+    gate_security_checklist,
+    gate_storage_legacy_writers,
+    gate_task_invariant_metadata_complete,
 )
 """The standard launch-hardening gate set. Used by
-``scripts/release_burnin.py`` and the GitHub release workflow."""
+``scripts/release_burnin.py`` and the GitHub release workflow.
+
+#893 expanded this set so a passing report actually reflects the
+launch-hardening invariants. Each new gate follows the same
+contract: pure callable, catches its own exceptions, returns a
+typed GateResult, and is paired with a unit test."""
 
 
 def run_release_gate(

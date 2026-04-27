@@ -269,6 +269,23 @@ def run_invariants(config: Path) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
+def run_release_gate_check() -> tuple[int, str]:
+    """Run the launch-hardening release gate (#889) and report
+    blocked / clean status.
+
+    Returns ``(exit_code, rendered_report)``. Exit code is 1 when
+    the gate is blocked, 0 otherwise. The rendered report is the
+    text the gate produces — designed for CI log readability."""
+    if str(ROOT / "src") not in sys.path:
+        sys.path.insert(0, str(ROOT / "src"))
+    try:
+        from pollypm.release_gate import run_release_gate
+    except Exception as exc:  # noqa: BLE001
+        return 1, f"release_gate import failed: {type(exc).__name__}: {exc}"
+    report = run_release_gate()
+    return (1 if report.blocked else 0), report.render()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -303,6 +320,15 @@ def main() -> int:
             exit_code = 1
         block.append(f"invariants_rc={inv_rc}")
         block.append(inv_out.strip())
+
+        # #893 — also run the structural launch-hardening gate so
+        # the burn-in log records its verdict alongside invariants.
+        gate_rc, gate_out = run_release_gate_check()
+        if gate_rc != 0:
+            exit_code = 1
+        block.append(f"release_gate_rc={gate_rc}")
+        block.append(gate_out.strip())
+
         text = "\n".join(part for part in block if part)
         print(text, flush=True)
         with log_path.open("a") as handle:

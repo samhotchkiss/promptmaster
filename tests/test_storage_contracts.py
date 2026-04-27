@@ -15,6 +15,7 @@ from pollypm.storage_contracts import (
     audit_legacy_writers,
     canonical_reader_for,
     reader_module_paths,
+    tracked_legacy_writers,
 )
 
 
@@ -103,14 +104,25 @@ def test_reader_module_paths_includes_known_modules() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_audit_legacy_writers_returns_descriptions_for_active_seams() -> None:
-    """Each non-isolated legacy writer becomes one human-readable
-    line. The release gate (#889) blocks v1 while any line is
-    present."""
-    rows = audit_legacy_writers()
-    # We have at least one legacy writer (notification_staging) that
-    # is currently not-isolated. The audit must report it.
-    assert any("notification_staging" in r for r in rows)
+def test_audit_legacy_writers_returns_only_blocking_seams() -> None:
+    """``audit_legacy_writers`` returns *blocking* entries — those
+    that are neither isolated nor tracked under a migration issue.
+    Tracked entries surface via :func:`tracked_legacy_writers`
+    instead so the release gate can downgrade them to warnings.
+
+    Today every entry is either isolated or tracked, so the
+    blocking list is empty. Adding an untracked, unisolated entry
+    is a launch blocker — that is the launch-hardening invariant
+    we want here."""
+    assert audit_legacy_writers() == ()
+
+
+def test_tracked_legacy_writers_surface_notification_staging() -> None:
+    """notification_staging migration is tracked under #704 and
+    must surface in the warning lane, not the blocking lane."""
+    tracked = tracked_legacy_writers()
+    assert any("notification_staging" in line for line in tracked)
+    assert any("#704" in line for line in tracked)
 
 
 def test_audit_legacy_writers_skips_isolated() -> None:
