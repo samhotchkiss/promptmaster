@@ -524,6 +524,12 @@ _GLOBAL_HELP_BINDINGS: list[tuple[str, str]] = [
     ("?", "this help"),
     ("ctrl+q", "quit"),
     ("ctrl+w", "detach"),
+    # PM Chat / live agent panes are raw Claude Code subprocesses that
+    # consume Tab themselves (Shift-Tab cycles permission modes inside
+    # Claude). The cockpit cannot intercept them, so document the tmux
+    # escape so users do not feel trapped (#877).
+    ("ctrl+b o", "rotate tmux pane focus (use to leave a chat pane)"),
+    ("ctrl+b ←", "focus the rail from a chat pane"),
 ]
 
 _INBOX_LABEL_HELP: dict[str, list[tuple[str, str]]] = {
