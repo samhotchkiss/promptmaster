@@ -174,6 +174,95 @@ def _safe_json_list(raw: object) -> list:
     return parsed if isinstance(parsed, list) else []
 
 
+_POLLYPM_GENERATED_DOC_FILES = frozenset({
+    "project-overview.md",
+    "decisions.md",
+    "architecture.md",
+    "history.md",
+    "conventions.md",
+    "deprecated-facts.md",
+    "history-import-questions.md",
+})
+
+
+def _gitignore_without_pollypm_entry(text: str) -> tuple[str, ...]:
+    return tuple(
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and line.strip() != ".pollypm/"
+    )
+
+
+def _gitignore_change_is_pollypm_only(project_path: Path) -> bool:
+    gitignore_path = project_path / ".gitignore"
+    if not gitignore_path.exists():
+        return False
+    try:
+        current = gitignore_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if ".pollypm/" not in current.splitlines():
+        return False
+
+    previous = subprocess.run(
+        ["git", "-C", str(project_path), "show", "HEAD:.gitignore"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if previous.returncode != 0:
+        return _gitignore_without_pollypm_entry(current) == ()
+    return (
+        _gitignore_without_pollypm_entry(current)
+        == _gitignore_without_pollypm_entry(previous.stdout)
+    )
+
+
+def _doc_file_is_pollypm_generated(path: Path) -> bool:
+    if path.name not in _POLLYPM_GENERATED_DOC_FILES:
+        return False
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if path.name == "history-import-questions.md":
+        return content.startswith("# Review:") and "history import" in content
+    return "*Last updated:" in content
+
+
+def _docs_change_is_pollypm_only(project_path: Path, rel_path: str) -> bool:
+    docs_root = project_path / "docs"
+    candidate = project_path / rel_path.rstrip("/")
+    if rel_path.rstrip("/") == "docs":
+        if not docs_root.exists():
+            return False
+        files = [path for path in docs_root.rglob("*") if path.is_file()]
+    elif candidate.is_file() and candidate.parent == docs_root:
+        files = [candidate]
+    else:
+        return False
+    return bool(files) and all(_doc_file_is_pollypm_generated(path) for path in files)
+
+
+def _status_is_only_pollypm_scaffold(project_path: Path, status_stdout: str) -> bool:
+    lines = [line for line in status_stdout.splitlines() if line.strip()]
+    if not lines:
+        return False
+    for line in lines:
+        rel_path = line[3:].strip() if len(line) > 3 else ""
+        if " -> " in rel_path:
+            rel_path = rel_path.rsplit(" -> ", 1)[1].strip()
+        rel_path = rel_path.strip('"')
+        if rel_path == ".gitignore" and _gitignore_change_is_pollypm_only(project_path):
+            continue
+        if (rel_path == "docs" or rel_path.startswith("docs/")) and (
+            _docs_change_is_pollypm_only(project_path, rel_path)
+        ):
+            continue
+        return False
+    return True
+
+
 def mark_first_shipped(
     *,
     path: Path | None = None,
@@ -2315,7 +2404,11 @@ class SQLiteWorkService:
                 "Cannot auto-merge approved work right now. "
                 f"Git status failed in {project_path}: {detail}"
             )
-        if status.stdout.strip():
+        dirty_status = status.stdout.strip()
+        if dirty_status and not _status_is_only_pollypm_scaffold(
+            project_path,
+            dirty_status,
+        ):
             raise ValidationError(
                 "Cannot auto-merge approved work because the project root has "
                 "uncommitted changes. Commit or stash them, then retry approve."
