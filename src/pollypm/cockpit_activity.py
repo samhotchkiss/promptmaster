@@ -18,7 +18,7 @@ import re
 
 from rich.markup import escape as _escape
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -264,11 +264,22 @@ class PollyActivityFeedApp(App[None]):
         Binding("F", "toggle_follow", "Follow"),
         Binding("c", "clear_filters", "Clear"),
         Binding("R,u", "refresh", "Refresh", show=False),
-        Binding("a", "view_alerts", "Alerts", show=False),
         Binding("enter", "open_detail", "Open"),
         Binding("question_mark", "show_keyboard_help", "Help", priority=True),
         Binding("q,escape", "back_or_cancel", "Back"),
     ]
+
+    _TYPEAHEAD_RESERVED_KEYS = frozenset({
+        "c",
+        "g",
+        "j",
+        "k",
+        "p",
+        "q",
+        "r",
+        "t",
+        "u",
+    })
 
     _DEFAULT_HINT = (
         "j/k move \u00b7 / search \u00b7 p project \u00b7 t type "
@@ -287,6 +298,7 @@ class PollyActivityFeedApp(App[None]):
         self.filter_input = Input(
             placeholder=self._search_placeholder(),
             id="af-filter-input",
+            select_on_focus=False,
         )
         self.hint = Static(self._DEFAULT_HINT, id="af-hint", markup=True)
         self._entries: list = []
@@ -322,13 +334,34 @@ class PollyActivityFeedApp(App[None]):
         self.filter_input.value = self._filter_fuzzy
         self._refresh()
         self.table.focus()
-        _setup_alert_notifier(self, bind_a=True)
+        _setup_alert_notifier(self, bind_a=False)
 
     def action_show_keyboard_help(self) -> None:
         _open_keyboard_help(self)
 
     def action_view_alerts(self) -> None:
         _action_view_alerts(self)
+
+    def on_key(self, event: events.Key) -> None:
+        if self.filter_input.has_focus or self._filter_mode is not None:
+            return
+        char = event.character or ""
+        if len(char) != 1 or not char.isprintable() or char.isspace():
+            return
+        if char != char.lower() or char.lower() in self._TYPEAHEAD_RESERVED_KEYS:
+            return
+        event.prevent_default()
+        event.stop()
+        self.call_after_refresh(self._begin_typeahead_search, char)
+
+    def _begin_typeahead_search(self, char: str) -> None:
+        self._filter_mode = None
+        self._filter_fuzzy = char
+        self.filter_input.placeholder = self._search_placeholder()
+        self.filter_input.value = char
+        self.filter_input.focus()
+        self.filter_input.cursor_position = len(char)
+        self._render()
 
     def _gather(self):
         """Hookable seam — tests inject synthetic feed-entry lists."""

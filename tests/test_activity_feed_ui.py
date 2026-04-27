@@ -297,6 +297,29 @@ def test_search_input_filters_live_by_task_id_and_shows_match_count(
     _run(body())
 
 
+def test_search_input_accepts_bare_typing_on_mount(activity_env, activity_app) -> None:
+    """The visible search box owns initial keystrokes instead of global actions."""
+    async def body() -> None:
+        entries = [
+            _make_entry(entry_id="evt:media", actor="worker_alpha", summary="media upload"),
+            _make_entry(entry_id="evt:other", actor="worker_bravo", summary="billing"),
+        ]
+        activity_app._gather = lambda: entries  # type: ignore[method-assign]
+        async with activity_app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            assert activity_app.table.has_focus
+
+            for key in "media":
+                await pilot.press(key)
+            await pilot.pause()
+
+            assert activity_app.filter_input.value == "media"
+            assert activity_app._filter_fuzzy == "media"
+            assert activity_app.table.row_count == 1
+
+    _run(body())
+
+
 def test_search_input_regex_matches_event_type(
     activity_env, activity_app,
 ) -> None:
