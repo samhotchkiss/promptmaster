@@ -9673,6 +9673,14 @@ class PollyProjectDashboardApp(App[None]):
         "1 primary \u00b7 2 secondary \u00b7 3 reply \u00b7 c chat "
         "\u00b7 i inbox \u00b7 q home"
     )
+    # Two-card variant: per-card 1-3/4-6 instead of singular 1-3.
+    # The screen footer needs to match the live bindings so the user
+    # isn't told ``2 secondary`` when 2 actually picks the second
+    # action card's primary button.
+    _ACTION_HINT_TWO_CARDS = (
+        "1-3 first card \u00b7 4-6 second card \u00b7 c chat "
+        "\u00b7 i inbox \u00b7 q home"
+    )
     _PLAN_VIEW_HINT = (
         "j/k scroll \u00b7 g/G top/bottom \u00b7 v explainer "
         "\u00b7 o editor \u00b7 p back \u00b7 q exit"
@@ -10025,7 +10033,16 @@ class PollyProjectDashboardApp(App[None]):
             self.inbox_body.update(full_inbox_text)
         self._sync_action_controls(data)
 
-        self.hint.update(self._ACTION_HINT if data.action_items else self._DEFAULT_HINT)
+        if data.action_items:
+            visible_action_count = len(data.action_items[:2])
+            hint = (
+                self._ACTION_HINT_TWO_CARDS
+                if visible_action_count > 1
+                else self._ACTION_HINT
+            )
+        else:
+            hint = self._DEFAULT_HINT
+        self.hint.update(hint)
 
     def _update_action_bar(self, data: ProjectDashboardData) -> None:
         review_count = int(data.task_counts.get("review", 0))

@@ -3206,6 +3206,30 @@ def test_plan_body_with_enforce_plan_true_uses_default_nudge(dashboard_app) -> N
     assert "Plan not required" not in body
 
 
+def test_action_hint_uses_per_card_form_when_two_cards_visible() -> None:
+    """Footer hint must match the live key bindings.
+
+    With two action cards visible (polly_remote, live 2026-04-26),
+    bindings 1-3 drive card 1 and 4-6 drive card 2. The original
+    hint always read ``1 primary · 2 secondary · 3 reply`` — but
+    pressing 2 actually fired the second card's primary action,
+    not the first card's secondary. Mismatched help.
+    """
+    from pollypm.cockpit_ui import PollyProjectDashboardApp
+
+    assert PollyProjectDashboardApp._ACTION_HINT == (
+        "1 primary · 2 secondary · 3 reply · c chat · i inbox · q home"
+    )
+    assert PollyProjectDashboardApp._ACTION_HINT_TWO_CARDS == (
+        "1-3 first card · 4-6 second card · c chat · i inbox · q home"
+    )
+    # Two distinct hints.
+    assert (
+        PollyProjectDashboardApp._ACTION_HINT
+        != PollyProjectDashboardApp._ACTION_HINT_TWO_CARDS
+    )
+
+
 def test_action_card_steps_compact_when_two_cards_visible(dashboard_app) -> None:
     """When two action cards are visible, each one shrinks its step list.
 
