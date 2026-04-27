@@ -437,3 +437,22 @@ def test_question_mark_binding_registered_on_every_cockpit_app() -> None:
         assert _has_help_binding(cls), (
             f"{cls.__name__} is missing the ``?`` help keybinding"
         )
+
+
+def test_help_modal_binds_jk_for_scroll() -> None:
+    """``j``/``k``/``Down``/``Up`` scroll the help modal (#859).
+
+    Without these bindings, a user reading a tall help dialog who
+    presses ``j`` to "go down" gets nothing — and the keystroke can
+    leak through to the rail underneath (#861).
+    """
+    from pollypm.cockpit_ui import KeyboardHelpModal
+
+    keys = {
+        binding.key.split(",")[0]
+        for binding in KeyboardHelpModal.BINDINGS
+    }
+    # Top-level keys, exact membership check.
+    bound = {key for binding in KeyboardHelpModal.BINDINGS for key in binding.key.split(",")}
+    for required in ("j", "k", "down", "up", "g", "G", "home", "end"):
+        assert required in bound, f"help modal missing scroll binding for {required!r}"

@@ -51,6 +51,8 @@ and working design docs. If you are not sure where to start, start here:
   implementation work.
 - [Release-Fix Packaging](release-fix-packaging.md) — review and rollback
   boundaries for release-candidate fixes.
+- [Launch Issue Audit](launch-issue-audit-2026-04-27.md) — recurring weak
+  surfaces found in the last 500 GitHub issues before launch hardening.
 - [V1 Spec](v1/README.md) — the full chapterized product spec when you need the
   complete model, not just the quick path.
 - [Visuals](visuals/index.html) plus the `docs/project-specs/` examples are

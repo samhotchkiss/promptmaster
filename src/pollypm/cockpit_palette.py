@@ -709,6 +709,12 @@ class KeyboardHelpModal(ModalScreen[None]):
 
     BINDINGS = [
         Binding("escape,q,question_mark", "cancel", "Close"),
+        Binding("j,down", "scroll_down", "Down", show=False),
+        Binding("k,up", "scroll_up", "Up", show=False),
+        Binding("g,home", "scroll_home", "Top", show=False),
+        Binding("G,end", "scroll_end", "Bottom", show=False),
+        Binding("pageup,b", "page_up", "Page up", show=False),
+        Binding("pagedown,space,f", "page_down", "Page down", show=False),
     ]
 
     def __init__(
@@ -765,6 +771,42 @@ class KeyboardHelpModal(ModalScreen[None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def _scroll_widget(self) -> VerticalScroll | None:
+        try:
+            return self.query_one("#kh-scroll", VerticalScroll)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def action_scroll_down(self) -> None:
+        widget = self._scroll_widget()
+        if widget is not None:
+            widget.scroll_down(animate=False)
+
+    def action_scroll_up(self) -> None:
+        widget = self._scroll_widget()
+        if widget is not None:
+            widget.scroll_up(animate=False)
+
+    def action_scroll_home(self) -> None:
+        widget = self._scroll_widget()
+        if widget is not None:
+            widget.scroll_home(animate=False)
+
+    def action_scroll_end(self) -> None:
+        widget = self._scroll_widget()
+        if widget is not None:
+            widget.scroll_end(animate=False)
+
+    def action_page_up(self) -> None:
+        widget = self._scroll_widget()
+        if widget is not None:
+            widget.scroll_page_up(animate=False)
+
+    def action_page_down(self) -> None:
+        widget = self._scroll_widget()
+        if widget is not None:
+            widget.scroll_page_down(animate=False)
 
 
 def _open_keyboard_help(app: App) -> None:
