@@ -726,3 +726,111 @@ class TestCliFlowValidate:
         assert f"✗ Flow file {missing} not found." in result.output
         assert "Why: `pm flow validate` reads a YAML file from disk." in result.output
         assert "Fix: pass the path to an existing `.yaml` flow file." in result.output
+
+
+# ---------------------------------------------------------------------------
+# #919 — workspace-DB claims must still spawn per-task workers
+# ---------------------------------------------------------------------------
+
+
+class TestSvcSessionManagerWiring:
+    """``_svc()`` must wire SessionManager when the project is registered.
+
+    The bug (#919): tasks created against the workspace-root state.db
+    for a project whose checkout is a sibling repo would silently skip
+    SessionManager wiring because ``project_root`` was derived from
+    ``db_path.parent.parent`` (the workspace dir, no ``.git``). Claim
+    succeeded as a DB-only no-op — no tmux window, no log dir.
+    """
+
+    def test_svc_uses_configured_project_path_for_session_manager(
+        self, tmp_path, monkeypatch,
+    ):
+        """When project hint resolves to a registered project, the
+        SessionManager must use the *project's* configured path even if
+        the DB lives at a different (workspace-root) location."""
+        from types import SimpleNamespace
+
+        from pollypm.models import KnownProject, ProjectKind
+
+        # Workspace-root DB (the ``.parent.parent`` is workspace, no .git)
+        workspace_root = tmp_path / "workspace"
+        workspace_root.mkdir()
+        workspace_db_dir = workspace_root / ".pollypm"
+        workspace_db_dir.mkdir()
+        workspace_db = workspace_db_dir / "state.db"
+
+        # Project repo with .git, registered under a *different* key shape
+        project_path = tmp_path / "blackjack-trainer"
+        project_path.mkdir()
+        (project_path / ".git").mkdir()
+
+        registered_key = "blackjack_trainer"  # underscore (slugified key)
+        task_id_slug = "blackjack-trainer"  # hyphen (project name in task ids)
+
+        fake_config = SimpleNamespace(
+            projects={
+                registered_key: KnownProject(
+                    key=registered_key,
+                    path=project_path,
+                    name=task_id_slug,
+                    kind=ProjectKind.GIT,
+                ),
+            },
+            project=SimpleNamespace(
+                tmux_session="pollypm",
+                state_db=workspace_db,
+            ),
+            accounts={},
+            pollypm=SimpleNamespace(controller_account=""),
+        )
+
+        monkeypatch.setattr(
+            "pollypm.config.load_config",
+            lambda *args, **kwargs: fake_config,
+        )
+
+        # Capture SessionManager constructor args.
+        captured: dict = {}
+
+        class FakeSessionManager:
+            def __init__(self, *args, **kwargs):
+                captured["kwargs"] = kwargs
+
+            def ensure_worker_session_schema(self):  # pragma: no cover
+                return None
+
+        monkeypatch.setattr(
+            "pollypm.work.session_manager.SessionManager",
+            FakeSessionManager,
+        )
+        monkeypatch.setattr(
+            "pollypm.session_services.create_tmux_client",
+            lambda: object(),
+        )
+
+        # Stub the optional StateStore + TmuxSessionService to avoid
+        # touching real disk / tmux during the test.
+        monkeypatch.setattr(
+            "pollypm.session_services.tmux.TmuxSessionService",
+            lambda **kwargs: object(),
+        )
+        monkeypatch.setattr(
+            "pollypm.storage.state.StateStore",
+            lambda *a, **kw: object(),
+        )
+
+        from pollypm.work.cli import _svc
+
+        svc = _svc(str(workspace_db), project=task_id_slug)
+        try:
+            assert "kwargs" in captured, (
+                "SessionManager was not constructed — _svc() failed to wire "
+                "spawn for a workspace-DB-with-registered-project task. "
+                "This is the regression that left pm task claim a DB-only "
+                "no-op for projects whose state.db lives at the workspace "
+                "root."
+            )
+            assert captured["kwargs"]["project_path"] == project_path
+        finally:
+            svc.close()

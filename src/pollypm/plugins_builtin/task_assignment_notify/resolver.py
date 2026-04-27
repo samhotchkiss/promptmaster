@@ -123,13 +123,17 @@ def load_runtime_services(
 
     # Work service — needed by the sweeper to enumerate queued/review
     # tasks and by the resolver to count in-progress claims for
-    # disambiguation. Best-effort.
+    # disambiguation. Match the CLI's default workspace-root DB
+    # convention instead of deriving from the global config directory.
+    project_root = Path(
+        getattr(config.project, "workspace_root", None) or config.project.root_dir
+    )
     work_service: Any | None
     try:
         from pollypm.work.sqlite_service import SQLiteWorkService
 
-        project_root = config.project.root_dir
         db_path = project_root / ".pollypm" / "state.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         work_service = SQLiteWorkService(db_path=db_path, project_path=project_root)
     except Exception:  # noqa: BLE001
         logger.debug("task_assignment_notify: work service unavailable", exc_info=True)
@@ -144,7 +148,7 @@ def load_runtime_services(
         session_service=session_service,
         state_store=store,
         work_service=work_service,
-        project_root=config.project.root_dir,
+        project_root=project_root,
         config=config,
         storage_closet_name=f"{config.project.tmux_session}-storage-closet",
         known_projects=known_projects,

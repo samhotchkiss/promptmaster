@@ -8268,11 +8268,14 @@ class ProjectDashboardData:
         self.enforce_plan = enforce_plan
 
 
-# Module-level cache keyed by (project_key, db_mtime) so a rapidly-
-# rerendering dashboard doesn't hammer SQLite for the same data. The
-# dashboard refreshes every 10s by default; stale-cache hits are a net
-# win there too.
-_PROJECT_DASHBOARD_TASK_CACHE: dict[str, tuple[float, dict[str, int], dict[str, list[dict]]]] = {}
+# Module-level cache keyed by project plus the task DB paths/mtimes so a
+# rapidly-rerendering dashboard doesn't hammer SQLite for the same data. The
+# dashboard refreshes every 10s by default; stale-cache hits are a net win
+# there too.
+_PROJECT_DASHBOARD_TASK_CACHE: dict[
+    tuple[str, tuple[tuple[str, float], ...]],
+    tuple[dict[str, int], dict[str, list[dict]]],
+] = {}
 
 
 def _dashboard_plain_text(value: object | None) -> str:
@@ -8421,8 +8424,34 @@ def _dashboard_task_blocker_body(task: object) -> str:
     return str(getattr(task, "description", "") or "")
 
 
+def _dashboard_task_db_paths(config: object, project_path: Path) -> list[Path]:
+    """Return task DBs that can hold work for a registered project."""
+    candidates: list[Path] = []
+
+    def _add(path: object) -> None:
+        try:
+            candidate = Path(path)
+        except TypeError:
+            return
+        if candidate not in candidates and candidate.exists():
+            candidates.append(candidate)
+
+    _add(project_path / ".pollypm" / "state.db")
+
+    project_settings = getattr(config, "project", None)
+    workspace_root = getattr(project_settings, "workspace_root", None)
+    if workspace_root is not None:
+        _add(Path(workspace_root) / ".pollypm" / "state.db")
+
+    state_db = getattr(project_settings, "state_db", None)
+    if state_db is not None:
+        _add(state_db)
+
+    return candidates
+
+
 def _dashboard_gather_tasks(
-    project_key: str, project_path: Path,
+    config: object, project_key: str, project_path: Path,
 ) -> tuple[dict[str, int], dict[str, list[dict]]]:
     """Fetch task counts + top-N titles per status bucket for a project.
 
@@ -8431,18 +8460,27 @@ def _dashboard_gather_tasks(
     no new writes. Only small dict views of each task are cached (never
     full ``Task`` objects) to keep the cache footprint bounded.
     """
-    db_path = project_path / ".pollypm" / "state.db"
-    if not db_path.exists():
+    db_paths = _dashboard_task_db_paths(config, project_path)
+    if not db_paths:
         return {}, {}
-    try:
-        db_mtime = db_path.stat().st_mtime
-    except OSError:
-        return {}, {}
-    cached = _PROJECT_DASHBOARD_TASK_CACHE.get(project_key)
-    if cached is not None and cached[0] == db_mtime:
-        return cached[1], cached[2]
 
-    from pollypm.work.sqlite_service import SQLiteWorkService
+    cache_parts: list[tuple[str, float]] = []
+    for db_path in db_paths:
+        try:
+            cache_parts.append((str(db_path), db_path.stat().st_mtime))
+        except OSError:
+            continue
+    if not cache_parts:
+        return {}, {}
+    cache_token = tuple(cache_parts)
+    cached = _PROJECT_DASHBOARD_TASK_CACHE.get((project_key, cache_token))
+    if cached is not None:
+        return cached
+
+    try:
+        from pollypm.work.sqlite_service import SQLiteWorkService
+    except Exception:  # noqa: BLE001
+        return {}, {}
 
     buckets: dict[str, list[dict]] = {
         "queued": [],
@@ -8452,54 +8490,69 @@ def _dashboard_gather_tasks(
         "on_hold": [],
         "done": [],
     }
-    counts: dict[str, int] = {}
-    try:
-        with SQLiteWorkService(db_path=db_path, project_path=project_path) as svc:
-            counts = svc.state_counts(project=project_key)
-            tasks = svc.list_tasks(project=project_key)
-            for t in tasks:
-                status = getattr(t.work_status, "value", "")
-                if status not in buckets:
-                    continue
-                updated_at = getattr(t, "updated_at", "") or ""
-                # Normalise to ISO-8601 string — task.updated_at comes
-                # back as datetime from the work-service hydrator.
-                if hasattr(updated_at, "isoformat"):
-                    updated_at = updated_at.isoformat()
-                blocker_body = _dashboard_task_blocker_body(t)
-                hold_reason = ""
-                if status == "on_hold":
-                    # Surface the most recent on_hold transition's
-                    # reason so the pipeline pane can tell the operator
-                    # *why* a task is paused, not just that it is.
-                    for transition in reversed(getattr(t, "transitions", []) or []):
-                        if getattr(transition, "to_state", "") == "on_hold":
-                            hold_reason = (getattr(transition, "reason", "") or "").strip()
-                            break
-                buckets[status].append(
-                    {
-                        "task_id": t.task_id,
-                        "task_number": getattr(t, "task_number", None),
-                        "title": getattr(t, "title", "") or "(untitled)",
-                        "updated_at": updated_at,
-                        "assignee": getattr(t, "assignee", None),
-                        "current_node_id": getattr(t, "current_node_id", None),
-                        "summary": _dashboard_summary_from_body(blocker_body),
-                        "steps": _dashboard_steps_from_body(blocker_body),
-                        "hold_reason": hold_reason,
-                        "blocked_by": [
-                            f"{proj}/{num}"
-                            for proj, num in getattr(t, "blocked_by", [])
-                        ],
-                    }
-                )
-    except Exception:  # noqa: BLE001
-        return {}, {}
+    task_rows: dict[str, tuple[str, dict]] = {}
+    for db_path in db_paths:
+        try:
+            with SQLiteWorkService(db_path=db_path, project_path=project_path) as svc:
+                tasks = svc.list_tasks(project=project_key)
+        except Exception:  # noqa: BLE001
+            continue
+        for t in tasks:
+            status = getattr(t.work_status, "value", "")
+            if status not in buckets:
+                continue
+            updated_at = getattr(t, "updated_at", "") or ""
+            # Normalise to ISO-8601 string — task.updated_at comes
+            # back as datetime from the work-service hydrator.
+            if hasattr(updated_at, "isoformat"):
+                updated_at = updated_at.isoformat()
+            blocker_body = _dashboard_task_blocker_body(t)
+            hold_reason = ""
+            if status == "on_hold":
+                # Surface the most recent on_hold transition's
+                # reason so the pipeline pane can tell the operator
+                # *why* a task is paused, not just that it is.
+                for transition in reversed(getattr(t, "transitions", []) or []):
+                    if getattr(transition, "to_state", "") == "on_hold":
+                        hold_reason = (getattr(transition, "reason", "") or "").strip()
+                        break
+            row = {
+                "task_id": t.task_id,
+                "task_number": getattr(t, "task_number", None),
+                "title": getattr(t, "title", "") or "(untitled)",
+                "updated_at": updated_at,
+                "assignee": getattr(t, "assignee", None),
+                "current_node_id": getattr(t, "current_node_id", None),
+                "summary": _dashboard_summary_from_body(blocker_body),
+                "steps": _dashboard_steps_from_body(blocker_body),
+                "hold_reason": hold_reason,
+                "blocked_by": [
+                    f"{proj}/{num}"
+                    for proj, num in getattr(t, "blocked_by", [])
+                ],
+                "source_db": str(db_path),
+            }
+            existing = task_rows.get(t.task_id)
+            if (
+                existing is None
+                or str(row["updated_at"] or "")
+                > str(existing[1].get("updated_at") or "")
+            ):
+                task_rows[t.task_id] = (status, row)
+
+    for status, row in task_rows.values():
+        buckets[status].append(row)
+
+    counts = {
+        status: len(items)
+        for status, items in buckets.items()
+        if items
+    }
 
     for status, items in buckets.items():
         items.sort(key=lambda d: d["updated_at"] or "", reverse=True)
 
-    _PROJECT_DASHBOARD_TASK_CACHE[project_key] = (db_mtime, counts, buckets)
+    _PROJECT_DASHBOARD_TASK_CACHE[(project_key, cache_token)] = (counts, buckets)
     return counts, buckets
 
 
@@ -8576,8 +8629,15 @@ def _dashboard_active_worker(
         try:
             from pollypm.cockpit_alerts import is_operational_alert
 
-            project_session_names = {s.name for s in project_sessions}
-            open_alerts = supervisor.store.open_alerts()
+            project_session_names = {
+                s.name for s in project_sessions
+            }
+            project_session_names.add(f"plan_gate-{project_key}")
+            open_alerts_fn = getattr(supervisor, "open_alerts", None)
+            if callable(open_alerts_fn):
+                open_alerts = open_alerts_fn()
+            else:
+                open_alerts = supervisor.store.open_alerts()
             covered_task_ids = {
                 str(item.get("primary_ref"))
                 for item in (action_items or [])
@@ -9731,7 +9791,7 @@ def _gather_project_dashboard(
     )
 
     if exists_on_disk:
-        counts, buckets = _dashboard_gather_tasks(project_key, project_path)
+        counts, buckets = _dashboard_gather_tasks(config, project_key, project_path)
         inbox_count, inbox_top, action_items = _dashboard_inbox(
             config_path, project_key, project_path,
         )

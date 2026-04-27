@@ -2035,10 +2035,27 @@ class Supervisor:
             # itself does not expose ``open_alerts``.
             for alert in self.open_alerts():
                 session_name = alert.session_name
+                alert_type = alert.alert_type or ""
                 # Ephemeral sessions (task-*, critic_*, downtime_*)
                 # are swept elsewhere (see sweep_ephemeral_sessions in
                 # core_recurring). Skip them here so we don't fight.
                 if session_name.startswith(("task_", "critic_", "downtime_")):
+                    continue
+                # #919 — ``no_session`` (and per-task
+                # ``no_session_for_assignment:<id>``) alerts are emitted
+                # by the task_assignment sweep on synthetic session
+                # names that intentionally aren't in the launch plan
+                # (the whole point of the alert is "no session is
+                # running for this role"). The owning sweep clears
+                # them when a real session comes online; this generic
+                # "not in plan → orphan" predicate is too lenient and
+                # produced a false-clean: open on the first sweep,
+                # cleared on the second even though no worker
+                # process exists. Leave them alone.
+                if (
+                    alert_type == "no_session"
+                    or alert_type.startswith("no_session_for_assignment:")
+                ):
                     continue
                 if session_name in tracked:
                     window_name = expected_window.get(session_name)

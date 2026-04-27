@@ -204,6 +204,58 @@ class TestSessionRoleIndexResolve:
         assert handle.name == "worker_demo"
 
 
+def test_load_runtime_services_uses_workspace_root_work_db(tmp_path, monkeypatch) -> None:
+    """The sweeper scans the same workspace-root DB as default task CLI commands."""
+    from types import SimpleNamespace
+
+    from pollypm.plugins_builtin.task_assignment_notify.resolver import (
+        load_runtime_services,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text("[project]\n")
+    config = SimpleNamespace(
+        project=SimpleNamespace(
+            workspace_root=workspace,
+            root_dir=tmp_path / "global-config-dir",
+            state_db=tmp_path / "global-config-dir" / "state.db",
+            tmux_session="pollypm",
+        ),
+        projects={},
+        planner=SimpleNamespace(
+            enforce_plan=True,
+            plan_dir="docs/plan",
+            auto_claim=True,
+            max_concurrent_per_project=2,
+        ),
+    )
+    opened: dict[str, Path] = {}
+
+    class FakeWorkService:
+        def __init__(self, *, db_path: Path, project_path: Path) -> None:
+            opened["db_path"] = db_path
+            opened["project_path"] = project_path
+
+    monkeypatch.setattr("pollypm.config.load_config", lambda _path: config)
+    monkeypatch.setattr("pollypm.storage.state.StateStore", lambda _path: object())
+    monkeypatch.setattr(
+        "pollypm.session_services.tmux.TmuxSessionService",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "pollypm.work.sqlite_service.SQLiteWorkService",
+        FakeWorkService,
+    )
+
+    services = load_runtime_services(config_path=config_path)
+
+    assert opened["db_path"] == workspace / ".pollypm" / "state.db"
+    assert opened["project_path"] == workspace
+    assert services.project_root == workspace
+
+
 # ---------------------------------------------------------------------------
 # Message formatting
 # ---------------------------------------------------------------------------

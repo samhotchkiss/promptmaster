@@ -2444,6 +2444,22 @@ class SQLiteWorkService:
         if project is None:
             return self._project_path
 
+        # A service explicitly scoped to ``/path/to/foo-bar`` should keep
+        # using that path for tasks whose project name is ``foo-bar`` or
+        # ``foo_bar``. Otherwise a global config entry with the same key can
+        # leak into isolated/project-scoped services and send git operations
+        # to the wrong checkout.
+        if self._project_path is not None:
+            bound_name = self._project_path.name
+            normalized_project = project.replace("-", "_")
+            bound_aliases = {
+                bound_name,
+                bound_name.replace("-", "_"),
+                bound_name.replace("_", "-"),
+            }
+            if project in bound_aliases or normalized_project in bound_aliases:
+                return self._project_path
+
         # Try the pollypm config for a matching project name.
         try:
             from pollypm.config import load_config

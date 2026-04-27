@@ -673,6 +673,8 @@ def _auto_claim_next(
     work: Any,
     project: Any,
     totals: dict[str, Any],
+    *,
+    plan_missing_projects: set[str] | None = None,
 ) -> None:
     """Claim the next queued worker-role task if capacity allows.
 
@@ -687,16 +689,6 @@ def _auto_claim_next(
     project_path = getattr(project, "path", None)
     if project_path is None:
         return
-    # Gate: plan must be approved before we can claim for the project.
-    try:
-        if not has_acceptable_plan(
-            project_key, Path(project_path), work,
-            plan_dir=getattr(services, "plan_dir", "docs/plan"),
-        ):
-            return
-    except Exception:  # noqa: BLE001
-        return
-
     # Capacity check. We count active worker-role tasks rather than
     # tmux ``worker_sessions`` rows because the DB claim is the
     # authoritative signal: a claim without a spawned session is still
@@ -726,7 +718,6 @@ def _auto_claim_next(
     candidates = [
         task for task in queued
         if "worker" in (getattr(task, "roles", {}) or {})
-        and not task_bypasses_plan_gate(task)
     ]
     if not candidates:
         return
@@ -736,6 +727,35 @@ def _auto_claim_next(
     task_id = getattr(target, "task_id", None)
     if not task_id:
         return
+
+    # Gate: plan must be approved before we can claim for the project.
+    # Run this after finding a real queued candidate so a closed gate
+    # produces an actionable alert tied to the blocked task instead of a
+    # silent no-op in the auto-claim path.
+    global_enforce = bool(getattr(services, "enforce_plan", True))
+    project_enforce = getattr(project, "enforce_plan", None)
+    enforce_plan = (
+        project_enforce if project_enforce is not None else global_enforce
+    )
+    if enforce_plan and not task_bypasses_plan_gate(target):
+        try:
+            if not has_acceptable_plan(
+                project_key, Path(project_path), work,
+                plan_dir=getattr(services, "plan_dir", "docs/plan"),
+            ):
+                totals["by_outcome"]["auto_claim_skipped_plan_missing"] = (
+                    totals["by_outcome"].get("auto_claim_skipped_plan_missing", 0) + 1
+                )
+                _emit_plan_missing_alert(
+                    services,
+                    project=project_key,
+                    example_task_id=task_id,
+                )
+                if plan_missing_projects is not None:
+                    plan_missing_projects.add(project_key)
+                return
+        except Exception:  # noqa: BLE001
+            return
 
     try:
         work.claim(task_id, "auto_claim_sweep")
@@ -768,6 +788,61 @@ def _auto_claim_next(
             pass
 
 
+def _wire_session_manager(svc: Any, project_root: Path, services: Any) -> None:
+    """Best-effort session-manager wiring for a project-scoped work service."""
+    try:
+        from pollypm.session_services import create_tmux_client
+        from pollypm.work.session_manager import SessionManager
+
+        if project_root.exists() and (project_root / ".git").exists():
+            session_mgr = SessionManager(
+                tmux_client=create_tmux_client(),
+                work_service=svc,
+                project_path=project_root,
+                config=getattr(services, "config", None),
+                session_service=getattr(services, "session_service", None),
+                storage_closet_name=getattr(
+                    services,
+                    "storage_closet_name",
+                    "pollypm-storage-closet",
+                ),
+            )
+            svc.set_session_manager(session_mgr)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: failed to wire session manager for %s",
+            project_root,
+            exc_info=True,
+        )
+
+
+def _open_workspace_project_work_service(project: Any, services: Any) -> Any | None:
+    """Open the workspace-root DB with a project-specific runtime context."""
+    project_path = getattr(project, "path", None)
+    if project_path is None:
+        return None
+    db_path = (
+        Path(getattr(services, "project_root", Path.cwd()))
+        / ".pollypm"
+        / "state.db"
+    )
+    if not db_path.exists():
+        return None
+    try:
+        from pollypm.work.sqlite_service import SQLiteWorkService
+
+        project_root = Path(project_path)
+        svc = SQLiteWorkService(db_path=db_path, project_path=project_root)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: failed to open workspace DB at %s",
+            db_path, exc_info=True,
+        )
+        return None
+    _wire_session_manager(svc, project_root, services)
+    return svc
+
+
 def _open_project_work_service(project: Any, services: Any) -> Any | None:
     """Open a per-project ``SQLiteWorkService`` if its state.db exists.
 
@@ -793,31 +868,7 @@ def _open_project_work_service(project: Any, services: Any) -> Any | None:
         )
         return None
 
-    try:
-        from pollypm.session_services import create_tmux_client
-        from pollypm.work.session_manager import SessionManager
-
-        project_root = Path(project_path)
-        if project_root.exists() and (project_root / ".git").exists():
-            session_mgr = SessionManager(
-                tmux_client=create_tmux_client(),
-                work_service=svc,
-                project_path=project_root,
-                config=getattr(services, "config", None),
-                session_service=getattr(services, "session_service", None),
-                storage_closet_name=getattr(
-                    services,
-                    "storage_closet_name",
-                    "pollypm-storage-closet",
-                ),
-            )
-            svc.set_session_manager(session_mgr)
-    except Exception:  # noqa: BLE001
-        logger.debug(
-            "task_assignment sweep: failed to wire session manager for %s",
-            db_path,
-            exc_info=True,
-        )
+    _wire_session_manager(svc, Path(project_path), services)
     return svc
 
 
@@ -897,6 +948,30 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
         # observability / existing callers.
         return {"outcome": "skipped", "reason": "no_work_service"}
 
+    # Workspace-root task DBs can contain tasks for any registered
+    # project. Reopen that same DB once per project with the project's
+    # filesystem path and session manager before auto-claiming; a generic
+    # workspace-root work service cannot provision a project-scoped worker.
+    for project in services.known_projects:
+        if not _auto_claim_enabled_for_project(services, project):
+            continue
+        workspace_project_work = _open_workspace_project_work_service(
+            project, services,
+        )
+        if workspace_project_work is None:
+            continue
+        try:
+            _recover_dead_claims(services, workspace_project_work, project, totals)
+            _auto_claim_next(
+                services,
+                workspace_project_work,
+                project,
+                totals,
+                plan_missing_projects=plan_missing_projects,
+            )
+        finally:
+            _close_quietly(workspace_project_work)
+
     # Pass 2: per-project DBs. Each gets its own connection, opened and
     # closed within the sweep tick so we don't pile up file handles
     # when many projects are registered.
@@ -905,7 +980,7 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
         project_work = _open_project_work_service(project, services)
         if project_work is None:
             projects_skipped += 1
-            if project_key:
+            if project_key and project_key not in plan_missing_projects:
                 _clear_plan_missing_alert(services, project=project_key)
             continue
         try:
@@ -933,7 +1008,13 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
                     totals=totals,
                 )
             if _auto_claim_enabled_for_project(services, project):
-                _auto_claim_next(services, project_work, project, totals)
+                _auto_claim_next(
+                    services,
+                    project_work,
+                    project,
+                    totals,
+                    plan_missing_projects=plan_missing_projects,
+                )
             if project_key and project_key not in plan_missing_projects:
                 _clear_plan_missing_alert(services, project=project_key)
             projects_scanned += 1

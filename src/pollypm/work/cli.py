@@ -182,7 +182,47 @@ def _svc(db: str, project: str | None = None) -> SQLiteWorkService:
 
     db_path = _resolve_db_path(db, project=project)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    project_root = db_path.parent.parent
+    db_derived_root = db_path.parent.parent
+
+    # #919 — when a registered ``project`` hint is supplied, prefer the
+    # project's *configured* filesystem path as ``project_root`` rather
+    # than the DB-derived parent. This matters when the task lives in
+    # the workspace-root state.db (``<workspace>/.pollypm/state.db``) but
+    # the project itself is checked out at ``<workspace>/<repo>/`` —
+    # ``db.parent.parent`` would resolve to the workspace dir (no
+    # ``.git``), which silently disables session-manager wiring and
+    # makes ``pm task claim`` a DB-only no-op (no tmux window spawned,
+    # no log dir created). The TOML key uses ``slugify_project_key``
+    # form (``blackjack_trainer``) while task IDs use the project's
+    # display slug (``blackjack-trainer``); look up via both.
+    project_root = db_derived_root
+    config_obj: object | None = None
+    if project:
+        try:
+            from pollypm.config import load_config
+            from pollypm.projects import slugify_project_key
+
+            config_obj = load_config()
+            known = getattr(config_obj, "projects", {}) or {}
+            project_cfg = known.get(project)
+            if project_cfg is None:
+                project_cfg = known.get(slugify_project_key(project))
+            if project_cfg is None:
+                # Fall back to a name-match scan so display-name task
+                # IDs still resolve (e.g. ``foo-bar`` task IDs whose
+                # config name is also ``foo-bar`` but whose key is
+                # ``foo_bar_2``).
+                for cfg in known.values():
+                    if getattr(cfg, "name", None) == project:
+                        project_cfg = cfg
+                        break
+            if project_cfg is not None:
+                cfg_path = getattr(project_cfg, "path", None)
+                if cfg_path is not None:
+                    project_root = Path(cfg_path)
+        except Exception:  # noqa: BLE001
+            config_obj = None
+
     sync = SyncManager()
     sync.register(FileSyncAdapter(issues_root=project_root / "issues"))
 
@@ -199,14 +239,15 @@ def _svc(db: str, project: str | None = None) -> SQLiteWorkService:
             # workers pick up stabilization, initial_input handling, and
             # storage-closet naming from config. Fall back to a raw
             # TmuxClient if config/plugin resolution fails.
-            config = None
+            config = config_obj
             session_service = None
             storage_closet_name = "pollypm-storage-closet"
             try:
-                from pollypm.config import load_config
                 from pollypm.session_services.tmux import TmuxSessionService
                 from pollypm.storage.state import StateStore
-                config = load_config()
+                if config is None:
+                    from pollypm.config import load_config
+                    config = load_config()
                 storage_closet_name = (
                     f"{config.project.tmux_session}-storage-closet"
                 )

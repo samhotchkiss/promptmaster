@@ -659,6 +659,26 @@ class TestOwnerDerivation:
 
 
 class TestAvailableFlowsProjectArg:
+    def test_resolve_project_path_prefers_matching_bound_path(
+        self, tmp_path, monkeypatch,
+    ):
+        """Project-scoped services should not leak through global config."""
+        from types import SimpleNamespace
+
+        bound = tmp_path / "shortlink-gen"
+        configured = tmp_path / "configured-shortlink"
+        bound.mkdir()
+        configured.mkdir()
+        svc = SQLiteWorkService(db_path=tmp_path / "svc.db", project_path=bound)
+        monkeypatch.setattr(
+            "pollypm.config.load_config",
+            lambda: SimpleNamespace(
+                projects={"shortlink_gen": SimpleNamespace(path=configured)}
+            ),
+        )
+
+        assert svc._resolve_project_path("shortlink-gen") == bound
+
     def test_available_flows_uses_project_path_arg(self, tmp_path):
         """Passing project= to available_flows should pick up that project's
         project-local flows, not only the constructor-bound project (#146)."""

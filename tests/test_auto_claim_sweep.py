@@ -24,6 +24,7 @@ from pollypm.plugins_builtin.task_assignment_notify.handlers.sweep import (
     _auto_claim_enabled_for_project,
     _auto_claim_next,
     _max_concurrent_for_project,
+    _open_workspace_project_work_service,
     _open_project_work_service,
     _recover_dead_claims,
 )
@@ -170,6 +171,188 @@ def test_open_project_work_service_wires_session_manager(tmp_path: Path, monkeyp
             svc.close()
 
 
+def test_open_workspace_project_work_service_wires_project_session_manager(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Workspace DB claims must still provision workers in the target project."""
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    workspace_db = workspace_root / ".pollypm" / "state.db"
+    workspace_db.parent.mkdir(parents=True, exist_ok=True)
+    seed = SQLiteWorkService(db_path=workspace_db, project_path=workspace_root)
+    seed.close()
+
+    project_path = tmp_path / "proj"
+    project_path.mkdir()
+    (project_path / ".git").mkdir()
+    wired: dict[str, object] = {}
+
+    class DummySessionManager:
+        def __init__(self, *args, **kwargs) -> None:
+            wired["args"] = args
+            wired["kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        "pollypm.session_services.create_tmux_client",
+        lambda: "tmux-client",
+    )
+    monkeypatch.setattr(
+        "pollypm.work.session_manager.SessionManager",
+        DummySessionManager,
+    )
+
+    services = _svc_defaults(
+        project_root=workspace_root,
+        session_service=object(),
+        config=SimpleNamespace(project=SimpleNamespace(tmux_session="pollypm")),
+        storage_closet_name="pollypm-storage-closet",
+    )
+    project = _FakeProject(key="proj", path=project_path)
+
+    svc = _open_workspace_project_work_service(project, services)
+    try:
+        assert svc is not None
+        assert type(getattr(svc, "_session_mgr", None)).__name__ == "DummySessionManager"
+        assert wired["kwargs"]["project_path"] == project_path
+        assert wired["kwargs"]["storage_closet_name"] == "pollypm-storage-closet"
+        assert wired["kwargs"]["session_service"] is services.session_service
+    finally:
+        if svc is not None:
+            svc.close()
+
+
+def test_sweep_runs_auto_claim_against_workspace_root_db(monkeypatch, tmp_path: Path) -> None:
+    """Workspace-root tasks need the same auto-claim pass as per-project DBs."""
+    from pollypm.plugins_builtin.task_assignment_notify.handlers import sweep as sweep_mod
+
+    class WorkspaceWork:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def list_tasks(self, *args, **kwargs) -> list[object]:
+            return []
+
+        def close(self) -> None:
+            self.closed = True
+
+    sweep_work = WorkspaceWork()
+    claim_work = WorkspaceWork()
+    project = _FakeProject(key="proj", path=tmp_path / "proj")
+    calls: list[tuple[object, object]] = []
+    services = _svc_defaults(
+        work_service=sweep_work,
+        known_projects=(project,),
+        auto_claim=True,
+    )
+
+    monkeypatch.setattr(
+        sweep_mod,
+        "load_runtime_services",
+        lambda config_path=None: services,
+    )
+    monkeypatch.setattr(
+        sweep_mod,
+        "_open_workspace_project_work_service",
+        lambda claim_project, _services: (
+            claim_work if claim_project is project else None
+        ),
+    )
+    monkeypatch.setattr(
+        sweep_mod,
+        "_recover_dead_claims",
+        lambda _services, _work, _project, _totals: None,
+    )
+    monkeypatch.setattr(
+        sweep_mod,
+        "_auto_claim_next",
+        lambda _services, claim_work, claim_project, _totals, **_kw: calls.append(
+            (claim_work, claim_project)
+        ),
+    )
+
+    result = sweep_mod.task_assignment_sweep_handler({})
+
+    assert result["outcome"] == "swept"
+    assert calls == [(claim_work, project)]
+    assert sweep_work.closed is True
+    assert claim_work.closed is True
+
+
+def test_workspace_plan_missing_survives_missing_project_db(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """Workspace-root plan gates must not be cleared by the per-project pass."""
+    from pollypm.plugins_builtin.task_assignment_notify.handlers import sweep as sweep_mod
+
+    class WorkspaceWork:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def list_tasks(self, *args, **kwargs) -> list[object]:
+            return []
+
+        def close(self) -> None:
+            self.closed = True
+
+    sweep_work = WorkspaceWork()
+    claim_work = WorkspaceWork()
+    project = _FakeProject(key="proj", path=tmp_path / "proj")
+    services = _svc_defaults(
+        work_service=sweep_work,
+        known_projects=(project,),
+        auto_claim=True,
+    )
+    cleared: list[str] = []
+
+    def fake_auto_claim(
+        _services,
+        _work,
+        claim_project,
+        _totals,
+        *,
+        plan_missing_projects=None,
+    ) -> None:
+        assert claim_project is project
+        assert plan_missing_projects is not None
+        plan_missing_projects.add("proj")
+
+    monkeypatch.setattr(
+        sweep_mod,
+        "load_runtime_services",
+        lambda config_path=None: services,
+    )
+    monkeypatch.setattr(
+        sweep_mod,
+        "_open_workspace_project_work_service",
+        lambda claim_project, _services: (
+            claim_work if claim_project is project else None
+        ),
+    )
+    monkeypatch.setattr(
+        sweep_mod,
+        "_open_project_work_service",
+        lambda _project, _services: None,
+    )
+    monkeypatch.setattr(
+        sweep_mod,
+        "_recover_dead_claims",
+        lambda _services, _work, _project, _totals: None,
+    )
+    monkeypatch.setattr(sweep_mod, "_auto_claim_next", fake_auto_claim)
+    monkeypatch.setattr(
+        sweep_mod,
+        "_clear_plan_missing_alert",
+        lambda _services, project: cleared.append(project),
+    )
+
+    result = sweep_mod.task_assignment_sweep_handler({})
+
+    assert result["plan_missing_alerts"] == 1
+    assert cleared == []
+    assert sweep_work.closed is True
+    assert claim_work.closed is True
+
+
 # ---------------------------------------------------------------------------
 # Full auto-claim integration against a real work service
 # ---------------------------------------------------------------------------
@@ -236,6 +419,7 @@ def _seed_queued_worker_task(
     *,
     title: str = "Work item",
     link_to_plan: bool = True,
+    labels: list[str] | None = None,
 ) -> str:
     """Create a queued worker-role task. When ``link_to_plan=True``, link
     it as a child of the approved plan_project task so the staleness
@@ -252,6 +436,7 @@ def _seed_queued_worker_task(
             flow_template="standard",
             roles={"worker": "worker", "reviewer": "reviewer"},
             priority="normal",
+            labels=labels,
         )
         svc.queue(task.task_id, "test")
         if link_to_plan:
@@ -308,6 +493,32 @@ def test_auto_claim_claims_next_queued_task_when_capacity_available(tmp_path: Pa
         assert totals["by_outcome"].get("auto_claim_spawned", 0) == 1
         task = work.get(task_id)
         assert task.work_status == WorkStatus.IN_PROGRESS
+    finally:
+        work.close()
+
+
+def test_auto_claim_honors_bypass_plan_gate_label(tmp_path: Path) -> None:
+    """Explicit operator bypasses must not be filtered out before claim."""
+    project_path = tmp_path / "proj"
+    project_path.mkdir()
+    task_id = _seed_queued_worker_task(
+        project_path,
+        "proj",
+        link_to_plan=False,
+        labels=["bypass_plan_gate"],
+    )
+
+    db_path = project_path / ".pollypm" / "state.db"
+    work = SQLiteWorkService(db_path=db_path, project_path=project_path)
+    try:
+        svc = _svc_defaults()
+        totals = {"considered": 0, "by_outcome": {}}
+        _auto_claim_next(
+            svc, work, _FakeProject(key="proj", path=project_path), totals,
+        )
+        assert totals["by_outcome"].get("auto_claim_spawned", 0) == 1
+        assert totals["by_outcome"].get("auto_claim_skipped_plan_missing", 0) == 0
+        assert work.get(task_id).work_status == WorkStatus.IN_PROGRESS
     finally:
         work.close()
 
@@ -383,8 +594,16 @@ def test_auto_claim_skips_when_plan_gate_closed(tmp_path: Path) -> None:
     try:
         svc = _svc_defaults()
         totals = {"considered": 0, "by_outcome": {}}
-        _auto_claim_next(svc, work, _FakeProject(key="proj", path=project_path), totals)
+        plan_missing_projects: set[str] = set()
+        _auto_claim_next(
+            svc,
+            work,
+            _FakeProject(key="proj", path=project_path),
+            totals,
+            plan_missing_projects=plan_missing_projects,
+        )
         assert "auto_claim_spawned" not in totals["by_outcome"]
+        assert plan_missing_projects == {"proj"}
         assert work.get(task_id).work_status == WorkStatus.QUEUED
     finally:
         work.close()

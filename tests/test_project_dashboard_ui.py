@@ -218,6 +218,41 @@ def dashboard_app(dashboard_env):
     )
 
 
+def test_dashboard_reads_workspace_root_tasks_when_project_db_missing(tmp_path: Path) -> None:
+    """Tasks created through the default CLI DB still appear on the project dashboard."""
+    project_path = tmp_path / "demo"
+    project_path.mkdir()
+    config_path = tmp_path / "pollypm.toml"
+    _write_config(project_path, config_path)
+
+    workspace_db = tmp_path / ".pollypm" / "state.db"
+    workspace_db.parent.mkdir(parents=True, exist_ok=True)
+    with SQLiteWorkService(db_path=workspace_db, project_path=tmp_path) as svc:
+        task = svc.create(
+            title="Workspace queued task",
+            description="Created from the workspace-root task DB.",
+            type="task",
+            project="demo",
+            flow_template="standard",
+            roles={"worker": "worker", "reviewer": "reviewer"},
+            priority="normal",
+            created_by="polly",
+        )
+        svc.queue(task.task_id, "polly")
+
+    from pollypm import cockpit_ui as _cockpit_ui
+    from pollypm.cockpit_ui import _gather_project_dashboard
+
+    _cockpit_ui._PROJECT_DASHBOARD_TASK_CACHE.clear()
+    data = _gather_project_dashboard(config_path, "demo")
+
+    assert data is not None
+    assert data.task_counts.get("queued") == 1
+    assert [row["title"] for row in data.task_buckets.get("queued", [])] == [
+        "Workspace queued task"
+    ]
+
+
 def _run(coro) -> None:
     asyncio.run(coro)
 
@@ -350,6 +385,46 @@ def test_status_idle_when_nothing_active(
             assert dashboard_app.data.active_worker is None
             assert dashboard_app.data.status_label == "idle"
     _run(body())
+
+
+def test_plan_gate_alert_counts_as_project_attention(
+    dashboard_env, monkeypatch,
+) -> None:
+    """Synthetic plan_gate alerts should make the project dashboard yellow."""
+    from types import SimpleNamespace
+
+    from pollypm.cockpit_ui import _dashboard_active_worker
+
+    class FakeStore:
+        def open_alerts(self) -> list[object]:
+            return [
+                SimpleNamespace(
+                    session_name="plan_gate-demo",
+                    alert_type="plan_missing",
+                )
+            ]
+
+    class FakeSupervisor:
+        store = FakeStore()
+
+        def plan_launches(self) -> list[object]:
+            return []
+
+    class FakeService:
+        def __init__(self, _config_path: Path) -> None:
+            pass
+
+        def load_supervisor(self) -> FakeSupervisor:
+            return FakeSupervisor()
+
+    monkeypatch.setattr("pollypm.service_api.PollyPMService", FakeService)
+
+    worker, alert_count = _dashboard_active_worker(
+        dashboard_env["config_path"], "demo",
+    )
+
+    assert worker is None
+    assert alert_count == 1
 
 
 def test_status_yellow_when_task_is_on_hold(
