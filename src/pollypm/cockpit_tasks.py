@@ -859,6 +859,7 @@ class PollyTasksApp(App[None]):
         Binding("r", "refresh", "Refresh"),
         Binding("a", "approve_task", "Approve"),
         Binding("x", "reject_task", "Reject"),
+        Binding("c", "clear_filters", "Clear Filters", show=False),
         Binding("space", "toggle_task_selection", "Select", show=False),
         Binding("A", "bulk_approve_selected", "Approve Selected", show=False),
         Binding("X", "bulk_reject_selected", "Reject Selected", show=False),
@@ -1457,9 +1458,9 @@ class PollyTasksApp(App[None]):
         self.status.update(
             f"Filter: {_FILTER_LABELS.get(self._status_filter, self._status_filter)}"
             + (
-                f"  ·  Search: {self._search_query}"
+                f"  ·  Search: {self._search_query} · c clear"
                 if self._search_query.strip()
-                else "  ·  / search · space select · a approve · x reject"
+                else "  ·  / search · c clear · space select · a approve · x reject"
             )
         )
         self._sync_filter_chips()
@@ -1836,17 +1837,35 @@ class PollyTasksApp(App[None]):
         self.search_input.focus()
         self.search_input.cursor_position = len(self.search_input.value)
 
+    def _has_search_filter(self) -> bool:
+        return bool((self._search_query or "").strip() or self.search_input.value)
+
+    def _clear_search_filter(self, *, focus_search: bool = False) -> None:
+        self._search_query = ""
+        self.search_input.value = ""
+        self._render_table(select_first=True)
+        if focus_search:
+            self.action_focus_search()
+
     def action_back(self) -> None:
         if self.search_input.has_focus:
             if self.search_input.value:
-                self.search_input.value = ""
-                self._search_query = ""
-                self._render_table(select_first=True)
-                self.search_input.focus()
+                self._clear_search_filter(focus_search=True)
                 return
             self.task_table.focus()
             return
+        if self._has_search_filter():
+            self._clear_search_filter(focus_search=True)
+            return
         self.exit()
+
+    def action_clear_filters(self) -> None:
+        self._status_filter = "all"
+        self._search_query = ""
+        self.search_input.value = ""
+        self._sync_filter_buttons()
+        self._render_table(select_first=True)
+        self.task_table.focus()
 
     def action_refresh(self) -> None:
         self._refresh_list(select_first=False)
@@ -2083,6 +2102,9 @@ class PollyTasksApp(App[None]):
     def action_approve_task(self) -> None:
         if isinstance(getattr(self, "focused", None), Input):
             return
+        if self._has_search_filter():
+            self.action_focus_search()
+            return
         if not self._selected_task_id:
             return
         self._review_task(self._selected_task_id, decision="approve")
@@ -2129,6 +2151,9 @@ class PollyTasksApp(App[None]):
 
     def action_reject_task(self) -> None:
         if isinstance(getattr(self, "focused", None), Input):
+            return
+        if self._has_search_filter():
+            self.action_focus_search()
             return
         if not self._selected_task_id:
             return
@@ -2216,17 +2241,11 @@ class PollyTasksApp(App[None]):
 
     @on(Button.Pressed, "#tasks-chip-search")
     def _on_press_search_chip(self) -> None:
-        self._search_query = ""
-        self.search_input.value = ""
-        self._render_table(select_first=True)
+        self._clear_search_filter()
 
     @on(Button.Pressed, "#tasks-chip-clear-all")
     def _on_press_clear_all_chips(self) -> None:
-        self._status_filter = "all"
-        self._search_query = ""
-        self.search_input.value = ""
-        self._sync_filter_buttons()
-        self._render_table(select_first=True)
+        self.action_clear_filters()
 
     @on(Button.Pressed, "#task-approve")
     def _on_press_approve(self) -> None:
@@ -2271,6 +2290,12 @@ class PollyTasksApp(App[None]):
         self.action_refresh_live()
 
     def on_key(self, event: events.Key) -> None:
+        if not isinstance(getattr(self, "focused", None), Input):
+            if self._has_search_filter() and event.key in {"backspace", "ctrl+u"}:
+                event.stop()
+                event.prevent_default()
+                self._clear_search_filter(focus_search=True)
+                return
         self._review_nav_prefix = self._handle_review_diff_key(event)
         modal = self._active_reject_modal
         if modal is None:

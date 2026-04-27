@@ -396,6 +396,64 @@ def test_task_search_keeps_focus_and_suppresses_review_shortcuts(
     _run(body())
 
 
+def test_task_active_search_filter_blocks_review_shortcuts_when_table_focused(
+    env, monkeypatch,
+) -> None:
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    review_task = _task(
+        node_id="critic_panel",
+        title="Review xylophone",
+        status=WorkStatus.REVIEW,
+    )
+    fake_svc = _FakeSvc(tasks_factory=lambda: [review_task], flow=_flow())
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            app._search_query = "q"
+            app.search_input.value = "q"
+            app._render_table(select_first=True)
+            app.task_table.focus()
+            await pilot.pause()
+
+            await pilot.press("x")
+            await pilot.pause()
+            assert app._active_reject_modal is None
+            assert fake_svc.reject_calls == []
+            assert app.search_input.has_focus
+            assert app.search_input.value == "q"
+
+            app.task_table.focus()
+            await pilot.press("backspace")
+            await pilot.pause()
+            assert app.search_input.has_focus
+            assert app.search_input.value == ""
+            assert app._search_query == ""
+
+            app._status_filter = "review"
+            app._search_query = "q"
+            app.search_input.value = "q"
+            app._sync_filter_buttons()
+            app._render_table(select_first=True)
+            app.task_table.focus()
+            await pilot.press("c")
+            await pilot.pause()
+            assert app._status_filter == "all"
+            assert app.search_input.value == ""
+            assert app._search_query == ""
+            assert fake_svc.approve_calls == []
+
+    _run(body())
+
+
 def test_plan_review_task_surfaces_plan_artifact_and_selects_review_tab(
     env, monkeypatch,
 ) -> None:
