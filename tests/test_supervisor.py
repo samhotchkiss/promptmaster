@@ -1495,3 +1495,29 @@ def test_send_initial_input_skips_unknown_role(monkeypatch, tmp_path: Path) -> N
     # Marker is NOT consumed when role gate rejects.
     assert marker_before is True
     assert launch.fresh_launch_marker.exists()
+
+
+def test_start_cockpit_tui_respawns_rail_pane_with_restart_loop(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    panes = [
+        type("Pane", (), {"pane_id": "%right", "pane_left": 42})(),
+        type("Pane", (), {"pane_id": "%left", "pane_left": 0})(),
+    ]
+    respawns: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(supervisor.session_service.tmux, "list_panes", lambda target: panes)
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "respawn_pane",
+        lambda target, command: respawns.append((target, command)),
+    )
+
+    supervisor.start_cockpit_tui("pollypm")
+
+    assert len(respawns) == 1
+    target, command = respawns[0]
+    assert target == "%left"
+    assert command.startswith("while true; do ")
+    assert "pm cockpit" in command
+    assert "[Rail exited" in command

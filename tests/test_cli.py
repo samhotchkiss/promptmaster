@@ -256,6 +256,50 @@ def test_up_ensures_heartbeat_schedule_for_existing_session(monkeypatch, tmp_pat
     assert "Already inside tmux session pollypm" in result.output
 
 
+def test_up_switches_current_tmux_client_to_polly_session(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text("[project]\nname = \"pollypm\"\n")
+    calls: list[object] = []
+
+    class FakeTmux:
+        def has_session(self, name: str) -> bool:
+            return name == "pollypm"
+
+        def current_session_name(self):
+            return "scratch"
+
+        def switch_client(self, name: str) -> int:
+            calls.append(("switch", name))
+            return 0
+
+    class FakeSupervisor:
+        def __init__(self) -> None:
+            self.tmux = FakeTmux()
+            self.config = type("Config", (), {"project": type("Project", (), {"tmux_session": "pollypm"})()})()
+
+        def ensure_layout(self) -> None:
+            return None
+
+        def ensure_console_window(self) -> None:
+            calls.append("console")
+
+        def ensure_heartbeat_schedule(self) -> None:
+            calls.append("heartbeat")
+
+        def focus_console(self) -> None:
+            calls.append("focus")
+
+    monkeypatch.setattr(cli, "_load_supervisor", lambda path: FakeSupervisor())
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["up", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert calls == ["console", "heartbeat", "focus", ("switch", "pollypm")]
+    assert "Switching to tmux session pollypm" in result.output
+    assert "tmux switch-client" not in result.output
+
+
 def test_require_pollypm_session_allows_storage_closet() -> None:
     class FakeTmux:
         def current_session_name(self):

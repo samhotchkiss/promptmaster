@@ -2580,7 +2580,7 @@ class Supervisor:
             f"while true; do {cockpit_cmd}; "
             f'echo "[Rail exited — restarting in 2s]"; sleep 2; done'
         )
-        self.session_service.tmux.send_keys(rail_pane.pane_id, loop_cmd)
+        self.session_service.tmux.respawn_pane(rail_pane.pane_id, loop_cmd)
 
     def _controller_candidates(self) -> list[str]:
         ordered = [self.config.pollypm.controller_account, *self.config.pollypm.failover_accounts]
