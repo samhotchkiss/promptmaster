@@ -615,7 +615,7 @@ class KeyboardHelpModal(ModalScreen[None]):
     CSS = """
     KeyboardHelpModal {
         align: center middle;
-        background: rgba(0, 0, 0, 0.45);
+        background: #0f1317;
     }
     #kh-dialog {
         width: 64;
@@ -633,7 +633,7 @@ class KeyboardHelpModal(ModalScreen[None]):
     }
     #kh-scroll {
         height: auto;
-        max-height: 22;
+        max-height: 24;
         background: #141a20;
         border: none;
         margin-top: 1;

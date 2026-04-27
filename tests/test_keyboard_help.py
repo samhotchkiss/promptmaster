@@ -211,6 +211,25 @@ def test_modal_shows_screen_bindings_categorised(single_project_env) -> None:
     _run(body())
 
 
+def test_modal_style_masks_background_and_keeps_nav_pair_visible() -> None:
+    """Help should be opaque and tall enough for the j/k pair labels."""
+    from pollypm.cockpit_ui import KeyboardHelpModal, PollyCockpitApp
+    from pollypm.cockpit_palette import _collect_keybindings_for_screen
+
+    css = KeyboardHelpModal.CSS
+    assert "KeyboardHelpModal" in css
+    assert "background: #0f1317" in css
+    assert "max-height: 24" in css
+
+    modal = KeyboardHelpModal(
+        _collect_keybindings_for_screen(PollyCockpitApp(Path("/tmp/nope"))),
+        screen_title="Cockpit",
+    )
+    lines = modal._render_body().splitlines()
+    key_index = lines.index("  [b]k / \u2191[/b]")
+    assert lines[key_index + 1] == "      [dim]Up[/dim]"
+
+
 # ---------------------------------------------------------------------------
 # 3. Modal shows global bindings.
 # ---------------------------------------------------------------------------
