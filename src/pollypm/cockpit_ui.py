@@ -1671,6 +1671,17 @@ class PollyDashboardApp(App[None]):
     BINDINGS = [
         Binding("i", "jump_inbox", "Inbox"),
         Binding("r", "refresh", "Refresh"),
+        # The screen overflows on a 65-row laptop terminal — Tokens
+        # sits below the fold (#874). The Screen already declares
+        # ``overflow-y: auto`` but Textual does not bind navigation
+        # keys to scrolling without explicit actions, so the scroll
+        # markers showed but no key reached them.
+        Binding("j,down", "scroll_down", "Down", show=False),
+        Binding("k,up", "scroll_up", "Up", show=False),
+        Binding("g,home", "scroll_home", "Top", show=False),
+        Binding("G,end", "scroll_end", "Bottom", show=False),
+        Binding("pageup,b", "page_up", "Page up", show=False),
+        Binding("pagedown,space,f", "page_down", "Page down", show=False),
     ]
     CSS = """
     Screen {
@@ -1960,6 +1971,45 @@ class PollyDashboardApp(App[None]):
             exclusive=True,
             group="polly_dashboard_inbox",
         )
+
+    def _dashboard_screen(self):  # noqa: ANN202 — Textual Screen
+        return self.screen
+
+    def action_scroll_down(self) -> None:
+        try:
+            self._dashboard_screen().scroll_down(animate=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_scroll_up(self) -> None:
+        try:
+            self._dashboard_screen().scroll_up(animate=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_scroll_home(self) -> None:
+        try:
+            self._dashboard_screen().scroll_home(animate=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_scroll_end(self) -> None:
+        try:
+            self._dashboard_screen().scroll_end(animate=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_page_up(self) -> None:
+        try:
+            self._dashboard_screen().scroll_page_up(animate=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_page_down(self) -> None:
+        try:
+            self._dashboard_screen().scroll_page_down(animate=False)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _route_to_inbox_sync(self) -> None:
         try:
