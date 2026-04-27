@@ -526,7 +526,23 @@ class EventProjector:
         # newer work-transitions land *after* older state events in
         # the same second (#791). Normalize before sorting.
         filtered.sort(key=_timestamp_sort_key, reverse=True)
-        return filtered[:limit]
+        # Collapse repeated alerts (#867). The plan_gate sweep emits one
+        # alert per missing-plan project per cycle — once the user has
+        # seen it, repeating it every 30s in the activity feed is
+        # noise that pushes everything else out of view. Dedupe by
+        # (kind, actor, summary) keeps the *newest* occurrence and drops
+        # subsequent older copies. Other event kinds pass through
+        # untouched: only the high-rep alert path is collapsed.
+        deduped: list[FeedEntry] = []
+        seen_alert_keys: set[tuple[str, str, str]] = set()
+        for entry in filtered:
+            if entry.kind == "alert":
+                key = (entry.kind, entry.actor or "", entry.summary or "")
+                if key in seen_alert_keys:
+                    continue
+                seen_alert_keys.add(key)
+            deduped.append(entry)
+        return deduped[:limit]
 
 
 def _timestamp_sort_key(entry: FeedEntry) -> str:

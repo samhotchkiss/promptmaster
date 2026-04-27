@@ -264,6 +264,61 @@ def test_new_event_count_none_projector() -> None:
     assert new_event_count(None, last_seen_id=None) == 0
 
 
+def _seed_alert(
+    state_db: Path, session: str, alert_type: str, message: str,
+) -> None:
+    """Insert one ``type='alert'`` row directly so we can prove the
+    projector dedupes repeats (#867) without relying on upsert semantics."""
+    import json as _json
+
+    from sqlalchemy import insert as _insert
+
+    from pollypm.store import SQLAlchemyStore
+    from pollypm.store.schema import messages as _messages
+
+    msg_store = SQLAlchemyStore(f"sqlite:///{state_db}")
+    try:
+        with msg_store.transaction() as conn:
+            conn.execute(
+                _insert(_messages),
+                {
+                    "scope": session,
+                    "type": "alert",
+                    "tier": "immediate",
+                    "recipient": "user",
+                    "sender": alert_type,
+                    "state": "open",
+                    "subject": message,
+                    "body": "",
+                    "payload_json": _json.dumps({"severity": "warn"}),
+                    "labels": "[]",
+                },
+            )
+    finally:
+        msg_store.close()
+
+
+def test_event_projector_dedupes_repeated_alerts(tmp_path: Path) -> None:
+    """The same plan_gate alert recurring N times collapses to one row (#867)."""
+    state_db = tmp_path / "state.db"
+    StateStore(state_db).close()
+
+    for _ in range(5):
+        _seed_alert(
+            state_db,
+            "plan_gate-demo",
+            "plan_missing",
+            "Project 'demo' has no approved plan yet — press c to plan it.",
+        )
+
+    projector = EventProjector(state_db)
+    entries = projector.project(limit=50)
+    alert_entries = [e for e in entries if e.kind == "alert"]
+    assert len(alert_entries) == 1, (
+        f"expected 1 deduped alert entry, got {len(alert_entries)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rail registration.
 # ---------------------------------------------------------------------------
