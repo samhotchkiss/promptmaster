@@ -245,3 +245,7 @@ def test_surfaceable_operational_alert_taxonomy_keeps_user_action_signals_visibl
     assert is_surfaceable_operational_alert("stuck_on_task:demo/1")
     assert is_surfaceable_operational_alert("no_session_for_assignment:demo/2")
     assert not is_surfaceable_operational_alert("pane:auth_expired")
+    # #879: the supervisor's recovery_limit alert (auto-recovery
+    # paused / stopped) must surface to the user, not be filtered out
+    # as operational noise. Sessions in degraded state need attention.
+    assert is_surfaceable_operational_alert("recovery_limit")

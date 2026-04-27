@@ -34,6 +34,12 @@ from pollypm.config import DEFAULT_CONFIG_PATH
 SURFACEABLE_OPERATIONAL_ALERT_PREFIXES: tuple[str, ...] = (
     "stuck_on_task:",
     "no_session_for_assignment:",
+    # The supervisor's recovery loop emits ``recovery_limit`` when it
+    # has paused or stopped auto-recovery for a session — a real
+    # degradation that needs the user to look. Without this prefix the
+    # alert was filtered out of toasts and only visible in Activity /
+    # Metrics, which let production-ish failures sit unnoticed (#879).
+    "recovery_limit",
 )
 
 
