@@ -118,7 +118,8 @@ def test_handler_dedupes_repeated_desktop_notifications() -> None:
     ]
 
 
-def test_install_adds_notification_handler_once(tmp_path: Path) -> None:
+def test_install_adds_notification_handler_once(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("POLLYPM_DISABLE_ERROR_NOTIFICATIONS", raising=False)
     root = logging.getLogger()
     old_handlers = list(root.handlers)
     old_level = root.level
@@ -136,6 +137,31 @@ def test_install_adds_notification_handler_once(tmp_path: Path) -> None:
             for handler in root.handlers
             if getattr(handler, "_pollypm_error_notification_handler", False)
         ) == 1
+    finally:
+        for handler in list(root.handlers):
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001
+                pass
+        root.handlers = old_handlers
+        root.setLevel(old_level)
+
+
+def test_install_can_disable_durable_error_notifications(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("POLLYPM_DISABLE_ERROR_NOTIFICATIONS", "1")
+    root = logging.getLogger()
+    old_handlers = list(root.handlers)
+    old_level = root.level
+    try:
+        root.handlers = []
+        install(process_label="test", path=tmp_path / "errors.log")
+        assert not any(
+            getattr(handler, "_pollypm_error_notification_handler", False)
+            for handler in root.handlers
+        )
     finally:
         for handler in list(root.handlers):
             try:

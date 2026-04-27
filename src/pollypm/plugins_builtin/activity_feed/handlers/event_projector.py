@@ -154,8 +154,27 @@ _NOOP_MESSAGES: frozenset[str] = frozenset(
     }
 )
 
+_HISTORIC_FIXTURE_ERROR_SUBSTRINGS: frozenset[str] = frozenset(
+    {
+        "github sync: failed to create issue for proj/1: gh not found",
+        "heartbeatrail tick failed; continuing",
+        "plugin bad register_roster hook failed: plugin exploded",
+        "rail item workflows.activity badge_provider raised",
+        "rail item workflows.activity visibility predicate raised",
+        "session listener '_boom' raised for x",
+        "sync adapter boomer failed on create for proj/1",
+        "sync adapter failing failed on create for proj/1",
+    }
+)
 
-def _is_noise(kind: str, summary: str, payload: dict[str, Any]) -> bool:
+
+def _is_noise(
+    kind: str,
+    summary: str,
+    payload: dict[str, Any],
+    *,
+    actor: str | None = None,
+) -> bool:
     """Return True when this row should be filtered out of the feed.
 
     Per spec §2: ticks with no decision and health polls with no change
@@ -169,7 +188,32 @@ def _is_noise(kind: str, summary: str, payload: dict[str, Any]) -> bool:
         return True
     if kind == "heartbeat" and summary in _NOOP_MESSAGES:
         return True
+    if _is_historic_fixture_error(kind=kind, actor=actor, summary=summary):
+        return True
     return False
+
+
+def _is_historic_fixture_error(
+    *,
+    kind: str,
+    actor: str | None,
+    summary: str,
+) -> bool:
+    """Hide fixture alerts emitted before tests disabled durable alert writes."""
+    if kind != "alert" or actor != "error_log":
+        return False
+    normalized = _normalize_fixture_text(summary)
+    return any(
+        marker in normalized
+        for marker in _HISTORIC_FIXTURE_ERROR_SUBSTRINGS
+    )
+
+
+def _normalize_fixture_text(text: str) -> str:
+    normalized = (text or "").strip().lower()
+    if normalized.startswith("[alert]"):
+        normalized = normalized[len("[alert]"):].strip()
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +380,7 @@ class EventProjector:
             subject = parsed.subject or (row.get("sender") or None)
             if parsed.extra:
                 payload = {**payload, **parsed.extra}
-            if _is_noise(kind, message, payload):
+            if _is_noise(kind, summary, payload, actor=actor):
                 continue
             entries.append(
                 FeedEntry(

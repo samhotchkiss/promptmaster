@@ -102,12 +102,23 @@ def install(
         handler.addFilter(_ProcessTagFilter(process_label))
         handler._pollypm_error_handler = True  # type: ignore[attr-defined]
         root.addHandler(handler)
-    if not any(getattr(h, "_pollypm_error_notification_handler", False) for h in root.handlers):
+    if (
+        not _env_flag_enabled("POLLYPM_DISABLE_ERROR_NOTIFICATIONS")
+        and not any(
+            getattr(h, "_pollypm_error_notification_handler", False)
+            for h in root.handlers
+        )
+    ):
         alert_handler = CriticalErrorNotificationHandler()
         alert_handler._pollypm_error_notification_handler = True  # type: ignore[attr-defined]
         root.addHandler(alert_handler)
     if root.level > level:
         root.setLevel(level)
+
+
+def _env_flag_enabled(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def path() -> Path:

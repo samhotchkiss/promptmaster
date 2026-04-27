@@ -267,6 +267,46 @@ def test_noise_filtered_out(tmp_path: Path) -> None:
     assert kinds == {"alert"}
 
 
+def test_historic_fixture_error_alerts_filtered_out(tmp_path: Path) -> None:
+    """Known test-fixture error alerts must not pollute the live feed."""
+    db = tmp_path / "state.db"
+    StateStore(db).close()
+    fixture_messages = [
+        "Sync adapter boomer failed on create for proj/1",
+        "Sync adapter failing failed on create for proj/1",
+        "GitHub sync: failed to create issue for proj/1: gh not found",
+        "session listener '_boom' raised for x",
+        "Plugin bad register_roster hook failed: plugin exploded",
+        "HeartbeatRail tick failed; continuing",
+        "Rail item workflows.Activity visibility predicate raised — hiding item",
+        "Rail item workflows.Activity badge_provider raised — rendering without badge",
+    ]
+    store = SQLAlchemyStore(f"sqlite:///{db}")
+    try:
+        for index, message in enumerate(fixture_messages):
+            store.upsert_alert(
+                "error_log",
+                f"critical_error:fixture-{index}",
+                "critical",
+                message,
+            )
+        store.upsert_alert(
+            "error_log",
+            "critical_error:real",
+            "critical",
+            "SQLite database locked while writing state.db",
+        )
+    finally:
+        store.close()
+
+    entries = EventProjector(db).project(limit=20)
+    summaries = [entry.summary for entry in entries]
+
+    assert any("SQLite database locked" in summary for summary in summaries)
+    for message in fixture_messages:
+        assert all(message not in summary for summary in summaries)
+
+
 def test_structured_summary_overrides_fallback(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     store = StateStore(db)

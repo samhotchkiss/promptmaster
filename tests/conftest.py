@@ -23,6 +23,7 @@ def pytest_configure(config):  # noqa: ARG001
     want to exercise the daemon can clear the var in their own fixture.
     """
     os.environ.setdefault("POLLYPM_SKIP_RAIL_DAEMON", "1")
+    os.environ.setdefault("POLLYPM_DISABLE_ERROR_NOTIFICATIONS", "1")
     # Tests build their config in pytest tmp dirs but ``state_db``
     # defaults to ``~/.pollypm/state.db`` on the dev machine — which
     # may legitimately have pending migrations. Skip the refuse-start
