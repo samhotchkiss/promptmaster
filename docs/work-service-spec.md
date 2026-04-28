@@ -624,32 +624,61 @@ behavioral guarantee.
 
 ### How a Worker Gets Work
 
-Two paths:
+The shipped flow is **per-task, auto-claimed**. There is no long-running
+generic worker shell, no self-service `pm task next` polling loop, and no
+manual `tmux send-keys` poke from the supervisor. Every queued worker-role
+task gets its own session, claimed by Polly, provisioned automatically, and
+kicked off by the heartbeat sweep.
 
-**Self-service (worker finishes a task):**
-
-```
-worker finishes → pm task node-done <id> --output '{"type":"code_change",...}'
-                  (flow advances to review node, work_status → review)
-worker asks    → pm task next --project myproject
-service returns → highest-priority queued+unblocked task (or null)
-worker claims  → pm task claim <id>
-                 (atomic: assignee=worker + activate first flow node + work_status=in_progress)
-```
-
-**Supervisor-directed (Polly assigns):**
+**Polly auto-claims her own queued tasks.** Per the operator delegation
+contract, after `pm task queue <project>/<n>` on a worker-role task that
+Polly owns, she immediately runs:
 
 ```
-polly calls → pm task update <id> --assignee pete
-polly calls → pm task claim <id> --actor pete
-supervisor pokes pete via tmux → "you've been assigned <id>, run pm task get <id>"
+pm task claim <project>/<n> --actor worker
 ```
 
-The tmux poke is the only "signal" mechanism needed. It is not a message, not an inbox item — just `tmux send-keys`.
+This is not optional follow-up — it is the contract. Skipping `claim`
+leaves the task stranded in `queued`. Non-worker roles (review, plan, etc.)
+are the only ones that stop at `queued`.
+
+**`pm task claim` provisions the per-task tmux window automatically.**
+The single `claim` call:
+
+- Marks the task `assignee=worker` and `work_status=in_progress`.
+- Activates the first flow node.
+- Creates a real git worktree at `.pollypm/worktrees/<project>-<number>`
+  on branch `task/<project>-<number>`.
+- Writes `.pollypm-task-prompt.md` into the worktree root.
+- Opens a per-task tmux window named `task-<project>-<number>` whose CWD
+  is the worktree, and launches the provider CLI inside it.
+
+**The heartbeat sweep delivers and force-pushes the kickoff.** The kickoff
+prompt is sent through the same tmux session-recognition path the
+heartbeat uses for every worker. If the pane was still racing the provider
+bootstrap when `claim` ran, the heartbeat sweep retries the kickoff send
+on its next cycle and stamps `kickoff_sent_at` only after the pane is
+ready. Workers do not need to be poked by hand; the supervisor does not
+run `tmux send-keys` directly.
+
+```
+polly                → pm task queue <id>            (queued)
+polly (auto, by rule)→ pm task claim <id> --actor worker
+work service         → provisions worktree + per-task tmux window
+heartbeat sweep      → recognizes the per-task session, force-pushes the
+                       kickoff prompt, stamps kickoff_sent_at when the
+                       pane is ready
+worker session       → reads .pollypm-task-prompt.md and starts work
+```
 
 ### Idle Workers
 
-If `pm task next` returns null, the worker goes idle. The heartbeat detects the idle state. When new work appears (Polly triages something, a blocker resolves), the supervisor assigns and pokes.
+The per-task model means there is no generic "idle worker" waiting for
+work. A task gets a worker session when it is claimed; the session ends
+on approval, cancel, or teardown. If no tasks are queued for a project,
+no worker windows exist for that project. When new work appears, Polly
+queues + claims it, and the per-task lifecycle above provisions the
+session.
 
 ### Priority Resolution
 
@@ -665,11 +694,11 @@ If `pm task next` returns null, the worker goes idle. The heartbeat detects the 
 |----------------|-------------|-------------|
 | `task_backends/base.py` | Superseded | Work service protocol |
 | `task_backends/file.py` | Superseded | Work service + file sync adapter |
-| `inbox_v2.py` (agent-to-agent coordination) | Removed | Work service transitions + tmux pokes |
+| `inbox_v2.py` (agent-to-agent coordination) | Removed | Work service transitions + per-task worker sessions auto-kicked off by the heartbeat sweep |
 | `inbox_v2.py` (user-facing communication) | **Retained** | Still the Polly↔user channel |
 | `inbox_processor.py` (quality gate injection) | Removed | Transition gates |
 | `inbox_processor.py` (tier classification for user) | **Retained** | Still relevant for user inbox |
-| `inbox_delivery.py` (agent poke system) | Removed | Supervisor tmux pokes |
+| `inbox_delivery.py` (agent poke system) | Removed | Per-task worker sessions provisioned on `pm task claim` and kicked off by the heartbeat sweep |
 | `progress-log.md` (shared transition log) | Superseded | Per-task `transitions` in the work service |
 | `.latest_issue_number` (atomic counter) | Superseded | Work service ID generation (serialized) |
 
@@ -1284,7 +1313,7 @@ Multiple tasks in the same project can have active workers simultaneously:
 
 - Each gets its own worktree and branch
 - The work service tracks which sessions are bound to which tasks
-- The PM (or `pm task next`) ensures independent tasks are assigned — tasks that touch overlapping files should be sequenced via dependencies, not parallelized
+- The PM ensures independent tasks are queued and claimed — tasks that touch overlapping files should be sequenced via dependencies, not parallelized. (Polly auto-claims her queued worker-role tasks; she does not poll `pm task next`.)
 
 ### Tmux Session Hardening (Prerequisite)
 

@@ -1,7 +1,7 @@
 ---
 ## Summary
 
-PollyPM manages agent sessions as tmux windows within a single tmux session. Each agent — heartbeat, operator, or worker — is a real interactive CLI process running in its own window. The lease model governs input arbitration between automation and humans. Worker sessions use git worktrees for parallel lanes, and control sessions maintain identity across failover.
+PollyPM manages agent sessions as tmux windows within a single tmux session. Each agent — heartbeat, operator, or worker — is a real interactive CLI process running in its own window. The lease model governs input arbitration between automation and humans. **Worker sessions are per-task**: a fresh tmux window and worktree are provisioned each time `pm task claim` runs, and the heartbeat sweep delivers the kickoff. Control sessions maintain identity across failover.
 
 ---
 
@@ -15,15 +15,15 @@ Every session in PollyPM is an interactive CLI agent running in a tmux window. S
 |------|-----------|-------|---------|
 | Heartbeat | 0 | Exactly 1 | Monitors all other sessions, records health snapshots |
 | Operator | 1 | Exactly 1 | Project manager, coordinates work, surfaces alerts |
-| Worker | 2+ | One per project by default | Implementation and review work on bound projects (multi-session per project is a near-term addition) |
+| Worker | 2+ | One per claimed task | Implementation work for a single task in its own worktree; spawned by `pm task claim`, torn down on approval/cancel |
 
 ### Key Properties
 
 - Each session is a real interactive CLI agent — not a background daemon, not a headless process
 - Sessions are 1:1 with tmux windows
-- Worker sessions default to 1:1 with projects (one active worker per project by default; multi-session is a near-term addition with session-scoped state within `<project>/.pollypm/`)
-- Sessions persist across PollyPM restarts via tmux session survival
-- Session identity (name, role, window position) is stable across failover
+- Worker sessions are per-task: `pm task claim <project>/<n>` spawns a window named `task-<project>-<n>` bound to a fresh worktree at `.pollypm/worktrees/<project>-<n>`. There are no long-lived generic worker shells.
+- Control sessions (heartbeat, operator) persist across PollyPM restarts via tmux session survival
+- Control session identity (name, role, window position) is stable across failover. Worker sessions are scoped to a task and are recreated per claim rather than recovered in place.
 
 
 ## Tmux Integration
@@ -34,11 +34,15 @@ PollyPM creates and manages exactly one tmux session, named `pollypm`. All agent
 
 ```
 tmux session: pollypm
-  window 0: heartbeat     (session 0 — heartbeat supervisor)
-  window 1: polly         (session 1 — operator)
-  window 2: worker-acme   (session 2 — worker for acme project)
-  window 3: worker-widgets (session 3 — worker for widgets project)
+  window 0: heartbeat        (heartbeat supervisor)
+  window 1: polly            (operator)
+  window 2: task-acme-12     (per-task worker for acme/12)
+  window 3: task-widgets-3   (per-task worker for widgets/3)
 ```
+
+Worker windows are named `task-<project>-<number>` and are created on
+`pm task claim`. They are not bound 1:1 to a project; multiple per-task
+windows can coexist for the same project, one per active claim.
 
 ### Window Management
 
@@ -236,38 +240,49 @@ Graceful shutdown of a session.
 
 ## Worker Sessions and Worktrees
 
-### Git Worktree Model
+### Per-Task Worker Model
 
-Worker sessions that target git repositories use dedicated worktrees to enable parallel work.
+Worker sessions are **per-task, not per-project**. Every claim of a
+worker-role task spawns its own tmux window and its own git worktree:
 
 ```
-/Users/sam/dev/acme/                    # main worktree
+/Users/sam/dev/acme/                          # main worktree
 /Users/sam/dev/acme/.pollypm/worktrees/
-  worker-acme/                          # worker implementation worktree
-  review-acme/                          # review lane worktree (if configured)
+  acme-12/                                    # worktree for task acme/12
+  acme-15/                                    # worktree for task acme/15
 ```
+
+### Auto-Claim and Auto-Kickoff Flow
+
+1. Polly queues a worker-role task and (per the operator delegation
+   contract) immediately runs
+   `pm task claim <project>/<n> --actor worker`.
+2. `pm task claim` is the single provisioning step: it sets
+   `work_status=in_progress`, creates the worktree at
+   `.pollypm/worktrees/<project>-<n>` on branch `task/<project>-<n>`,
+   writes `.pollypm-task-prompt.md` into the worktree, opens the
+   `task-<project>-<n>` tmux window with the provider CLI, and queues
+   the kickoff prompt.
+3. The heartbeat sweep recognizes the per-task session, force-pushes the
+   kickoff prompt into the pane, and stamps `kickoff_sent_at` only after
+   the pane is ready. There is no manual `tmux send-keys` step.
 
 ### Worktree Lifecycle
 
 | Event | Action |
 |-------|--------|
-| Session launch (first time) | `git worktree add .pollypm/worktrees/<session> -b pollypm/<session>` |
-| Session launch (subsequent) | Verify worktree exists, reset if needed |
-| Session stop (temporary) | Worktree preserved for recovery |
-| Session removal (permanent) | `git worktree remove .pollypm/worktrees/<session>` |
+| `pm task claim <project>/<n>` | `git worktree add .pollypm/worktrees/<project>-<n> -b task/<project>-<n>` |
+| Worker exits (task still active) | Worktree preserved for re-launch on the same claim |
+| `pm task approve` / `pm task cancel` | Worktree torn down, branch left for history, tmux window closed |
 | `pm down` | Worktrees preserved (they survive tmux teardown) |
 | `pm clean` | All PollyPM worktrees removed |
 
-### Tracked-Project Mode
+### Review Lane
 
-For projects under active management, PollyPM supports a two-lane model:
-
-| Lane | Session Role | Worktree | Purpose |
-|------|-------------|----------|---------|
-| Implementation | Worker (`role = "worker"`) | `.pollypm/worktrees/worker-<project>` | Writing code, running tests, making commits |
-| Review | Worker (`role = "worker"`, tagged as reviewer) | `.pollypm/worktrees/review-<project>` | Code review, PR feedback, quality checks |
-
-Both lanes are independent worker sessions with separate accounts. The operator coordinates handoffs between lanes.
+Review is handled by a separate per-task review session that the work
+service spawns when a task transitions to `review`. It runs in its own
+tmux window and reads the same artifacts the worker produced. Review
+sessions follow the same per-task lifecycle as worker sessions.
 
 
 ## Control Session Behavior

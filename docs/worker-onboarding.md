@@ -42,14 +42,40 @@ Worker onboarding currently happens through three surfaces:
 
 ## Current worker flow
 
-At a high level, the shipped worker experience is:
+At a high level, the shipped worker experience is **per-task and
+auto-claimed**. There is no long-running generic worker shell, no
+self-service `pm task next` polling loop, and no manual supervisor
+`tmux send-keys` poke.
 
-1. A task is claimed with `pm task claim <project>/<number>`.
-2. PollyPM provisions the task worktree and worker session.
-3. The worker starts in that worktree, with task details written to
-   `.pollypm-task-prompt.md`.
-4. The worker uses the worker guide plus the task prompt to implement the work,
-   commit changes, and submit `pm task done ... --output '{...}'`.
+1. Polly (or another operator) creates the task and queues it
+   (`pm task queue <project>/<number>`). For plan-gated flows the queue
+   transition only succeeds once the plan gate is satisfied.
+2. **Polly auto-claims her own queued worker-role tasks.** Per the
+   operator delegation contract, immediately after queueing she runs
+   `pm task claim <project>/<number> --actor worker`. This is the
+   contract — non-worker roles (review, plan) are the only ones that
+   stop at `queued`.
+3. **`pm task claim` provisions everything in one step.** The work
+   service creates the worktree at
+   `.pollypm/worktrees/<project>-<number>`, checks out branch
+   `task/<project>-<number>`, writes `.pollypm-task-prompt.md` into the
+   worktree root, opens a per-task tmux window named
+   `task-<project>-<number>` whose CWD is the worktree, and launches the
+   provider CLI inside it.
+4. **The heartbeat sweep recognizes the per-task session and
+   force-pushes the kickoff.** If the pane was still racing the provider
+   bootstrap at `claim` time, the next heartbeat tick retries the
+   kickoff send and only stamps `kickoff_sent_at` once the pane is ready.
+   No human or supervisor needs to send the kickoff by hand.
+5. The worker reads `.pollypm-task-prompt.md` plus the worker guide,
+   implements the work, commits to the task branch, and submits
+   `pm task done ... --output '{...}'`.
+
+If a worker session stalls (no kickoff banner, no activity), the
+recovery path is the heartbeat sweep — not a manual tmux poke. The
+heartbeat will re-deliver the kickoff on its next cycle, raise the
+appropriate alert if the session is wedged, and surface a
+`no_session`/`silent_worker` signal for Polly to act on.
 
 The two documents serve different purposes:
 

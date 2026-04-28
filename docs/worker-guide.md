@@ -49,10 +49,20 @@ differ; every task id has the form `<project>/<number>`.
 
 ### 1. See what's queued
 
+The canonical path is **auto-claim**: Polly queues a worker-role task and
+immediately claims it on your behalf, which provisions this very session
+and force-pushes the kickoff prompt through the heartbeat sweep. If you
+are reading the kickoff prompt in your tmux window, the task is already
+claimed for you — go to step 4. You do **not** need to poll `pm task
+next` to find work.
+
+If you are operating outside that flow (e.g. picking up a stale claim or
+working from a fresh shell), these commands still work:
+
 ```bash
-pm task next                          # highest-priority queued+unblocked task
 pm task list --status queued          # full queue
 pm task mine --actor worker           # tasks already assigned to you
+pm task next                          # highest-priority queued+unblocked task
 ```
 
 ### 2. Read the task spec
@@ -71,11 +81,23 @@ assuming FOO means BAR. Will revisit in review."
 
 ### 3. Claim the task
 
+In normal operation, **Polly has already claimed the task for you**. The
+auto-claim contract spawns this worker session: when she queues a
+worker-role task, she immediately runs `pm task claim ... --actor worker`,
+the work service provisions the worktree and per-task tmux window, and
+the heartbeat sweep force-pushes the kickoff prompt into your pane. If
+you see the task prompt land in your window, you do not need to run
+`claim` yourself. Run `pwd` or `git status -sb` to confirm where you
+landed and skip to step 4.
+
+Run `pm task claim` manually only when you are operating outside that
+flow (e.g. recovering a stale claim from a fresh shell):
+
 ```bash
 pm task claim shortlink_gen/1
 ```
 
-This:
+In either case, `claim`:
 
 - Sets `work_status = in_progress`.
 - Assigns the task to you (`--actor worker` by default).
@@ -89,11 +111,11 @@ This:
   `task-<project>-<number>` with its current directory already set to that
   worktree.
 
-If you are **already inside** the per-task worker session Polly opened for
-this claim, you do not need to run `claim` again — the PM already did it.
-You will simply see the task prompt land in your current window. You do not
-need to find or clone anything. You are already inside that worktree. Run
-`pwd` or `git status -sb` if you want to confirm where you landed.
+If the kickoff prompt does not land in your pane right away, do **not**
+poke yourself with `tmux send-keys`. The heartbeat sweep recognizes the
+per-task session, force-pushes the kickoff on its next cycle, and stamps
+`kickoff_sent_at` only after the pane is ready. Wait one heartbeat tick
+or check `pm status` for a `silent_worker` / `no_session` signal.
 
 ### 4. Build
 
