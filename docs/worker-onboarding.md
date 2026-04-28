@@ -48,8 +48,13 @@ self-service `pm task next` polling loop, and no manual supervisor
 `tmux send-keys` poke.
 
 1. Polly (or another operator) creates the task and queues it
-   (`pm task queue <project>/<number>`). For plan-gated flows the queue
-   transition only succeeds once the plan gate is satisfied.
+   (`pm task queue <project>/<number>`). The queue transition itself
+   does not enforce the plan gate — tasks can be queued without an
+   approved plan. The plan gate is enforced later by the task-assignment
+   sweep / auto-claim path, which holds worker delegation until the gate
+   clears. While `plan_missing` is in effect you'll see the queued task
+   plus a `plan_missing` attention item in the cockpit, and `pm task get
+   <id>` will show the sweep blocked with `skipped_plan_missing`.
 2. **Polly auto-claims her own queued worker-role tasks.** Per the
    operator delegation contract, immediately after queueing she runs
    `pm task claim <project>/<number> --actor worker`. This is the
