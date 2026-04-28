@@ -69,7 +69,7 @@ def _seed_tasks(project_path: Path) -> dict[str, str]:
         # Dashboard-rendering tests don't exercise git merging; skip the
         # auto-merge step that real `approve()` would run and that requires
         # a real task branch in the fixture repo.
-        svc._auto_merge_approved_task_branch = lambda _task: None
+        svc._auto_merge_approved_task_branch = lambda _task, **_kwargs: None
         # Queued (created but not claimed)
         t_queued = svc.create(
             title="Queued feature",
