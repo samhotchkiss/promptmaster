@@ -241,7 +241,41 @@ class LaunchPlanExecutor:
             return (1, [f"bootstrap failed: {exc}"])
         # Idempotent reconciliation may return any account name
         # (or "" when no account info is available — fakes).
-        return (None, [f"bootstrap controller={controller_account!r}"])
+        messages: list[str] = []
+
+        # #912: restore the user-facing launch status line that
+        # cli.up() emitted before the #896 executor refactor:
+        # ``Created tmux session <name> with controller
+        # <email_or_account> [<provider>]``. The line is the only
+        # confirmation users have that the bootstrap actually
+        # selected a controller (and which provider/identity it
+        # picked) — important when failover is enabled and a
+        # secondary account took over. Lookups are best-effort: a
+        # synthetic supervisor with no real ``config`` (the unit
+        # test fakes) just falls through to the debug line below.
+        config = getattr(self.supervisor, "config", None)
+        accounts = getattr(config, "accounts", None) if config is not None else None
+        project = getattr(config, "project", None) if config is not None else None
+        session_name = getattr(project, "tmux_session", None) if project is not None else None
+        account = None
+        if accounts is not None and controller_account:
+            try:
+                account = accounts[controller_account]
+            except (KeyError, TypeError):
+                account = None
+        if session_name and account is not None:
+            email = getattr(account, "email", None) or controller_account
+            provider = getattr(account, "provider", None)
+            provider_value = getattr(provider, "value", provider)
+            messages.append(
+                f"Created tmux session {session_name} with controller "
+                f"{email} [{provider_value}]"
+            )
+
+        # Keep the post-#896 debug line as well so launch transcripts
+        # still record the raw account key for grep/log consumers.
+        messages.append(f"bootstrap controller={controller_account!r}")
+        return (None, messages)
 
     def _on_ensure_main_session(self) -> tuple[int | None, list[str]]:
         # Only meaningful in the RESTORE_FROM_CLOSET path: closet

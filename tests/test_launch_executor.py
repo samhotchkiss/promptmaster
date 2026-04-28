@@ -553,3 +553,83 @@ def test_executor_dispatch_table_covers_every_launch_action() -> None:
     handled = set(exe._dispatch.keys())
     for action in LaunchAction:
         assert action in handled, f"unhandled LaunchAction: {action!r}"
+
+
+# ---------------------------------------------------------------------------
+# #912 — user-facing bootstrap log line
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_emits_user_facing_controller_line() -> None:
+    """#912 — pre-#896 the cli printed ``Created tmux session
+    <name> with controller <email> [<provider>]`` after a
+    successful first bootstrap. The launch executor swallowed
+    that contract; restore it.
+
+    Concrete user signal: a developer running ``pm up`` needs to
+    know which account/provider the bootstrap landed on (failover
+    can switch the answer). The raw ``bootstrap controller='claude_x'``
+    debug line is not enough — it doesn't carry email or provider.
+    """
+
+    class _Provider:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    class _Account:
+        def __init__(self, email: str, provider: str) -> None:
+            self.email = email
+            self.provider = _Provider(provider)
+
+    class _Project:
+        tmux_session = "pollypm"
+
+    class _Config:
+        project = _Project()
+        accounts = {
+            "claude_controller": _Account("controller@example.com", "claude"),
+        }
+
+    class _Supervisor(_FakeSupervisor):
+        config = _Config()
+
+        def bootstrap_tmux(self, **kwargs) -> str:  # type: ignore[override]
+            self.calls.append(("bootstrap_tmux", (), kwargs))
+            return "claude_controller"
+
+    probe = _probe()
+    plan = plan_launch(probe)
+    sup = _Supervisor()
+    exe, _ = _executor(probe=probe, supervisor=sup)
+    result = exe.execute(plan)
+
+    user_line = (
+        "Created tmux session pollypm with controller "
+        "controller@example.com [claude]"
+    )
+    assert user_line in result.messages, (
+        "#912: missing user-facing controller line; got "
+        f"{result.messages!r}"
+    )
+    # The raw debug line is preserved for log/grep consumers.
+    assert any(
+        m.startswith("bootstrap controller=") for m in result.messages
+    ), f"#912: lost debug line; got {result.messages!r}"
+
+
+def test_bootstrap_user_line_skipped_when_account_missing() -> None:
+    """#912 — when the supervisor fake has no usable ``config``
+    (the original unit-test shape) the executor must fall back to
+    the debug-only line rather than crash."""
+    probe = _probe()
+    plan = plan_launch(probe)
+    exe, sup = _executor(probe=probe)  # default _FakeSupervisor: no config
+    result = exe.execute(plan)
+    # No user-facing "Created tmux session …" line was emitted.
+    assert not any(
+        m.startswith("Created tmux session ") for m in result.messages
+    )
+    # Debug line is still present.
+    assert any(
+        m.startswith("bootstrap controller=") for m in result.messages
+    )
