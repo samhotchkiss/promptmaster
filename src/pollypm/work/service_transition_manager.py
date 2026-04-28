@@ -540,6 +540,14 @@ class WorkTransitionManager:
                         task_id,
                         exc,
                     )
+            # #927: clear the no_session_for_assignment alerts the
+            # heartbeat sweep raised while this task was active. The
+            # per-task alert is unambiguous (alert key is the task id);
+            # the per-project worker alert is only cleared when no other
+            # active task on the project still routes to that role.
+            # Best-effort — any error is swallowed so a misconfigured
+            # alert store can't block the cancel transition.
+            self._clear_assignment_alerts_after_cancel(task)
 
         return self._finish(
             task_id,
@@ -550,6 +558,93 @@ class WorkTransitionManager:
                 result
             ),
         )
+
+    def _clear_assignment_alerts_after_cancel(self, task: Task) -> None:
+        """Clear no_session alerts referencing a just-cancelled task.
+
+        Defers to ``task_assignment_notify.resolver.clear_alerts_for_cancelled_task``
+        — kept as a deferred import so the work module stays importable
+        without the plugin runtime (tests, contrib doubles). Any error
+        is swallowed.
+
+        Per-project ``(worker-<project>, no_session)`` is only cleared
+        when no other active task on the project still routes to that
+        role. We compute the "other active" map here against the work
+        service so the resolver helper stays generic.
+
+        We resolve the alert store from the unified Store registry and
+        pass it in, so the helper doesn't need to spin up a second
+        work-service connection against the same SQLite file while our
+        caller's cancel transaction is still in flight.
+        """
+        try:
+            from pollypm.plugins_builtin.task_assignment_notify.resolver import (
+                clear_alerts_for_cancelled_task,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            roles = tuple((task.roles or {}).keys()) or ("worker",)
+        except Exception:  # noqa: BLE001
+            roles = ("worker",)
+        active_map: dict[str, bool] = {}
+        active_statuses = (
+            WorkStatus.QUEUED.value,
+            WorkStatus.IN_PROGRESS.value,
+            WorkStatus.REVIEW.value,
+            WorkStatus.REWORK.value,
+            WorkStatus.BLOCKED.value,
+        )
+        for role in roles:
+            active_map[role] = False
+            for status in active_statuses:
+                try:
+                    siblings = self.service.list_tasks(
+                        project=task.project, work_status=status,
+                    )
+                except Exception:  # noqa: BLE001
+                    siblings = []
+                for sibling in siblings:
+                    if sibling.task_number == task.task_number:
+                        continue
+                    sibling_roles = getattr(sibling, "roles", {}) or {}
+                    if role in sibling_roles:
+                        active_map[role] = True
+                        break
+                if active_map[role]:
+                    break
+        store = self._resolve_alert_store()
+        try:
+            clear_alerts_for_cancelled_task(
+                task_id=task.task_id,
+                project=task.project,
+                role_names=roles,
+                has_other_active_for_role=active_map,
+                store=store,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "clear_alerts_for_cancelled_task failed for %s",
+                task.task_id, exc_info=True,
+            )
+
+    @staticmethod
+    def _resolve_alert_store() -> object | None:
+        """Best-effort resolve a Store handle for alert writes.
+
+        Returns ``None`` when config / store cannot be loaded — the
+        resolver helper then falls back to its own ``load_runtime_services``
+        path so callers in environments without a config file still
+        get the unambiguous per-task alert clear.
+        """
+        try:
+            from pollypm.config import DEFAULT_CONFIG_PATH, load_config
+            from pollypm.store.registry import get_store
+
+            config = load_config(DEFAULT_CONFIG_PATH)
+            return get_store(config)
+        except Exception:  # noqa: BLE001
+            return None
 
     def hold(self, task_id: str, actor: str, reason: str | None = None) -> Task:
         task = self.service.get(task_id)

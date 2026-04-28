@@ -86,6 +86,28 @@ _ACTIVE_WORKER_STATUSES = (
     WorkStatus.REWORK.value,
 )
 
+# #927: terminal / parked statuses that must NEVER raise a
+# ``no_session_for_assignment`` alert. Cancelled / done tasks have no
+# pending work; on_hold tasks are intentionally parked. ``blocked`` is
+# its own alert family (gate-blocked surfaces via the gate-eval path)
+# — we skip it here too so a blocked task doesn't double-emit.
+# ``draft`` is pre-queue and has no actor binding.
+#
+# This is a belt-and-suspenders check: ``_SWEEPABLE_STATUSES`` already
+# enumerates only the active set, so a cancelled task never enters the
+# inner loop. The explicit guard inside ``_build_event_for_task``
+# defends against future churn (a sweepable status added without
+# updating this contract) and also ensures that a stale in-memory
+# ``Task`` snapshot whose underlying row was just cancelled in another
+# connection doesn't slip a ping through.
+_NON_ACTIVE_SWEEP_STATUSES = frozenset({
+    WorkStatus.DRAFT.value,
+    WorkStatus.BLOCKED.value,
+    WorkStatus.ON_HOLD.value,
+    WorkStatus.DONE.value,
+    WorkStatus.CANCELLED.value,
+})
+
 # Statuses where an idle-session gate is required before notifying. The
 # queued / review case is a new-or-pending assignment — pinging a busy
 # session is fine because the ping just surfaces in their queue. The
@@ -111,6 +133,16 @@ def _build_event_for_task(work_service: Any, task: Any) -> TaskAssignmentEvent |
     the flow's ``start_node`` — that's the effective pickup node for
     the worker.
     """
+    # #927: never emit assignment events for tasks in a terminal /
+    # parked / non-active state. The outer loop already iterates
+    # ``_SWEEPABLE_STATUSES``, but a stale row read or a future addition
+    # to that tuple shouldn't be able to fire a ``no_session_for_assignment``
+    # alert for a cancelled / done / on_hold task. Cancellation is meant
+    # to be honoured immediately — once the row says ``cancelled``, no
+    # ping should ever follow it.
+    status_value = getattr(getattr(task, "work_status", None), "value", None)
+    if status_value in _NON_ACTIVE_SWEEP_STATUSES:
+        return None
     if not task.flow_template_id:
         return None
     try:

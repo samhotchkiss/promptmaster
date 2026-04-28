@@ -397,6 +397,111 @@ def _alert_type_for(event: TaskAssignmentEvent) -> str:
     return f"no_session_for_assignment:{event.task_id}"
 
 
+def clear_alerts_for_cancelled_task(
+    *,
+    task_id: str,
+    project: str,
+    role_names: tuple[str, ...] = ("worker",),
+    has_other_active_for_role: dict[str, bool] | None = None,
+    config_path: Path | None = None,
+    store: Any | None = None,
+) -> dict[str, Any]:
+    """Clear no_session alerts that referenced a now-cancelled task.
+
+    Two-tier cleanup matching the two alert families the sweep / notify
+    path raises:
+
+    * Per-task ``no_session_for_assignment:<task_id>`` — unambiguous.
+      Always cleared, since the task is terminal.
+    * Per-project ``(worker-<project>, no_session)`` — only cleared
+      when no other active task on the project still routes to that
+      role. ``has_other_active_for_role`` maps a role name to True
+      when the project has another active task for that role; the
+      caller computes this against the work service so we don't
+      reach back across the work / plugins layering.
+
+    Best-effort: any error opening services / clearing alerts is
+    swallowed. The next sweep tick will re-emit if the task somehow
+    re-enters an active state, and the existing #919 stale-alert
+    sweep guard remains intact.
+
+    ``store`` lets the caller inject the alert store directly — the
+    work-service cancel path does this so we don't open a second
+    SQLite connection against the same DB while the caller's
+    transaction is still in flight. When ``store`` is ``None`` we
+    resolve runtime services from config and use the resulting
+    msg_store/state_store handle.
+    """
+    cleared_per_task = False
+    cleared_project: list[str] = []
+    owns_work_service = False
+    services = None
+    if store is None:
+        services = load_runtime_services(config_path=config_path)
+        owns_work_service = True
+        store = services.msg_store or services.state_store
+    if store is None:
+        # Best-effort: nothing to do without a store. Still close any
+        # incidental work-service connection the resolver opened.
+        if owns_work_service and services is not None:
+            work_closer = getattr(services.work_service, "close", None)
+            if callable(work_closer):
+                try:
+                    work_closer()
+                except Exception:  # noqa: BLE001
+                    pass
+        return {
+            "cleared_per_task": cleared_per_task,
+            "cleared_project": cleared_project,
+        }
+    try:
+        store.clear_alert(
+            "task_assignment", f"no_session_for_assignment:{task_id}",
+        )
+        cleared_per_task = True
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment_notify: clear_alert(no_session_for_assignment) "
+            "failed for %s", task_id, exc_info=True,
+        )
+    # Lazy import — keep this module's import graph independent of
+    # ``pollypm.work.task_assignment`` for the simple alert-clear
+    # path so test doubles can mock ``role_candidate_names``.
+    from pollypm.work.task_assignment import role_candidate_names
+
+    active_map = has_other_active_for_role or {}
+    for role in role_names:
+        # Project-level alert: skip if the project still has another
+        # active task routed to this role. The per-task alert above is
+        # unambiguous; the project-level one is a single row that must
+        # remain visible while *any* task on that role is blocked.
+        if active_map.get(role, False):
+            continue
+        for candidate in role_candidate_names(role, project):
+            try:
+                store.clear_alert(candidate, "no_session")
+                cleared_project.append(candidate)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "task_assignment_notify: clear_alert(no_session) "
+                    "failed for %s", candidate, exc_info=True,
+                )
+    # Close the work-service connection we incidentally opened via
+    # ``load_runtime_services`` — the cancel call site owns its own
+    # connection and we mustn't leak ours.
+    if owns_work_service and services is not None:
+        work_closer = getattr(services.work_service, "close", None)
+        if callable(work_closer):
+            try:
+                work_closer()
+            except Exception:  # noqa: BLE001
+                pass
+    return {
+        "cleared_per_task": cleared_per_task,
+        "cleared_project": cleared_project,
+    }
+
+
 def _escalate_no_session(event: TaskAssignmentEvent, store: Any | None) -> None:
     """Raise (or refresh) a user-inbox alert when no session matches."""
     if store is None:

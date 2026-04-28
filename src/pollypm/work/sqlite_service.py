@@ -511,6 +511,22 @@ class SQLiteWorkService:
         try:
             if not task.flow_template_id:
                 return
+            # #927: a transition into a terminal / parked status (cancel,
+            # done, on_hold, draft) must not enqueue a fresh assignment
+            # ping. The task's flow node may still point to a machine
+            # actor (cancel doesn't unwind ``current_node_id``), so
+            # without this guard the notify listener would route a ping
+            # to a worker for a task that was just cancelled. The sweep
+            # path has its own guard (see ``_NON_ACTIVE_SWEEP_STATUSES``)
+            # so the two emitters stay aligned.
+            if task.work_status in (
+                WorkStatus.CANCELLED,
+                WorkStatus.DONE,
+                WorkStatus.ON_HOLD,
+                WorkStatus.DRAFT,
+                WorkStatus.BLOCKED,
+            ):
+                return
             flow = self._load_flow_from_db(
                 task.flow_template_id, task.flow_template_version,
             )
