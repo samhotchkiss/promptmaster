@@ -1065,3 +1065,260 @@ def test_send_initial_input_per_task_worker_kickoff_unaffected(
     assert len(sent) == 1, "per-task worker kickoff must still deliver"
     assert "task-pollypm-7.md" in sent[0][1] or len(sent[0][1]) <= 280
 
+
+# ---------------------------------------------------------------------------
+# #934 follow-up — Avenue A regression: launch spec audit
+# ---------------------------------------------------------------------------
+#
+# The launch plan must always resolve heartbeat → ``pm-heartbeat`` and
+# operator → ``pm-operator``. If the planner ever silently rerouted
+# heartbeat to ``pollypm`` (the cockpit window) the supervisor's
+# target-window guard would say "match" and let heartbeat content ship
+# to the cockpit pane. Pin the contract.
+
+
+def test_launch_plan_resolves_heartbeat_window_name(tmp_path: Path) -> None:
+    """heartbeat launch.window_name MUST be ``pm-heartbeat`` (not ``pollypm``)."""
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launches = supervisor.plan_launches()
+    by_name = {l.session.name: l for l in launches}
+
+    assert "heartbeat" in by_name, "heartbeat launch must be in plan"
+    assert by_name["heartbeat"].window_name == "pm-heartbeat", (
+        f"heartbeat must launch in pm-heartbeat, got "
+        f"{by_name['heartbeat'].window_name!r}"
+    )
+    assert by_name["heartbeat"].window_name != "pollypm", (
+        "heartbeat must NEVER share the cockpit window name 'pollypm'"
+    )
+
+
+def test_launch_plan_resolves_operator_window_name(tmp_path: Path) -> None:
+    """operator launch.window_name MUST be ``pm-operator`` (not ``pm-heartbeat``)."""
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launches = supervisor.plan_launches()
+    by_name = {l.session.name: l for l in launches}
+
+    assert "operator" in by_name, "operator launch must be in plan"
+    assert by_name["operator"].window_name == "pm-operator", (
+        f"operator must launch in pm-operator, got "
+        f"{by_name['operator'].window_name!r}"
+    )
+    assert by_name["operator"].window_name != "pm-heartbeat", (
+        "operator must NEVER share heartbeat's window name"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #934 follow-up — Avenue B regression: rail-mount source-pane guard
+# ---------------------------------------------------------------------------
+#
+# Even after the supervisor's four crossing guards, a stale storage-closet
+# pane can carry another role's banner (e.g. an old rail-daemon process
+# running pre-#931 code wrote heartbeat content into a pane the cockpit
+# later mounts as ``operator``). The fifth-layer guard at the cockpit's
+# join-pane site captures the source pane's scrollback and refuses the
+# join when the pane shows another role's canonical banner.
+
+
+def _make_router_for_test(tmp_path: Path):
+    """Build a CockpitRouter wired against ``_config`` for guard tests.
+
+    The router pins its supervisor reference and config-mtime stamp so
+    ``_load_supervisor`` does NOT spawn a fresh supervisor (which would
+    point at a different store and break event-assertion roundtrips).
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+
+    from pollypm.cockpit_rail import CockpitRouter
+
+    config_path = tmp_path / ".pollypm" / "pollypm.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    if not config_path.exists():
+        config_path.write_text("# stub\n")
+    router = CockpitRouter(config_path)
+    # Pin the supervisor + config mtime so ``_load_supervisor`` returns
+    # our prebuilt instance instead of spawning a fresh one. The
+    # reload-on-mtime-change check would otherwise see an unset
+    # ``_config_mtime`` and rebuild — we want the same store the tests
+    # query against.
+    router._supervisor = supervisor
+    try:
+        router._config_mtime = config_path.stat().st_mtime
+    except OSError:
+        router._config_mtime = 0.0
+    return router, supervisor
+
+
+def test_source_pane_role_matches_launch_refuses_crossed_role(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """Mounting a pane that shows heartbeat banner as the operator session
+    is refused — that's the live cockpit ``Polly · chat`` failure mode."""
+    router, supervisor = _make_router_for_test(tmp_path)
+
+    operator_launch = supervisor.launch_by_session("operator")
+    # Source pane shows heartbeat-supervisor banner (e.g. left over by an
+    # old rail-daemon process running pre-#931 code).
+    monkeypatch.setattr(
+        router.tmux,
+        "capture_pane",
+        lambda target, lines=120: (
+            "======================================================================\n"
+            "CANONICAL ROLE: heartbeat-supervisor\n"
+            "SESSION NAME:   heartbeat\n"
+            "======================================================================\n\n"
+            "You are the Heartbeat supervisor.\n"
+        ),
+    )
+
+    assert router._source_pane_role_matches_launch(
+        "pollypm-storage-closet:pm-operator.0", operator_launch,
+    ) is False
+
+
+def test_source_pane_role_matches_launch_accepts_matching_banner(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """A pane showing the operator's own banner is allowed through (idempotent re-mount)."""
+    router, supervisor = _make_router_for_test(tmp_path)
+
+    operator_launch = supervisor.launch_by_session("operator")
+    monkeypatch.setattr(
+        router.tmux,
+        "capture_pane",
+        lambda target, lines=120: (
+            "======================================================================\n"
+            "CANONICAL ROLE: operator-pm\n"
+            "SESSION NAME:   operator\n"
+            "======================================================================\n"
+        ),
+    )
+
+    assert router._source_pane_role_matches_launch(
+        "pollypm-storage-closet:pm-operator.0", operator_launch,
+    ) is True
+
+
+def test_source_pane_role_matches_launch_accepts_fresh_pane(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """A fresh pane (no banner yet) must be allowed through — the guard
+    refuses ONLY on unambiguous cross-role banner content. Fresh panes
+    are the common case at first mount and must not be blocked."""
+    router, supervisor = _make_router_for_test(tmp_path)
+
+    operator_launch = supervisor.launch_by_session("operator")
+    monkeypatch.setattr(
+        router.tmux,
+        "capture_pane",
+        lambda target, lines=120: "Welcome to Claude Code\n>",
+    )
+
+    assert router._source_pane_role_matches_launch(
+        "pollypm-storage-closet:pm-operator.0", operator_launch,
+    ) is True
+
+
+def test_source_pane_role_matches_launch_tolerates_capture_failure(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """Conservative: a capture-pane failure (transient tmux error) must
+    not block a legitimate mount. Returns True (allow) on any read failure
+    — the upstream guards already ran."""
+    router, supervisor = _make_router_for_test(tmp_path)
+
+    operator_launch = supervisor.launch_by_session("operator")
+
+    def _raise(*_a, **_kw):
+        raise RuntimeError("transient tmux error")
+    monkeypatch.setattr(router.tmux, "capture_pane", _raise)
+
+    assert router._source_pane_role_matches_launch(
+        "pollypm-storage-closet:pm-operator.0", operator_launch,
+    ) is True
+
+
+def test_source_pane_role_matches_launch_accepts_per_task_worker(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """Per-task workers (#919) must keep mounting cleanly. Their banner
+    role is ``worker`` — the guard accepts a pane that shows the
+    matching ``worker`` banner."""
+    router, supervisor = _make_router_for_test(tmp_path)
+
+    # Build a per-task worker launch the planner would synthesise.
+    from pollypm.models import SessionLaunchSpec
+    per_task_session = SessionConfig(
+        name="task-pollypm-7",
+        role="worker",
+        provider=ProviderKind.CLAUDE,
+        account="claude_controller",
+        cwd=tmp_path,
+        project="pollypm",
+        window_name="task-pollypm-7",
+    )
+    launch = SessionLaunchSpec(
+        session=per_task_session,
+        account=supervisor.config.accounts["claude_controller"],
+        window_name="task-pollypm-7",
+        log_path=tmp_path / "logs/task-pollypm-7.log",
+        command="claude",
+    )
+
+    monkeypatch.setattr(
+        router.tmux,
+        "capture_pane",
+        lambda target, lines=120: (
+            "======================================================================\n"
+            "CANONICAL ROLE: worker\n"
+            "SESSION NAME:   task-pollypm-7\n"
+            "======================================================================\n"
+        ),
+    )
+
+    assert router._source_pane_role_matches_launch(
+        "pollypm-storage-closet:task-pollypm-7.0", launch,
+    ) is True
+
+
+def test_source_pane_role_matches_launch_records_persona_swap_event(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """When the guard refuses a crossed mount it records a
+    ``persona_swap_detected`` event so the operator can see the
+    diagnostic in the inbox without reading source."""
+    router, supervisor = _make_router_for_test(tmp_path)
+
+    operator_launch = supervisor.launch_by_session("operator")
+    monkeypatch.setattr(
+        router.tmux,
+        "capture_pane",
+        lambda target, lines=120: (
+            "CANONICAL ROLE: heartbeat-supervisor\n"
+            "SESSION NAME:   heartbeat\n"
+        ),
+    )
+
+    assert router._source_pane_role_matches_launch(
+        "pollypm-storage-closet:pm-operator.0", operator_launch,
+    ) is False
+
+    rows = supervisor.msg_store.query_messages(
+        type="event", scope="operator", limit=20,
+    )
+    matches = [r for r in rows if r.get("subject") == "persona_swap_detected"]
+    assert len(matches) >= 1, (
+        "rail-mount guard must record a persona_swap_detected event "
+        "when it refuses a crossed mount"
+    )
+    payload = (matches[-1].get("payload") or {}).get("message") or ""
+    assert "rail-mount" in payload
+    assert "heartbeat-supervisor" in payload
+

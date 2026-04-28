@@ -2024,6 +2024,22 @@ class CockpitRouter:
                             None,
                         )
                         source = f"{storage_session}:{launch.window_name}.0"
+                        # #934 follow-up — fifth-layer rail-mount guard.
+                        # If the source pane already shows another role's
+                        # canonical banner (e.g. a long-running rail
+                        # daemon or stale cockpit process wrote heartbeat
+                        # content into a pane the cockpit later mounts as
+                        # ``operator``), refuse the join. Falling back to
+                        # the static view keeps the cockpit usable while
+                        # the operator manually clears the bad pane.
+                        if not self._source_pane_role_matches_launch(
+                            source, launch,
+                        ):
+                            raise RuntimeError(
+                                "persona_swap_detected: source pane "
+                                "shows another role's banner — refusing "
+                                "to join into cockpit."
+                            )
                         self.tmux.join_pane(source, left_pane_id, horizontal=True)
                         panes = self.tmux.list_panes(window_target)
                         left_pane = min(panes, key=self._pane_left)
@@ -2079,9 +2095,23 @@ class CockpitRouter:
             fallback_target = launch.session.project if fallback_kind == "project" else None
             self._show_static_view(supervisor, window_target, fallback_kind, fallback_target)
             return
+        source = f"{storage_session}:{target_window.index}.0"
+        # #934 follow-up — fifth-layer rail-mount guard. Even after the
+        # supervisor's four crossing guards, a stale storage-closet pane
+        # can carry another role's banner (e.g. an old rail-daemon
+        # process running pre-#931 code wrote heartbeat content into a
+        # pane the cockpit later mounts as ``operator``). Capture the
+        # source pane and refuse the mount when its content is
+        # unambiguously someone else's. Falls back to the static view so
+        # the cockpit stays usable while the operator clears the bad
+        # pane manually.
+        if not self._source_pane_role_matches_launch(source, launch):
+            fallback_kind = "polly" if session_name == "operator" else "project"
+            fallback_target = launch.session.project if fallback_kind == "project" else None
+            self._show_static_view(supervisor, window_target, fallback_kind, fallback_target)
+            return
         if right_pane_id is not None:
             self.tmux.kill_pane(right_pane_id)
-        source = f"{storage_session}:{target_window.index}.0"
         self.tmux.join_pane(source, left_pane_id, horizontal=True)
         panes = self.tmux.list_panes(window_target)
         left_pane = min(panes, key=self._pane_left)
@@ -2198,6 +2228,83 @@ class CockpitRouter:
     # These are background roles — if the user is looking at a pane, it's
     # not the heartbeat.  Guessing wrong here causes cascading mis-parks.
     _NEVER_MOUNT_ROLES = frozenset({"heartbeat-supervisor", "triage"})
+
+    def _source_pane_role_matches_launch(
+        self, source: str, launch
+    ) -> bool:
+        """Return True iff ``source`` pane's content is consistent with ``launch``'s role.
+
+        Fifth-layer crossing guard for the cockpit join path (#931–#934).
+        Even after the supervisor's four crossing guards on the kickoff
+        send path, a stale storage-closet pane can be left over — for
+        example, if a long-running rail-daemon process is running pre-#931
+        code that happily wrote heartbeat content into a pane the cockpit
+        later mounts as ``operator``. Before joining a pane into the
+        cockpit window, capture its scrollback and refuse the join when
+        the pane shows another role's canonical banner.
+
+        The check is conservative on every failure (capture exception,
+        empty pane, no banner present): returns ``True`` so a legitimate
+        fresh pane (which has not yet rendered its banner) is allowed
+        through. The guard only fires when an UNAMBIGUOUS banner for a
+        DIFFERENT role appears — that's the verifiable persona-swap
+        signal #931 already trusts.
+        """
+        expected_role = getattr(getattr(launch, "session", None), "role", None)
+        if not expected_role:
+            return True
+        try:
+            pane = self.tmux.capture_pane(source, lines=120)
+        except Exception:  # noqa: BLE001
+            return True
+        if not pane or "CANONICAL ROLE:" not in pane:
+            return True
+        observed_roles: list[str] = []
+        for line in pane.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("CANONICAL ROLE:"):
+                observed = stripped.split(":", 1)[1].strip()
+                if observed:
+                    observed_roles.append(observed)
+        if not observed_roles:
+            return True
+        # Mismatch only when *every* observed banner names a different
+        # role. If our role's banner is among them, the pane already
+        # belongs to the right session (idempotent re-mount).
+        if any(observed == expected_role for observed in observed_roles):
+            return True
+        details = (
+            f"source={source!r} expected_role={expected_role!r} "
+            f"observed_roles={observed_roles!r} "
+            f"session_name={getattr(launch.session, 'name', None)!r} "
+            f"window_name={getattr(launch, 'window_name', None)!r}"
+        )
+        try:
+            import logging as _logging
+            _logging.getLogger("pollypm.cockpit_rail").error(
+                "persona_swap_detected (rail-mount): %s — refusing to "
+                "join a pane whose content shows a different role's banner",
+                details,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        # Best-effort event so the operator-visible diagnostic surfaces
+        # without the user having to debug from the agent transcript.
+        try:
+            supervisor = self._load_supervisor()
+            supervisor._msg_store.record_event(
+                scope=getattr(launch.session, "name", "operator"),
+                sender="pollypm",
+                subject="persona_swap_detected",
+                payload={
+                    "message": (
+                        f"rail-mount source-pane guard refused join: {details}"
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
     # When CWD is ambiguous (multiple sessions share the same cwd), prefer
     # the session the user is most likely interacting with.
