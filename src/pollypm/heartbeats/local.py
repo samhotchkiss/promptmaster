@@ -271,6 +271,12 @@ from pollypm.role_contract import (
     canonical_role as _canonical_role,
 )
 from pollypm.signal_routing import (
+    RoutingDecision as _RoutingDecision,
+    SignalActionability as _SignalActionability,
+    SignalAudience as _SignalAudience,
+    SignalEnvelope as _SignalEnvelope,
+    SignalSeverity as _SignalSeverity,
+    compute_dedupe_key as _compute_dedupe_key,
     envelope_for_alert as _envelope_for_alert,
     register_routed_emitter as _register_routed_emitter,
     route_signal as _route_signal,
@@ -281,6 +287,88 @@ from pollypm.signal_routing import (
 # SignalEnvelope. The release gate's ``signal_routing_emitters``
 # check inspects ``ROUTED_EMITTERS`` for this name.
 _register_routed_emitter("heartbeat")
+
+
+def _emit_routed_alert(
+    api: Any,
+    *,
+    session_name: str,
+    alert_type: str,
+    severity: str,
+    message: str,
+    subject: str | None = None,
+    suggested_action: str | None = None,
+    project: str | None = None,
+) -> _RoutingDecision:
+    """#910 — single funnel for every heartbeat alert emission.
+
+    Constructs a :class:`SignalEnvelope`, asks
+    :func:`route_signal` for the canonical surface set, and only
+    then persists the legacy storage write via ``api.raise_alert``.
+    The returned :class:`RoutingDecision` lets call sites that
+    care about the surface set inspect it (e.g., to decide whether
+    to also send a one-shot remediation message). The legacy
+    persistence path is preserved so the rest of the heartbeat
+    pipeline (cockpit alert reader, ``open_alerts``) keeps
+    working — what changes is that no heartbeat alert reaches the
+    store without first passing through the routing policy.
+    """
+    envelope: _SignalEnvelope = _envelope_for_alert(
+        source="heartbeat",
+        alert_type=alert_type,
+        severity_label=severity,
+        session_name=session_name,
+        subject=subject or message[:80],
+        body=message,
+        suggested_action=suggested_action,
+        project=project,
+    )
+    decision = _route_signal(envelope)
+    api.raise_alert(session_name, alert_type, severity, message)
+    return decision
+
+
+def _emit_routed_event(
+    api: Any,
+    *,
+    session_name: str,
+    event_type: str,
+    message: str,
+    severity: _SignalSeverity = _SignalSeverity.INFO,
+) -> _RoutingDecision:
+    """#910 — single funnel for every heartbeat activity-feed event.
+
+    Mirrors :func:`_emit_routed_alert` for the activity-feed
+    ``record_event`` path. Activity-feed events are operational by
+    nature (heartbeat ticks, sweep summaries, unmanaged-window
+    notices) — they document what the heartbeat did but never
+    interrupt the user. The envelope therefore carries
+    :attr:`SignalAudience.OPERATOR` + :attr:`SignalActionability.OPERATIONAL`
+    so :func:`route_signal` lands the signal on the Activity surface
+    only, agreeing with the legacy event-store semantics.
+
+    Construction order matches :func:`_emit_routed_alert`:
+    build envelope, route, then persist via ``api.record_event`` so
+    no event reaches the store without first passing through the
+    routing policy.
+    """
+    envelope = _SignalEnvelope(
+        audience=_SignalAudience.OPERATOR,
+        severity=severity,
+        actionability=_SignalActionability.OPERATIONAL,
+        source="heartbeat",
+        subject=event_type,
+        body=message,
+        dedupe_key=_compute_dedupe_key(
+            source="heartbeat",
+            kind=event_type,
+            target=session_name,
+        ),
+        payload={"event_type": event_type, "session_name": session_name},
+    )
+    decision = _route_signal(envelope)
+    api.record_event(session_name, event_type, message)
+    return decision
 
 
 def _materialize_legacy_table(field: str) -> dict[str, str]:
@@ -428,15 +516,19 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                         activity_summary,
                     )
 
-                    api.record_event(
-                        context.session_name,
-                        "heartbeat_error",
-                        activity_summary(
+                    # #910 — routed through _emit_routed_event so the
+                    # activity-feed write goes through SignalEnvelope.
+                    _emit_routed_event(
+                        api,
+                        session_name=context.session_name,
+                        event_type="heartbeat_error",
+                        message=activity_summary(
                             summary=f"Error processing session: {exc}",
                             severity="critical",
                             verb="errored",
                             subject=context.session_name,
                         ),
+                        severity=_SignalSeverity.CRITICAL,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -445,10 +537,12 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         open_alerts = api.open_alerts()
         alerts_n = len(open_alerts)
         alert_word = "alert" if alerts_n == 1 else "alerts"
-        api.record_event(
-            "heartbeat",
-            "heartbeat",
-            activity_summary(
+        # #910 — sweep-completion event routed through SignalEnvelope.
+        _emit_routed_event(
+            api,
+            session_name="heartbeat",
+            event_type="heartbeat",
+            message=activity_summary(
                 summary=f"Heartbeat sweep completed with {alerts_n} open {alert_word}",
                 severity="recommendation" if open_alerts else "routine",
                 verb="swept",
@@ -536,16 +630,25 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                 f"Found unmanaged tmux window {window.window_name} in session {window.tmux_session} "
                 f"running {window.pane_command}"
             )
-            api.raise_alert("heartbeat", alert_type, "warn", message)
+            _emit_routed_alert(
+                api,
+                session_name="heartbeat",
+                alert_type=alert_type,
+                severity="warn",
+                message=message,
+                subject=f"Unmanaged tmux window: {window.window_name}",
+            )
             if alert_type not in existing_alert_types:
                 from pollypm.plugins_builtin.activity_feed.summaries import (
                     activity_summary,
                 )
 
-                api.record_event(
-                    "heartbeat",
-                    "unmanaged_window",
-                    activity_summary(
+                # #910 — unmanaged-window event routed through SignalEnvelope.
+                _emit_routed_event(
+                    api,
+                    session_name="heartbeat",
+                    event_type="unmanaged_window",
+                    message=activity_summary(
                         summary=message,
                         severity="recommendation",
                         verb="unmanaged",
@@ -567,11 +670,19 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             pass  # API may not have supervisor (e.g., tests)
         mechanical_only = context.role == "heartbeat-supervisor"
         if not context.window_present:
-            api.raise_alert(
-                context.session_name,
-                "missing_window",
-                "error",
-                f"Expected tmux window {context.window_name} in session {context.tmux_session}",
+            _emit_routed_alert(
+                api,
+                session_name=context.session_name,
+                alert_type="missing_window",
+                severity="error",
+                message=(
+                    f"Expected tmux window {context.window_name} in "
+                    f"session {context.tmux_session}"
+                ),
+                subject=f"{context.session_name} missing tmux window",
+                suggested_action=(
+                    f"pm session restart {context.session_name}"
+                ),
             )
             self._set_session_status(
                 api,
@@ -598,11 +709,19 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         api.clear_alert(context.session_name, "missing_window")
 
         if context.pane_dead:
-            api.raise_alert(
-                context.session_name,
-                "pane_dead",
-                "error",
-                f"Pane {context.pane_id} in window {context.window_name} has exited",
+            _emit_routed_alert(
+                api,
+                session_name=context.session_name,
+                alert_type="pane_dead",
+                severity="error",
+                message=(
+                    f"Pane {context.pane_id} in window "
+                    f"{context.window_name} has exited"
+                ),
+                subject=f"{context.session_name} pane exited",
+                suggested_action=(
+                    f"pm session restart {context.session_name}"
+                ),
             )
             self._set_session_status(api, context, "recovering", reason="Pane exited")
             self._recover_session(
@@ -616,11 +735,19 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             api.clear_alert(context.session_name, "pane_dead")
 
         if (context.pane_command or "") in {"bash", "zsh", "sh", "fish"}:
-            api.raise_alert(
-                context.session_name,
-                "shell_returned",
-                "warn",
-                f"Window {context.window_name} appears to be back at the shell prompt ({context.pane_command})",
+            _emit_routed_alert(
+                api,
+                session_name=context.session_name,
+                alert_type="shell_returned",
+                severity="warn",
+                message=(
+                    f"Window {context.window_name} appears to be back at "
+                    f"the shell prompt ({context.pane_command})"
+                ),
+                subject=f"{context.session_name} returned to shell",
+                suggested_action=(
+                    f"pm session restart {context.session_name}"
+                ),
             )
             alerts.append("shell_returned")
         else:
@@ -656,15 +783,22 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                     # #760 — concrete actionable copy: name the role,
                     # say what's wrong in plain English, give the
                     # next step as a copy-pasteable command.
-                    api.raise_alert(
-                        context.session_name,
-                        "suspected_loop",
-                        "warn",
-                        (
+                    _emit_routed_alert(
+                        api,
+                        session_name=context.session_name,
+                        alert_type="suspected_loop",
+                        severity="warn",
+                        message=(
                             f"{context.role or 'session'} "
                             f"{context.session_name} stalled — no new output "
                             f"for 3 heartbeats with queued work. "
                             f"Try: pm session restart {context.session_name}"
+                        ),
+                        subject=(
+                            f"{context.session_name} appears stalled"
+                        ),
+                        suggested_action=(
+                            f"pm session restart {context.session_name}"
                         ),
                     )
                     alerts.append("suspected_loop")
@@ -727,23 +861,24 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                 f"itself as {drifted_to!r} mid-session — identity drift. "
                 f"Try: pm session restart {context.session_name}"
             )
-            _drift_envelope = _envelope_for_alert(
-                source="heartbeat",
-                alert_type="persona_drift_detected",
-                severity_label="error",
+            # #910 — consolidated through the same routed-emit helper
+            # used by every other heartbeat alert. The helper is the
+            # single funnel: it builds the envelope, calls
+            # route_signal, and only then persists. Keeping the
+            # persistence here means the cockpit alert reader and the
+            # `pm alerts` listing keep working exactly as before;
+            # what changes is that no alert reaches the store
+            # without first passing through the routing policy.
+            _emit_routed_alert(
+                api,
                 session_name=context.session_name,
+                alert_type="persona_drift_detected",
+                severity="error",
+                message=_drift_body,
                 subject=_drift_subject,
-                body=_drift_body,
                 suggested_action=(
                     f"pm session restart {context.session_name}"
                 ),
-            )
-            _route_signal(_drift_envelope)
-            api.raise_alert(
-                context.session_name,
-                "persona_drift_detected",
-                "error",
-                _drift_body,
             )
             alerts.append("persona_drift_detected")
             # #757 — reactive remediation: send a one-shot re-assertion
@@ -777,11 +912,19 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         combined_text = "\n".join(part for part in [context.transcript_delta, context.pane_text] if part).lower()
         status_locked = False
         if any(pattern in combined_text for pattern in self._AUTH_FAILURE_PATTERNS):
-            api.raise_alert(
-                context.session_name,
-                "auth_broken",
-                "error",
-                f"Window {context.window_name} reported authentication failure",
+            _emit_routed_alert(
+                api,
+                session_name=context.session_name,
+                alert_type="auth_broken",
+                severity="error",
+                message=(
+                    f"Window {context.window_name} reported "
+                    f"authentication failure"
+                ),
+                subject=f"{context.session_name} authentication failure",
+                suggested_action=(
+                    f"pm session restart {context.session_name}"
+                ),
             )
             api.mark_account_auth_broken(
                 context.account_name,
@@ -810,7 +953,14 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         else:
             verdict, reason = self._classify(context)
             if verdict == "needs_followup":
-                api.raise_alert(context.session_name, "needs_followup", "warn", reason)
+                _emit_routed_alert(
+                    api,
+                    session_name=context.session_name,
+                    alert_type="needs_followup",
+                    severity="warn",
+                    message=reason,
+                    subject=f"{context.session_name} needs follow-up",
+                )
                 if not status_locked:
                     self._set_session_status(
                         api,
@@ -1039,11 +1189,19 @@ class LocalHeartbeatBackend(HeartbeatBackend):
             pass
 
         try:
-            api.raise_alert(
-                context.session_name,
-                "stuck_session",
-                "warn",
-                f"{context.session_name} needs attention: {reason[:160]}",
+            _emit_routed_alert(
+                api,
+                session_name=context.session_name,
+                alert_type="stuck_session",
+                severity="warn",
+                message=(
+                    f"{context.session_name} needs attention: "
+                    f"{reason[:160]}"
+                ),
+                subject=f"{context.session_name} needs attention",
+                suggested_action=(
+                    f"pm session restart {context.session_name}"
+                ),
             )
             from pollypm.plugins_builtin.activity_feed.summaries import (
                 activity_summary,
@@ -1204,13 +1362,21 @@ class LocalHeartbeatBackend(HeartbeatBackend):
                 return
             if same_episode_nudge:
                 if idle_cycles >= self._NUDGE_ESCALATION_IDLE_CYCLES:
-                    api.raise_alert(
-                        context.session_name,
-                        "stuck_session",
-                        "warn",
-                        (
-                            f"{context.session_name} stayed stalled after a heartbeat "
-                            f"nudge for {idle_cycles} identical heartbeats"
+                    _emit_routed_alert(
+                        api,
+                        session_name=context.session_name,
+                        alert_type="stuck_session",
+                        severity="warn",
+                        message=(
+                            f"{context.session_name} stayed stalled after "
+                            f"a heartbeat nudge for {idle_cycles} "
+                            f"identical heartbeats"
+                        ),
+                        subject=(
+                            f"{context.session_name} unresponsive to nudge"
+                        ),
+                        suggested_action=(
+                            f"pm session restart {context.session_name}"
                         ),
                     )
                     api.supervisor.msg_store.append_event(

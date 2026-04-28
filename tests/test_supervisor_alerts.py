@@ -171,3 +171,127 @@ def test_supervisor_wrapper_delegates_alert_helper(monkeypatch, tmp_path: Path) 
     )
 
     assert alerts == ["delegated"]
+
+
+# ---------------------------------------------------------------------------
+# #910 follow-up — record_event sites route through SignalEnvelope
+# ---------------------------------------------------------------------------
+
+
+class _FakeMsgStore:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def record_event(self, *, scope: str, sender: str, subject: str, payload: dict) -> int:
+        self.events.append(
+            {"scope": scope, "sender": sender, "subject": subject, "payload": payload}
+        )
+        return len(self.events)
+
+
+class _FakeSupervisorBoundary:
+    """Minimal stand-in for SupervisorAlertBoundary suitable for the
+    record_event-routing test. Only ``msg_store`` is exercised by the
+    funnel under test."""
+
+    def __init__(self) -> None:
+        self.msg_store = _FakeMsgStore()
+
+
+def test_supervisor_alerts_emit_routed_event_routes_through_signal_envelope(
+    monkeypatch,
+) -> None:
+    """#910 follow-up — every event written through
+    ``_emit_routed_event`` must construct a SignalEnvelope and pass
+    it through ``route_signal`` BEFORE the legacy
+    ``msg_store.record_event`` write.
+
+    Patches the funnel's ``_route_signal`` reference with a recording
+    stub so the test can read back the envelope and confirm:
+      * the envelope was built and routed (call count == 1),
+      * the legacy persistence still ran exactly once,
+      * the envelope carries OPERATIONAL actionability + OPERATOR
+        audience (so the routing policy lands it on Activity only),
+      * the dedupe key names the source + subject + scope, matching
+        the convention used by the heartbeat-side funnel.
+    """
+    from pollypm.signal_routing import (
+        SignalActionability,
+        SignalAudience,
+    )
+
+    captured: list = []
+
+    def _record(envelope):
+        captured.append(envelope)
+        return None  # route_signal return value unused by funnel
+
+    monkeypatch.setattr(_supervisor_alerts, "_route_signal", _record)
+
+    boundary = _FakeSupervisorBoundary()
+    _supervisor_alerts._emit_routed_event(
+        boundary,
+        scope="worker",
+        sender="worker",
+        subject="heartbeat_nudge_skipped",
+        payload={"message": "Skipped"},
+    )
+
+    assert len(captured) == 1
+    env = captured[0]
+    assert env.source == "supervisor_alerts"
+    assert env.subject == "heartbeat_nudge_skipped"
+    assert env.audience is SignalAudience.OPERATOR
+    assert env.actionability is SignalActionability.OPERATIONAL
+    assert env.dedupe_key is not None
+    assert "supervisor_alerts" in env.dedupe_key
+    assert "heartbeat_nudge_skipped" in env.dedupe_key
+    assert "worker" in env.dedupe_key
+    assert env.body == "Skipped"
+
+    # Legacy persistence still happens — the funnel preserves the
+    # event-store write so existing readers don't regress.
+    assert len(boundary.msg_store.events) == 1
+    persisted = boundary.msg_store.events[0]
+    assert persisted["subject"] == "heartbeat_nudge_skipped"
+    assert persisted["scope"] == "worker"
+
+
+def test_supervisor_alerts_heartbeat_nudge_skipped_path_routes_through_funnel(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#910 follow-up — the human-leased worker nudge-skip site
+    (formerly a raw ``msg_store.record_event`` call) now goes through
+    ``_emit_routed_event``. Exercising the public
+    ``_maybe_nudge_stalled_session`` entry point asserts the funnel
+    runs end-to-end on the legacy code path."""
+    from pollypm.signal_routing import SignalActionability
+
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+    launch = next(
+        item for item in supervisor.plan_launches() if item.session.name == "worker"
+    )
+
+    # Force the human-leased branch in _maybe_nudge_stalled_session.
+    supervisor.store.set_lease(launch.session.name, "human")
+
+    captured: list = []
+
+    def _record(envelope):
+        captured.append(envelope)
+        return None
+
+    monkeypatch.setattr(_supervisor_alerts, "_route_signal", _record)
+
+    _supervisor_alerts._maybe_nudge_stalled_session(supervisor, launch)
+
+    matching = [
+        env for env in captured
+        if env.dedupe_key and "heartbeat_nudge_skipped" in env.dedupe_key
+    ]
+    assert matching, [env.dedupe_key for env in captured]
+    env = matching[0]
+    assert env.source == "supervisor_alerts"
+    assert env.actionability is SignalActionability.OPERATIONAL

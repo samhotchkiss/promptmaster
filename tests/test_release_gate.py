@@ -7,10 +7,12 @@ from pollypm.release_gate import (
     GateResult,
     GateSeverity,
     ReleaseReport,
+    audit_legacy_emit_call_sites,
     closure_comment_complete,
     gate_cockpit_interaction_audit_clean,
     gate_cockpit_smoke_harness,
     gate_security_checklist,
+    gate_signal_routing_call_sites_migrated,
     gate_signal_routing_emitters_migrated,
     gate_storage_legacy_writers,
     gate_task_invariant_metadata_complete,
@@ -126,6 +128,129 @@ def test_signal_routing_emitters_gate_blocks_on_regression(monkeypatch) -> None:
     assert result.severity is GateSeverity.BLOCKING
 
 
+# ---------------------------------------------------------------------------
+# #910 — per-call-site routing-funnel enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_signal_routing_call_sites_gate_passes_on_current_tree() -> None:
+    """#910 — every ``raise_alert`` under ``src/pollypm/heartbeats``
+    must route through the SignalEnvelope funnel
+    (``_emit_routed_alert``). The current tree must pass."""
+    result = gate_signal_routing_call_sites_migrated()
+    assert result.passed, result.detail
+
+
+def test_audit_legacy_emit_call_sites_returns_empty_on_clean_tree() -> None:
+    """The underlying audit helper agrees with the gate."""
+    findings = audit_legacy_emit_call_sites()
+    assert findings == (), "\n".join(f.render() for f in findings)
+
+
+def test_signal_routing_call_sites_gate_blocks_on_regressed_legacy_call(
+    tmp_path, monkeypatch,
+) -> None:
+    """Synthetic regression fixture — drop a fake heartbeat module
+    that bypasses the routing funnel and confirm the gate fails.
+
+    Patches the policed-directory list to point at a tmp tree so the
+    real source is untouched; the fixture file mirrors the legacy
+    pattern (``api.raise_alert(...)`` from a non-funnel function)."""
+    import pollypm.release_gate as rg
+
+    fake_pkg = tmp_path / "src" / "pollypm" / "heartbeats"
+    fake_pkg.mkdir(parents=True)
+    (fake_pkg / "__init__.py").write_text("")
+    (fake_pkg / "rogue.py").write_text(
+        "def emit_without_routing(api):\n"
+        "    api.raise_alert('s', 'rogue', 'warn', 'msg')\n"
+    )
+    monkeypatch.setattr(rg, "_repo_root", lambda: tmp_path)
+    # The allowlist keys are anchored at "src/pollypm/heartbeats/..."
+    # so the fake tree's relative paths line up.
+    result = rg.gate_signal_routing_call_sites_migrated()
+    assert result.passed is False
+    assert result.severity is GateSeverity.BLOCKING
+    assert "rogue.py" in result.detail
+    assert "emit_without_routing" in result.detail
+
+
+def test_signal_routing_call_sites_gate_allows_funnel_self_call(
+    tmp_path, monkeypatch,
+) -> None:
+    """A ``raise_alert`` call inside ``_emit_routed_alert`` (the
+    documented routing funnel) must NOT be flagged. The funnel is
+    the migration target — every other site routes through it."""
+    import pollypm.release_gate as rg
+
+    fake_pkg = tmp_path / "src" / "pollypm" / "heartbeats"
+    fake_pkg.mkdir(parents=True)
+    (fake_pkg / "__init__.py").write_text("")
+    (fake_pkg / "local.py").write_text(
+        "def _emit_routed_alert(api, **kwargs):\n"
+        "    api.raise_alert('s', 't', 'warn', 'msg')\n"
+    )
+    monkeypatch.setattr(rg, "_repo_root", lambda: tmp_path)
+    result = rg.gate_signal_routing_call_sites_migrated()
+    assert result.passed, result.detail
+
+
+def test_signal_routing_call_sites_gate_blocks_on_regressed_legacy_record_event(
+    tmp_path, monkeypatch,
+) -> None:
+    """#910 follow-up — the gate's policed-API set now includes
+    ``record_event`` (matching the second emit boundary the audit
+    flagged). A heartbeat module that calls ``api.record_event``
+    outside the routing funnel must trip the gate as BLOCKING.
+    Mirrors the existing ``raise_alert`` regression fixture so both
+    APIs are covered by the same enforcement contract."""
+    import pollypm.release_gate as rg
+
+    fake_pkg = tmp_path / "src" / "pollypm" / "heartbeats"
+    fake_pkg.mkdir(parents=True)
+    (fake_pkg / "__init__.py").write_text("")
+    (fake_pkg / "rogue_event.py").write_text(
+        "def emit_event_without_routing(api):\n"
+        "    api.record_event('s', 'rogue_event', 'msg')\n"
+    )
+    monkeypatch.setattr(rg, "_repo_root", lambda: tmp_path)
+    result = rg.gate_signal_routing_call_sites_migrated()
+    assert result.passed is False
+    assert result.severity is GateSeverity.BLOCKING
+    assert "rogue_event.py" in result.detail
+    assert "record_event" in result.detail
+    assert "emit_event_without_routing" in result.detail
+
+
+def test_signal_routing_call_sites_gate_allows_event_funnel_self_call(
+    tmp_path, monkeypatch,
+) -> None:
+    """A ``record_event`` call inside the event funnel
+    (``_emit_routed_event``) is the migration target — exempt
+    from the policed set, mirroring the ``raise_alert`` /
+    ``_emit_routed_alert`` allow-list entry."""
+    import pollypm.release_gate as rg
+
+    fake_pkg = tmp_path / "src" / "pollypm" / "heartbeats"
+    fake_pkg.mkdir(parents=True)
+    (fake_pkg / "__init__.py").write_text("")
+    (fake_pkg / "local.py").write_text(
+        "def _emit_routed_event(api, **kwargs):\n"
+        "    api.record_event('s', 'evt', 'msg')\n"
+    )
+    monkeypatch.setattr(rg, "_repo_root", lambda: tmp_path)
+    result = rg.gate_signal_routing_call_sites_migrated()
+    assert result.passed, result.detail
+
+
+def test_default_gates_include_call_sites_gate() -> None:
+    """#910 — the per-site enforcement gate ships in the default set
+    so a passing release report actually reflects the per-site
+    contract, not just module-level registration."""
+    names = {gate.__name__ for gate in DEFAULT_GATES}
+    assert "gate_signal_routing_call_sites_migrated" in names
+
+
 def test_security_checklist_gate_passes_on_current_tree() -> None:
     """#893 / #895 — the security checklist gate must pass on the
     current tree once the worktree probe targets the real API name
@@ -233,6 +358,115 @@ def test_cockpit_smoke_harness_gate_blocks_on_drift(monkeypatch) -> None:
     result = rg.gate_cockpit_smoke_harness()
     assert result.passed is False
     assert result.severity is GateSeverity.BLOCKING
+
+
+def test_cockpit_smoke_harness_gate_blocks_on_rendered_failure(monkeypatch) -> None:
+    """#911 — if a rendered smoke scenario fails, the gate must
+    fail BLOCKING. This is the regression that the prior gate
+    silently passed: the harness shape was fine while the
+    rendered matrix could be broken.
+
+    Stubs ``run_smoke_matrix`` to return a synthetic failure and
+    asserts the gate translates it into a BLOCKING result whose
+    detail surfaces the failing scenario name + size."""
+    import pollypm.release_gate as rg
+    from pollypm.cockpit_smoke import SmokeFailure
+
+    fake_failure = SmokeFailure(
+        scenario="synthetic_broken_render",
+        size=(80, 30),
+        error_type="AssertionError",
+        message="rail recovery hint clipped",
+    )
+    monkeypatch.setattr(
+        "pollypm.cockpit_smoke.run_smoke_matrix",
+        lambda *args, **kwargs: (fake_failure,),
+    )
+    result = rg.gate_cockpit_smoke_harness()
+    assert result.passed is False
+    assert result.severity is GateSeverity.BLOCKING
+    assert "synthetic_broken_render" in result.detail
+    assert "80x30" in result.detail
+
+
+def test_cockpit_smoke_harness_gate_blocks_when_runner_raises(monkeypatch) -> None:
+    """#911 — a smoke runner that crashes before completing the
+    matrix must surface as BLOCKING, not as a false PASS. This
+    closes the failure mode where the runner itself is broken
+    (e.g., an import error, a Textual API change)."""
+    import pollypm.release_gate as rg
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("compositor unavailable")
+
+    monkeypatch.setattr(
+        "pollypm.cockpit_smoke.run_smoke_matrix",
+        _explode,
+    )
+    result = rg.gate_cockpit_smoke_harness()
+    assert result.passed is False
+    assert result.severity is GateSeverity.BLOCKING
+    assert "compositor unavailable" in result.detail
+
+
+def test_cockpit_smoke_harness_gate_blocks_when_no_scenarios(monkeypatch) -> None:
+    """#911 — if the scenario registry is empty, the gate has no
+    rendered coverage and must block. Without this guard, removing
+    every scenario would pass the gate by skipping the runner."""
+    import pollypm.release_gate as rg
+
+    monkeypatch.setattr("pollypm.cockpit_smoke.SMOKE_SCENARIOS", ())
+    result = rg.gate_cockpit_smoke_harness()
+    assert result.passed is False
+    assert result.severity is GateSeverity.BLOCKING
+    assert "no smoke scenarios" in result.summary.lower()
+
+
+def test_run_smoke_matrix_collects_scenario_failures() -> None:
+    """#911 — the smoke runner records each failing cell as a
+    :class:`SmokeFailure` rather than aborting the matrix.
+
+    Builds a two-scenario list where one body raises; asserts the
+    runner returns exactly one failure naming the broken scenario
+    and that the passing scenario does not surface."""
+    from pollypm.cockpit_smoke import (
+        SmokeScenario,
+        run_smoke_matrix,
+    )
+    from textual.app import App, ComposeResult
+    from textual.widgets import Static
+
+    class _OkApp(App):
+        def compose(self) -> ComposeResult:
+            yield Static("ok content")
+
+    async def passing_body(smoke):
+        smoke.snapshot()
+        smoke.assert_text_visible("ok content")
+
+    async def failing_body(smoke):
+        smoke.snapshot()
+        raise AssertionError("intentional smoke failure")
+
+    scenarios = (
+        SmokeScenario(
+            name="passing_scenario",
+            app_factory=_OkApp,
+            body=passing_body,
+            sizes=((80, 30),),
+        ),
+        SmokeScenario(
+            name="failing_scenario",
+            app_factory=_OkApp,
+            body=failing_body,
+            sizes=((80, 30),),
+        ),
+    )
+    failures = run_smoke_matrix(scenarios=scenarios)
+    assert len(failures) == 1
+    assert failures[0].scenario == "failing_scenario"
+    assert failures[0].size == (80, 30)
+    assert "intentional smoke failure" in failures[0].message
 
 
 # ---------------------------------------------------------------------------

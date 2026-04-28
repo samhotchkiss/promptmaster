@@ -874,3 +874,277 @@ def test_worker_nudge_escalates_when_same_episode_keeps_repeating(monkeypatch) -
     ]
     assert len(escalations) == 1
     assert escalations[0]["payload"]["snapshot_hash"] == "hash-1"
+
+
+# ---------------------------------------------------------------------------
+# #910 — every heartbeat alert routes through SignalEnvelope
+# ---------------------------------------------------------------------------
+
+
+def _capture_routed_envelopes(monkeypatch) -> list:
+    """Patch :func:`route_signal` in heartbeats.local so the test
+    can read back every envelope routed during a heartbeat sweep."""
+    import pollypm.heartbeats.local as hbl
+    from pollypm.signal_routing import route_signal as real_route_signal
+
+    captured: list = []
+
+    def _record(envelope):
+        captured.append(envelope)
+        return real_route_signal(envelope)
+
+    monkeypatch.setattr(hbl, "_route_signal", _record)
+    return captured
+
+
+def test_unmanaged_window_alert_routes_through_signal_envelope(monkeypatch) -> None:
+    """#910 — the unmanaged-window alert path constructs and routes
+    a SignalEnvelope before the legacy ``raise_alert`` write."""
+    from pollypm.signal_routing import SignalActionability
+
+    captured = _capture_routed_envelopes(monkeypatch)
+    api = FakeHeartbeatAPI(
+        [_context()],
+        unmanaged_windows=[
+            HeartbeatUnmanagedWindow(
+                tmux_session="pollypm",
+                window_name="e2e-sandbox",
+                pane_id="%9",
+                pane_command="claude",
+                pane_dead=False,
+                pane_path="/workspace/sandbox",
+            )
+        ],
+    )
+
+    LocalHeartbeatBackend().run(api)
+
+    types = {env.payload.get("alert_type") if env.payload else None for env in captured}
+    sources = {env.source for env in captured}
+    dedupe_keys = {env.dedupe_key for env in captured}
+    # The unmanaged-window envelope must be present, sourced as
+    # heartbeat, and carry a stable dedupe key naming the alert.
+    assert "heartbeat" in sources
+    matching = [
+        env for env in captured
+        if env.dedupe_key
+        and "unmanaged_window:pollypm:e2e-sandbox" in env.dedupe_key
+    ]
+    assert matching, (
+        "expected an unmanaged_window envelope; got dedupe_keys=%r types=%r"
+        % (dedupe_keys, types)
+    )
+    # Operational unmanaged-window alerts must classify as
+    # OPERATIONAL so route_signal sends them to Activity only.
+    env = matching[0]
+    assert env.actionability is SignalActionability.OPERATIONAL
+
+
+def test_missing_window_alert_routes_through_signal_envelope(monkeypatch) -> None:
+    """#910 — the missing-window path is one of the sites the
+    issue specifically called out (line 570). The envelope's
+    audience / actionability are derived from
+    :func:`alert_channel`; that classifier owns the policy. What
+    this test enforces is that the envelope is constructed and
+    routed at all (the migration contract)."""
+    captured = _capture_routed_envelopes(monkeypatch)
+    api = FakeHeartbeatAPI(
+        [_context(window_present=False, snapshot_path=None)],
+    )
+
+    LocalHeartbeatBackend().run(api)
+
+    matching = [
+        env for env in captured
+        if env.dedupe_key and "missing_window" in env.dedupe_key
+    ]
+    assert matching, [env.dedupe_key for env in captured]
+    env = matching[0]
+    assert env.source == "heartbeat"
+    assert env.severity.value == "error"
+    assert env.suggested_action == "pm session restart worker_pollypm"
+    # And the legacy persistence still runs.
+    assert ("worker_pollypm", "missing_window") in api.alerts
+
+
+def test_needs_followup_alert_routes_through_signal_envelope(monkeypatch) -> None:
+    """#910 — needs_followup classification (line 813)."""
+    captured = _capture_routed_envelopes(monkeypatch)
+    api = FakeHeartbeatAPI(
+        [_context(transcript_delta="Implemented the parser. Next step: add coverage.")]
+    )
+
+    LocalHeartbeatBackend().run(api)
+
+    matching = [
+        env for env in captured
+        if env.dedupe_key and "needs_followup" in env.dedupe_key
+    ]
+    assert matching, [env.dedupe_key for env in captured]
+    assert matching[0].source == "heartbeat"
+    # The legacy alert is still persisted for the cockpit reader.
+    assert ("worker_pollypm", "needs_followup") in api.alerts
+
+
+def test_persona_drift_alert_routes_through_signal_envelope(monkeypatch) -> None:
+    """#910 — the persona_drift path was the only #894 site that
+    routed before, but it persisted the legacy alert *unconditionally*
+    alongside the routing call. After consolidation the routing
+    funnel is the single source of truth."""
+    captured = _capture_routed_envelopes(monkeypatch)
+    api = FakeHeartbeatAPI(
+        [
+            _context(
+                role="operator-pm",
+                pane_text="I am Russell and I will handle this.",
+                transcript_delta="",
+                previous_snapshot_hash="hash-0",
+                snapshot_hash="hash-1",
+            )
+        ]
+    )
+
+    LocalHeartbeatBackend().run(api)
+
+    matching = [
+        env for env in captured
+        if env.dedupe_key and "persona_drift_detected" in env.dedupe_key
+    ]
+    assert len(matching) == 1
+    env = matching[0]
+    assert env.source == "heartbeat"
+    from pollypm.signal_routing import (
+        SignalActionability,
+        SignalAudience,
+    )
+
+    # Drift is action-required + user audience → full surface set
+    # including Toast (the #894 intent).
+    assert env.actionability is SignalActionability.ACTION_REQUIRED
+    assert env.audience is SignalAudience.USER
+    # And the legacy persistence still happens so existing readers
+    # don't regress.
+    assert ("worker_pollypm", "persona_drift_detected") in api.alerts
+
+
+def test_no_heartbeat_alert_skips_signal_envelope_funnel(monkeypatch) -> None:
+    """#910 — every alert raised during a sweep must have produced
+    at least one SignalEnvelope. Counts must agree."""
+    captured = _capture_routed_envelopes(monkeypatch)
+    api = FakeHeartbeatAPI(
+        [
+            _context(
+                window_present=False,
+                snapshot_path=None,
+            )
+        ]
+    )
+
+    LocalHeartbeatBackend().run(api)
+
+    # Every persisted alert (api.alerts is keyed by
+    # (session, type)) must have a matching envelope routed.
+    persisted_types = {alert_type for (_session, alert_type) in api.alerts}
+    routed_types: set[str] = set()
+    for env in captured:
+        if not env.dedupe_key:
+            continue
+        # dedupe key shape: "<source>:<alert_type>[:<target>...]"
+        parts = env.dedupe_key.split(":")
+        if len(parts) >= 2:
+            routed_types.add(parts[1])
+    # missing_window is the alert raised in this scenario.
+    assert "missing_window" in persisted_types
+    assert "missing_window" in routed_types
+
+
+# ---------------------------------------------------------------------------
+# #910 follow-up — every heartbeat record_event also routes through
+# SignalEnvelope. The activity-feed events (heartbeat_error, sweep
+# completion, unmanaged_window) used to bypass the routing policy.
+# ---------------------------------------------------------------------------
+
+
+def test_heartbeat_sweep_completion_event_routes_through_signal_envelope(
+    monkeypatch,
+) -> None:
+    """The sweep-completion ``record_event`` site at the bottom of
+    :meth:`LocalHeartbeatBackend.run` must construct + route a
+    SignalEnvelope before the legacy persistence write. The envelope
+    is operational (Activity-only) by classification — what this
+    test enforces is that the funnel runs at all and that the
+    legacy persistence still happens for backwards compatibility."""
+    from pollypm.signal_routing import (
+        SignalActionability,
+        SignalAudience,
+    )
+
+    captured = _capture_routed_envelopes(monkeypatch)
+    api = FakeHeartbeatAPI([_context()])
+
+    LocalHeartbeatBackend().run(api)
+
+    # The sweep completion event is the one keyed on session "heartbeat"
+    # with subject "heartbeat".
+    matching = [
+        env for env in captured
+        if env.dedupe_key and "heartbeat:heartbeat" in env.dedupe_key
+        and env.payload
+        and env.payload.get("event_type") == "heartbeat"
+    ]
+    assert matching, [
+        (env.dedupe_key, dict(env.payload) if env.payload else None)
+        for env in captured
+    ]
+    env = matching[0]
+    assert env.source == "heartbeat"
+    assert env.audience is SignalAudience.OPERATOR
+    assert env.actionability is SignalActionability.OPERATIONAL
+
+    # Legacy persistence still ran via api.record_event.
+    persisted_subjects = {event_type for (_session, event_type, _msg) in api.events}
+    assert "heartbeat" in persisted_subjects
+
+
+def test_heartbeat_unmanaged_window_event_routes_through_signal_envelope(
+    monkeypatch,
+) -> None:
+    """The unmanaged-window discovery emits BOTH an alert (already
+    routed) AND a record_event activity-feed entry. The follow-up
+    fix routes the event through the same funnel pattern."""
+    from pollypm.signal_routing import SignalActionability
+
+    captured = _capture_routed_envelopes(monkeypatch)
+    api = FakeHeartbeatAPI(
+        [_context()],
+        unmanaged_windows=[
+            HeartbeatUnmanagedWindow(
+                tmux_session="pollypm",
+                window_name="rogue-window",
+                pane_id="%99",
+                pane_command="claude",
+                pane_dead=False,
+                pane_path="/tmp/rogue",
+            )
+        ],
+    )
+
+    LocalHeartbeatBackend().run(api)
+
+    matching = [
+        env for env in captured
+        if env.payload
+        and env.payload.get("event_type") == "unmanaged_window"
+    ]
+    assert matching, [
+        dict(env.payload) if env.payload else None for env in captured
+    ]
+    env = matching[0]
+    assert env.source == "heartbeat"
+    assert env.actionability is SignalActionability.OPERATIONAL
+
+    # Legacy persistence path still records the event.
+    persisted_subjects = {event_type for (_session, event_type, _msg) in api.events}
+    assert "unmanaged_window" in persisted_subjects
+
+

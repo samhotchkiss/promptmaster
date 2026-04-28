@@ -22,6 +22,11 @@ from typing import Protocol
 from pollypm.config import PollyPMConfig
 from pollypm.models import SessionLaunchSpec
 from pollypm.signal_routing import (
+    SignalActionability as _SignalActionability,
+    SignalAudience as _SignalAudience,
+    SignalEnvelope as _SignalEnvelope,
+    SignalSeverity as _SignalSeverity,
+    compute_dedupe_key as _compute_dedupe_key,
     envelope_for_alert as _envelope_for_alert,
     register_routed_emitter as _register_routed_emitter,
     route_signal as _route_signal,
@@ -66,6 +71,56 @@ class SupervisorAlertBoundary(Protocol):
 
 
 _REVIEW_NUDGE_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+
+def _emit_routed_event(
+    supervisor: "SupervisorAlertBoundary",
+    *,
+    scope: str,
+    sender: str,
+    subject: str,
+    payload: dict,
+) -> None:
+    """#910 — single funnel for supervisor-alerts activity-feed events.
+
+    Mirrors the heartbeat-side ``_emit_routed_event`` funnel: build a
+    :class:`SignalEnvelope`, route it through :func:`route_signal`,
+    then persist the legacy ``msg_store.record_event`` write so the
+    routing policy is the source of truth for delivery surfaces.
+
+    Supervisor-alerts events are operational (heartbeat-nudge skip
+    notices and similar) so the envelope is constructed with
+    ``OPERATOR`` audience + ``OPERATIONAL`` actionability — those
+    classifications make :func:`route_signal` deliver to the
+    Activity surface only, which matches the legacy event-store
+    semantics this funnel preserves.
+    """
+    body = ""
+    if isinstance(payload, dict):
+        message_value = payload.get("message")
+        if isinstance(message_value, str):
+            body = message_value
+    envelope = _SignalEnvelope(
+        audience=_SignalAudience.OPERATOR,
+        severity=_SignalSeverity.INFO,
+        actionability=_SignalActionability.OPERATIONAL,
+        source="supervisor_alerts",
+        subject=subject,
+        body=body,
+        dedupe_key=_compute_dedupe_key(
+            source="supervisor_alerts",
+            kind=subject,
+            target=scope,
+        ),
+        payload={"sender": sender, "scope": scope, **(payload or {})},
+    )
+    _route_signal(envelope)
+    supervisor.msg_store.record_event(
+        scope=scope,
+        sender=sender,
+        subject=subject,
+        payload=payload,
+    )
 
 
 def _review_tasks_for_project(project_key: str, db_path: Path) -> list[str]:
@@ -275,7 +330,10 @@ def _maybe_nudge_stalled_session(supervisor: SupervisorAlertBoundary, launch: Se
         return
     lease = supervisor.store.get_lease(launch.session.name)
     if lease is not None and lease.owner == "human":
-        supervisor.msg_store.record_event(
+        # #910 — routed through _emit_routed_event funnel so the
+        # event passes through SignalEnvelope before persisting.
+        _emit_routed_event(
+            supervisor,
             scope=launch.session.name,
             sender=launch.session.name,
             subject="heartbeat_nudge_skipped",

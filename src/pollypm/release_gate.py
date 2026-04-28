@@ -40,6 +40,7 @@ wired) by the GitHub release workflow.
 
 from __future__ import annotations
 
+import ast
 import enum
 import re
 import subprocess
@@ -231,11 +232,11 @@ def gate_signal_routing_emitters_migrated() -> GateResult:
     regression that drops a registration (or removes the
     representative call site) blocks v1.
 
-    The gate cannot enforce that *every* emit site in those
-    modules has migrated — that is a follow-up. What it
-    enforces is that the registration is real (the emitter is
-    importable and active) so the migration cannot quietly
-    backslide to scaffolding.
+    Per-site enforcement (every ``raise_alert`` in a policed
+    module routes through SignalEnvelope) lives in
+    :func:`gate_signal_routing_call_sites_migrated` (#910). This
+    gate stays focused on the registration check: the emitter is
+    importable, active, and registered.
     """
     try:
         # Importing the emitter modules is what triggers their
@@ -265,7 +266,8 @@ def gate_signal_routing_emitters_migrated() -> GateResult:
             passed=True,
             summary=(
                 f"all {len(required_high_traffic_emitters())} required "
-                f"emitters use SignalEnvelope"
+                f"emitters registered (per-site coverage enforced by "
+                f"signal_routing_call_sites)"
             ),
         )
     return GateResult(
@@ -281,25 +283,226 @@ def gate_signal_routing_emitters_migrated() -> GateResult:
     )
 
 
+_LEGACY_EMIT_API_NAMES: frozenset[str] = frozenset(
+    {
+        "raise_alert",
+        "record_event",
+    }
+)
+"""Legacy emit-API method names that must no longer be called
+directly from policed modules. The gate flags every ``foo.<name>(...)``
+call expression where ``<name>`` is in this set.
+
+Scope: every public emit boundary the audit flagged in #910 must
+route through SignalEnvelope before persisting. That's
+``raise_alert`` (alerts — the original 9 sites in
+heartbeats/local.py) AND ``record_event`` (activity-feed events —
+the follow-up #910 fix). ``upsert_alert`` is intentionally NOT in
+the set: the routing funnels persist via the api shim
+(``api.raise_alert``) which itself calls ``upsert_alert``;
+flagging that name would create a false positive on every
+funnel."""
+
+
+_LEGACY_EMIT_ALLOWED_FILES: frozenset[str] = frozenset(
+    {
+        # The single funnel for routed alerts. Calls
+        # ``api.raise_alert`` AFTER constructing a SignalEnvelope
+        # and routing it — this is the migration target, not a
+        # legacy holdout.
+        "src/pollypm/heartbeats/local.py:_emit_routed_alert",
+        # The single funnel for routed activity-feed events
+        # (#910 follow-up). Calls ``api.record_event`` AFTER
+        # constructing + routing the envelope.
+        "src/pollypm/heartbeats/local.py:_emit_routed_event",
+        # The plugin API method itself — the storage shim every
+        # routed emitter calls into.
+        "src/pollypm/heartbeats/api.py:raise_alert",
+        "src/pollypm/heartbeats/api.py:record_event",
+    }
+)
+"""Module-qualified function names allowed to call a legacy emit
+API. These are the *funnels* the migration sends every signal
+through — they own the SignalEnvelope construction + routing
+before the legacy persistence call."""
+
+
+_POLICED_DIRECTORIES: tuple[str, ...] = (
+    "src/pollypm/heartbeats",
+)
+"""Directories whose Python modules are subject to the
+'no legacy emit calls outside the routing funnel' rule.
+
+#910 — heartbeats was the first subsystem to fully migrate. New
+directories are added here as their migration completes."""
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacyEmitFinding:
+    """A single AST-detected violation of the routing-funnel rule."""
+
+    file: str
+    """Repo-relative file path."""
+
+    line: int
+    """1-indexed source line of the offending call."""
+
+    method: str
+    """Legacy emit method name (e.g. ``raise_alert``)."""
+
+    enclosing: str
+    """Name of the enclosing function/method, or ``"<module>"``."""
+
+    def render(self) -> str:
+        return f"{self.file}:{self.line} {self.enclosing}() calls .{self.method}(...)"
+
+
+def _scan_module_for_legacy_emit_calls(
+    path: Path, *, repo_root: Path,
+) -> list[_LegacyEmitFinding]:
+    """Walk ``path``'s AST and collect legacy emit call findings.
+
+    A finding is any ``<expr>.<name>(...)`` call where ``<name>``
+    is in :data:`_LEGACY_EMIT_API_NAMES` AND the enclosing
+    function is not in :data:`_LEGACY_EMIT_ALLOWED_FILES`. Sites
+    inside the routing funnel itself are exempt — that's where
+    the canonical legacy persistence call lives.
+    """
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError:
+        return []
+
+    rel = str(path.relative_to(repo_root)).replace("\\", "/")
+
+    # Build a parent map so we can answer "what function contains
+    # this Call node?" without traversing twice.
+    parent: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    def _enclosing_function_name(node: ast.AST) -> str:
+        cur: ast.AST | None = parent.get(node)
+        while cur is not None:
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cur.name
+            cur = parent.get(cur)
+        return "<module>"
+
+    findings: list[_LegacyEmitFinding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            continue
+        if func.attr not in _LEGACY_EMIT_API_NAMES:
+            continue
+        enclosing = _enclosing_function_name(node)
+        qualifier = f"{rel}:{enclosing}"
+        if qualifier in _LEGACY_EMIT_ALLOWED_FILES:
+            continue
+        findings.append(
+            _LegacyEmitFinding(
+                file=rel,
+                line=node.lineno,
+                method=func.attr,
+                enclosing=enclosing,
+            )
+        )
+    return findings
+
+
+def audit_legacy_emit_call_sites() -> tuple[_LegacyEmitFinding, ...]:
+    """Return every ``raise_alert``-style call under the policed
+    directories that is not inside the routing funnel.
+
+    Public so tests can assert on the empty-tree contract and so
+    a CI step can re-use the same audit logic without invoking
+    the full release gate.
+    """
+    repo_root = _repo_root()
+    findings: list[_LegacyEmitFinding] = []
+    for relative in _POLICED_DIRECTORIES:
+        directory = repo_root / relative
+        if not directory.exists():
+            continue
+        for path in sorted(directory.rglob("*.py")):
+            findings.extend(
+                _scan_module_for_legacy_emit_calls(path, repo_root=repo_root)
+            )
+    return tuple(findings)
+
+
+def gate_signal_routing_call_sites_migrated() -> GateResult:
+    """#910 — refuse to tag while a policed module still calls a
+    legacy emit API outside the routing funnel.
+
+    Closes the false-positive that #894 left open: the previous
+    gate (:func:`gate_signal_routing_emitters_migrated`) only
+    asserts that the *module* registered itself and routed at
+    least one representative signal. This gate AST-scans every
+    file under :data:`_POLICED_DIRECTORIES` and fails when it
+    finds a ``raise_alert``-style call outside the documented
+    funnel functions. The funnel is the only place SignalEnvelope
+    construction + ``route_signal`` happen before the legacy
+    persistence write — anywhere else is a regression.
+    """
+    findings = audit_legacy_emit_call_sites()
+    if not findings:
+        return GateResult(
+            name="signal_routing_call_sites",
+            passed=True,
+            summary=(
+                "no legacy emit call sites under "
+                f"{', '.join(_POLICED_DIRECTORIES)} (every site routes "
+                "through SignalEnvelope)"
+            ),
+        )
+    return GateResult(
+        name="signal_routing_call_sites",
+        passed=False,
+        severity=GateSeverity.BLOCKING,
+        summary=(
+            f"{len(findings)} legacy emit call site(s) outside the "
+            "routing funnel"
+        ),
+        detail="\n".join(f.render() for f in findings),
+    )
+
+
 def gate_cockpit_smoke_harness() -> GateResult:
-    """Verify the rendered cockpit smoke matrix is reachable (#882, #898).
+    """Verify the rendered cockpit smoke matrix actually runs (#882, #898, #911).
 
     The audit (#898) requires the smoke matrix to be a blocking
-    launch check. The full Pilot-driven matrix is too heavy to
-    run from inside the gate process — it is part of the test
-    suite and is gated by CI. What this gate enforces is that
-    the harness MODULE is importable, the size matrix matches
-    the audit's published list (80x30, 100x40, 169x50, 200x50,
-    210x65), and the universal-assertion API is intact.
+    launch check. The gate has two responsibilities:
 
-    A regression that drops a size or removes an assertion
-    helper trips the gate; the audit's contract is that the
-    smoke matrix shape is itself a release-blocking invariant.
+    1. Shape — the harness MODULE is importable, the size matrix
+       matches the audit's published list (80x30, 100x40, 169x50,
+       200x50, 210x65), and the universal-assertion API is intact.
+    2. Render — at least one rendered scenario actually executes.
+       #911 — the prior version of this gate checked only shape,
+       so it could report PASS while every rendered smoke scenario
+       was failing. The fix runs :func:`run_smoke_matrix` and
+       fails BLOCKING when any scenario raises.
+
+    The default :data:`pollypm.cockpit_smoke.SMOKE_SCENARIOS`
+    registry is intentionally tiny so the gate stays fast. The
+    deep per-screen matrix (seeded data, multiple sizes) lives in
+    ``tests/test_cockpit_smoke_render.py`` and runs in CI; the gate
+    proves the *path* executes, the test suite proves the breadth.
     """
     try:
         from pollypm.cockpit_smoke import (
+            SMOKE_SCENARIOS,
             SMOKE_TERMINAL_SIZES,
             SmokeHarness,
+            run_smoke_matrix,
         )
     except Exception as exc:  # noqa: BLE001
         return GateResult(
@@ -341,12 +544,45 @@ def gate_cockpit_smoke_harness() -> GateResult:
             severity=GateSeverity.BLOCKING,
             summary=f"smoke harness missing API: {', '.join(missing)}",
         )
+
+    # Shape OK — now actually render. #911: the gate must invoke
+    # the smoke runner, not merely check that the runner exists.
+    if not SMOKE_SCENARIOS:
+        return GateResult(
+            name="cockpit_smoke_harness",
+            passed=False,
+            severity=GateSeverity.BLOCKING,
+            summary="no smoke scenarios registered — rendered coverage is zero",
+        )
+    try:
+        failures = run_smoke_matrix()
+    except Exception as exc:  # noqa: BLE001 — runner crashes block the gate
+        return GateResult(
+            name="cockpit_smoke_harness",
+            passed=False,
+            severity=GateSeverity.BLOCKING,
+            summary="smoke runner raised before completing the matrix",
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    if failures:
+        return GateResult(
+            name="cockpit_smoke_harness",
+            passed=False,
+            severity=GateSeverity.BLOCKING,
+            summary=(
+                f"{len(failures)} rendered smoke scenario(s) failing"
+            ),
+            detail="\n".join(f.render() for f in failures),
+        )
+
+    cells = sum(len(s.sizes) for s in SMOKE_SCENARIOS)
     return GateResult(
         name="cockpit_smoke_harness",
         passed=True,
         summary=(
             f"smoke matrix has {len(SMOKE_TERMINAL_SIZES)} sizes; "
-            f"{len(required_methods)} canonical assertions present"
+            f"{len(required_methods)} canonical assertions; "
+            f"{cells} rendered scenario cell(s) passed"
         ),
     )
 
@@ -568,6 +804,7 @@ DEFAULT_GATES: tuple[Gate, ...] = (
     gate_cockpit_interaction_audit_clean,
     gate_cockpit_smoke_harness,
     gate_signal_routing_emitters_migrated,
+    gate_signal_routing_call_sites_migrated,
     gate_security_checklist,
     gate_storage_legacy_writers,
     gate_task_invariant_metadata_complete,
