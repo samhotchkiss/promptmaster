@@ -199,9 +199,15 @@ def test_sweep_persists_owner_token_from_snake_case_finalize_response(tmp_path: 
 class _FakeResponse:
     """Minimal urllib response stand-in for ``verify_deployment`` tests."""
 
-    def __init__(self, body: bytes, status: int = 200) -> None:
+    def __init__(
+        self,
+        body: bytes,
+        status: int = 200,
+        content_type: str = "text/html; charset=utf-8",
+    ) -> None:
         self._body = body
         self.status = status
+        self.headers = {"Content-Type": content_type}
 
     def __enter__(self) -> "_FakeResponse":
         return self
@@ -216,13 +222,31 @@ class _FakeResponse:
         return self.status
 
 
-def _patch_urlopen(response: _FakeResponse | Exception):
-    """Helper to patch ``urllib.request.urlopen`` with a canned response."""
+def _patch_urlopen(response):
+    """Patch ``urllib.request.urlopen`` for verify tests.
+
+    ``response`` may be:
+      * a ``_FakeResponse`` — returned for any URL;
+      * an ``Exception`` — raised for any URL;
+      * a ``dict`` mapping URL → ``_FakeResponse``/``Exception`` (a default
+        can be provided under the empty-string key) for tests that need to
+        distinguish the page fetch from a linked JS bundle fetch.
+    """
+
+    def _resolve(req):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if isinstance(response, dict):
+            picked = response.get(url, response.get("", None))
+            if picked is None:
+                raise AssertionError(f"unmocked URL in test: {url}")
+            return picked
+        return response
 
     def fake_urlopen(req, timeout=None):  # noqa: ARG001 - signature compat
-        if isinstance(response, Exception):
-            raise response
-        return response
+        picked = _resolve(req)
+        if isinstance(picked, Exception):
+            raise picked
+        return picked
 
     return patch("pollypm.itsalive.request.urlopen", side_effect=fake_urlopen)
 
@@ -235,7 +259,15 @@ def test_verify_deployment_passes_when_marker_present_in_200_body() -> None:
         b"<body><div id=\"app\" data-app=\"demo\"></div>"
         b"<script src=\"/assets/index.js\"></script></body></html>"
     )
-    with _patch_urlopen(_FakeResponse(body, status=200)):
+    routes = {
+        "https://demo.example.test": _FakeResponse(body, status=200),
+        "https://demo.example.test/assets/index.js": _FakeResponse(
+            b"console.log('hi');",
+            status=200,
+            content_type="application/javascript; charset=utf-8",
+        ),
+    }
+    with _patch_urlopen(routes):
         result = itsalive.verify_deployment(
             "https://demo.example.test", marker="data-app=\"demo\"",
         )
@@ -286,7 +318,15 @@ def test_verify_deployment_falls_back_to_title_marker_when_none_supplied() -> No
     HTML's ``<title>``. A page with no title and no caller-supplied
     marker must fail closed rather than rubber-stamping a 200."""
     body = b"<html><head><title>Hello App</title></head><body><script src=\"x.js\"></script>hi</body></html>"
-    with _patch_urlopen(_FakeResponse(body, status=200)):
+    routes = {
+        "https://hello.example.test": _FakeResponse(body, status=200),
+        "https://hello.example.test/x.js": _FakeResponse(
+            b"console.log('hi');",
+            status=200,
+            content_type="application/javascript",
+        ),
+    }
+    with _patch_urlopen(routes):
         result = itsalive.verify_deployment("https://hello.example.test")
     assert result.ok is True
     # The title became the marker.
@@ -385,6 +425,119 @@ def test_verify_deployment_flags_spa_missing_script_tag() -> None:
         )
     assert result.ok is False
     assert "script" in result.reason.lower()
+
+
+def test_verify_deployment_rejects_itsalive_coming_soon_placeholder() -> None:
+    """The itsalive serve worker returns a 'Coming Soon' placeholder with
+    HTTP 200 when no files have been published for the subdomain. Its
+    ``<title>`` contains the hostname, so the hostname-fallback marker
+    used to silently match and report ``ok=True`` (#948). Verify must
+    detect the placeholder explicitly and fail closed."""
+    body = (
+        b"<!DOCTYPE html>\n<html lang=\"en\"><head>"
+        b"<meta charset=\"UTF-8\">"
+        b"<title>pomodoro.itsalive.co - Coming Soon</title>"
+        b"</head><body><div class=\"card\">"
+        b"<h1>Coming Soon</h1>"
+        b"<p>This site is being built and will be live shortly.</p>"
+        b"<div class=\"subdomain\">pomodoro.itsalive.co</div>"
+        b"</div>"
+        b"<p class=\"footer\">"
+        b"<a href=\"https://itsalive.co\">Powered by itsalive.co</a>"
+        b"</p></body></html>"
+    )
+    with _patch_urlopen(_FakeResponse(body, status=200)):
+        result = itsalive.verify_deployment("https://pomodoro.itsalive.co")
+    assert result.ok is False
+    assert result.status_code == 200
+    assert "coming soon" in result.reason.lower()
+    assert "placeholder" in result.reason.lower()
+
+
+def test_verify_deployment_coming_soon_placeholder_via_cli_exits_2() -> None:
+    """The CLI exit code on a placeholder must match the white-screen
+    case (exit 2) — it's a 200-but-not-actually-deployed failure, not a
+    transport error. Workers that branch on exit code must see the
+    distinct exit=2 so they refuse to mark the task done (#948)."""
+    from typer.testing import CliRunner
+
+    from pollypm.cli_features.issues import itsalive_app
+
+    runner = CliRunner()
+    body = (
+        b"<!DOCTYPE html><html><head>"
+        b"<title>demo.itsalive.co - Coming Soon</title>"
+        b"</head><body><h1>Coming Soon</h1>"
+        b"<a href=\"https://itsalive.co\">Powered by itsalive.co</a>"
+        b"</body></html>"
+    )
+    with _patch_urlopen(_FakeResponse(body, status=200)):
+        result = runner.invoke(itsalive_app, ["verify", "demo"])
+    assert result.exit_code == 2, result.output
+    assert "ok=False" in result.output
+
+
+def test_verify_deployment_rejects_html_returned_for_js_asset() -> None:
+    """The classic Vite/SPA asset-router fallthrough: ``index.html`` is
+    served for unknown paths, so a missing ``/assets/index-XYZ.js``
+    returns the SPA HTML with status 200 and ``Content-Type: text/html``.
+    The browser refuses to execute it and the page white-screens.
+    Verify must fetch each linked same-origin script and reject the
+    response unless it's actually JavaScript (#948)."""
+    body = (
+        b"<!doctype html><html><head><title>App</title></head>"
+        b"<body><div id=\"root\"></div>"
+        b"<script src=\"/assets/index-abc123.js\"></script>"
+        b"</body></html>"
+    )
+    routes = {
+        "https://app.example.test": _FakeResponse(body, status=200),
+        # The asset router falls through to index.html with text/html.
+        "https://app.example.test/assets/index-abc123.js": _FakeResponse(
+            body, status=200, content_type="text/html; charset=utf-8",
+        ),
+    }
+    with _patch_urlopen(routes):
+        result = itsalive.verify_deployment(
+            "https://app.example.test", marker="App",
+        )
+    assert result.ok is False
+    assert result.status_code == 200
+    assert "/assets/index-abc123.js" in result.reason
+    assert (
+        "javascript" in result.reason.lower()
+        or "text/html" in result.reason.lower()
+    )
+
+
+def test_verify_deployment_rejects_404_on_linked_js_bundle() -> None:
+    """A linked JS bundle that 404s means the SPA cannot bootstrap. The
+    HTML may be 200 with the marker present, but the page is broken. The
+    verifier must follow the script and reject the deploy (#948)."""
+    body = (
+        b"<!doctype html><html><head><title>App</title></head>"
+        b"<body><div id=\"root\"></div>"
+        b"<script src=\"/assets/missing.js\"></script>"
+        b"</body></html>"
+    )
+    http_404 = error.HTTPError(
+        "https://app.example.test/assets/missing.js",
+        404,
+        "Not Found",
+        hdrs=None,
+        fp=io.BytesIO(b""),
+    )
+    routes = {
+        "https://app.example.test": _FakeResponse(body, status=200),
+        "https://app.example.test/assets/missing.js": http_404,
+    }
+    with _patch_urlopen(routes):
+        result = itsalive.verify_deployment(
+            "https://app.example.test", marker="App",
+        )
+    assert result.ok is False
+    assert "404" in result.reason
+    assert "/assets/missing.js" in result.reason
 
 
 def test_push_deploy_uses_existing_project_token(tmp_path: Path, monkeypatch) -> None:

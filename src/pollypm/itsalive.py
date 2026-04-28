@@ -7,7 +7,7 @@ import mimetypes
 import re
 from pathlib import Path
 from typing import Any
-from urllib import error, request
+from urllib import error, parse, request
 
 from pollypm.atomic_io import atomic_write_json
 from pollypm.messaging import (
@@ -35,6 +35,30 @@ _TITLE_RE = re.compile(r"<title[^>]*>([^<]+)</title>", re.IGNORECASE)
 _SCRIPT_SRC_RE = re.compile(
     r"""<script[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>""", re.IGNORECASE
 )
+# itsalive's serve worker returns this exact placeholder when a subdomain has
+# no published files (see /Users/sam/dev/itsalive/workers/serve/src/index.js
+# `comingSoonPage`). Detecting the signature explicitly stops the
+# hostname-fallback marker from rubber-stamping a not-yet-deployed site
+# (#948). The signature is intentionally narrow: title suffix + the literal
+# "Coming Soon" headline + the powered-by footer, all of which appear in the
+# upstream template and would only collide with a real app that copied them.
+_COMING_SOON_TITLE_SUFFIX = ".itsalive.co - Coming Soon"
+_COMING_SOON_HEADING = "<h1>Coming Soon</h1>"
+_COMING_SOON_FOOTER = "Powered by itsalive.co"
+# Content-Type prefixes that browsers actually treat as JavaScript. itsalive's
+# serve worker emits ``application/javascript`` for ``.js``; we also accept
+# the spec-aligned aliases. ``application/octet-stream`` and ``text/html`` are
+# the failure modes we're catching: a missing/asset-misrouted bundle that
+# 200s with the SPA index instead of the script (#948).
+_JS_CONTENT_TYPE_PREFIXES = (
+    "application/javascript",
+    "text/javascript",
+    "application/ecmascript",
+    "text/ecmascript",
+    "application/x-javascript",
+    "module",  # rare but valid for ES module servers
+)
+_JS_EXTENSIONS = (".js", ".mjs", ".cjs")
 
 
 @dataclass(slots=True)
@@ -809,6 +833,24 @@ def verify_deployment(
             body_excerpt="",
         )
 
+    # Explicit placeholder detection: itsalive's serve worker returns a
+    # "Coming Soon" page with status 200 when no files are published for a
+    # subdomain. Its <title> contains the hostname, which would otherwise
+    # match the hostname-fallback marker and rubber-stamp a non-deploy
+    # (#948). Fail closed before any marker resolution.
+    if _is_coming_soon_placeholder(body_text):
+        return VerifyResult(
+            url=fetch_url,
+            status_code=status,
+            ok=False,
+            reason=(
+                "itsalive 'Coming Soon' placeholder served — no files "
+                "published for this subdomain yet"
+            ),
+            title=title,
+            body_excerpt=body_text[:200],
+        )
+
     expected = marker if marker is not None else verify_marker(project_root)
     if expected is None or not expected.strip():
         expected = title
@@ -860,6 +902,27 @@ def verify_deployment(
             body_excerpt=body_text[:200],
         )
 
+    # Linked JS bundle check: a 200 on the SPA index with the right marker
+    # still ships a white screen if `<script src="/assets/index-XYZ.js">`
+    # 404s or returns the SPA index HTML (the classic "asset router falls
+    # through to index.html" misroute). Fetch every same-origin script the
+    # page references and assert HTTP 200 + a JavaScript content-type. A
+    # bundle that returns text/html or octet-stream means the browser will
+    # refuse to execute it (or run garbage), so we fail verification (#948).
+    bundle_failure = _check_linked_js_bundles(
+        fetch_url, body_text, timeout=timeout,
+    )
+    if bundle_failure is not None:
+        return VerifyResult(
+            url=fetch_url,
+            status_code=status,
+            ok=False,
+            reason=bundle_failure,
+            marker=expected,
+            title=title,
+            body_excerpt=body_text[:200],
+        )
+
     return VerifyResult(
         url=fetch_url,
         status_code=status,
@@ -869,3 +932,96 @@ def verify_deployment(
         title=title,
         body_excerpt=body_text[:200],
     )
+
+
+def _is_coming_soon_placeholder(body_text: str) -> bool:
+    """Return True if ``body_text`` is the itsalive 'Coming Soon' placeholder.
+
+    The signature is the title suffix + headline + powered-by footer. All
+    three appearing together is unique enough to rule out a real app that
+    happens to use the phrase "Coming Soon" in its content.
+    """
+    if _COMING_SOON_TITLE_SUFFIX not in body_text:
+        return False
+    if _COMING_SOON_HEADING not in body_text:
+        return False
+    return _COMING_SOON_FOOTER in body_text
+
+
+def _check_linked_js_bundles(
+    page_url: str, body_text: str, *, timeout: float
+) -> str | None:
+    """Fetch every same-origin JS script linked from ``body_text``.
+
+    Returns ``None`` if every linked bundle is reachable with a JS-ish
+    content-type, or a human-readable failure reason otherwise. External
+    scripts (different origin) are skipped — itsalive deploys are
+    same-origin by construction, and we don't want to fail on third-party
+    analytics outages we can't control.
+    """
+    parsed_page = parse.urlparse(page_url)
+    page_origin = (parsed_page.scheme, parsed_page.netloc)
+    seen: set[str] = set()
+    for raw_src in _SCRIPT_SRC_RE.findall(body_text):
+        src = raw_src.strip()
+        if not src:
+            continue
+        # Inline data URIs, blob URLs, and the like aren't network-fetchable.
+        if src.startswith(("data:", "blob:", "javascript:")):
+            continue
+        absolute = parse.urljoin(page_url, src)
+        parsed = parse.urlparse(absolute)
+        if (parsed.scheme, parsed.netloc) != page_origin:
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        # Only care about .js / .mjs / .cjs (or unknown-extension same-origin
+        # scripts — those usually mean a built bundle without an extension).
+        path_lower = parsed.path.lower()
+        is_js_ext = path_lower.endswith(_JS_EXTENSIONS)
+        # Skip clearly-not-JS extensions (e.g. some sites embed .json via
+        # <script type="application/json">). We only flag <script src=...>
+        # that look like executable code paths.
+        if not is_js_ext and "." in path_lower.rsplit("/", 1)[-1]:
+            continue
+        failure = _fetch_and_validate_js_asset(absolute, timeout=timeout)
+        if failure is not None:
+            return failure
+    return None
+
+
+def _fetch_and_validate_js_asset(url: str, *, timeout: float) -> str | None:
+    """Fetch ``url`` and assert it returns 200 + a JavaScript content-type.
+
+    Returns ``None`` on success or a human-readable reason on failure.
+    """
+    req = request.Request(
+        url,
+        method="GET",
+        headers={
+            "User-Agent": "PollyPM-itsalive-verify/0.1",
+            "Accept": "application/javascript,text/javascript,*/*;q=0.1",
+        },
+    )
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            status = int(getattr(response, "status", 0) or response.getcode())
+            content_type = response.headers.get("Content-Type", "") or ""
+    except error.HTTPError as exc:
+        return f"linked JS asset {url} returned HTTP {exc.code}"
+    except error.URLError as exc:
+        return f"linked JS asset {url} unreachable: {exc.reason}"
+    except TimeoutError as exc:  # pragma: no cover - depends on socket
+        return f"linked JS asset {url} timeout: {exc}"
+
+    if status != 200:
+        return f"linked JS asset {url} returned HTTP {status}"
+    ct_lower = content_type.split(";", 1)[0].strip().lower()
+    if not any(ct_lower.startswith(prefix) for prefix in _JS_CONTENT_TYPE_PREFIXES):
+        return (
+            f"linked JS asset {url} served with Content-Type "
+            f"{content_type!r} (expected JavaScript) — likely an asset "
+            f"router fallthrough returning HTML"
+        )
+    return None
