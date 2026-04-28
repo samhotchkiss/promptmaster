@@ -335,41 +335,52 @@ def _itsalive_path_is_pollypm_managed(project_path: Path, rel_path: str) -> bool
     return False
 
 
+def _porcelain_status_path(line: str) -> str:
+    """Parse a single ``git status --porcelain`` line into its rel_path.
+
+    Mirrors the slicing used by :func:`_status_is_only_pollypm_scaffold`:
+    each porcelain line is 2 status chars + space + path. The status
+    chars can be a literal space (e.g. ``` M`` for "modified in
+    worktree, not staged") so we slice from index 3 directly. Renames
+    are encoded as ``orig -> new``; we want the destination path.
+    """
+    rel_path = line[3:] if len(line) > 3 else ""
+    rel_path = rel_path.rstrip()
+    if " -> " in rel_path:
+        rel_path = rel_path.rsplit(" -> ", 1)[1].strip()
+    return rel_path.strip('"')
+
+
+def _path_is_pollypm_scaffold(project_path: Path, rel_path: str) -> bool:
+    """Return True if ``rel_path`` matches the approve-gate allowlist.
+
+    Mirrors the per-line predicates in
+    :func:`_status_is_only_pollypm_scaffold`: gitignore + docs + the
+    #930 ``issues/`` tree + the #945 itsalive scaffold trio. Reused by
+    the #946 pre-stage step so the auto-merge code path can stage
+    exactly the files the dirty-tree gate already lets through.
+    """
+    if rel_path == ".gitignore" and _gitignore_change_is_pollypm_only(project_path):
+        return True
+    if (rel_path == "docs" or rel_path.startswith("docs/")) and (
+        _docs_change_is_pollypm_only(project_path, rel_path)
+    ):
+        return True
+    if _issues_path_is_pollypm_managed(rel_path):
+        return True
+    if _itsalive_path_is_pollypm_managed(project_path, rel_path):
+        return True
+    return False
+
+
 def _status_is_only_pollypm_scaffold(project_path: Path, status_stdout: str) -> bool:
     lines = [line for line in status_stdout.splitlines() if line.strip()]
     if not lines:
         return False
     for line in lines:
-        # Each porcelain line is 2 status chars + space + path. The
-        # status chars can be a literal space (e.g. ` M` for "modified
-        # in worktree, not staged") so we slice from index 3 directly
-        # rather than ``.strip``-ing the line first — that would eat
-        # the leading space and shift the path by one character (#930).
-        rel_path = line[3:] if len(line) > 3 else ""
-        rel_path = rel_path.rstrip()
-        if " -> " in rel_path:
-            rel_path = rel_path.rsplit(" -> ", 1)[1].strip()
-        rel_path = rel_path.strip('"')
-        if rel_path == ".gitignore" and _gitignore_change_is_pollypm_only(project_path):
-            continue
-        if (rel_path == "docs" or rel_path.startswith("docs/")) and (
-            _docs_change_is_pollypm_only(project_path, rel_path)
-        ):
-            continue
-        # #930 — every path under ``issues/`` is exclusively written by
-        # the FileSyncAdapter / FileTaskBackend at task transitions.
-        # The user never edits these paths by hand, so untracked or
-        # modified entries here must not bounce ``pm task approve``.
-        if _issues_path_is_pollypm_managed(rel_path):
-            continue
-        # #945 — ``pm itsalive`` writes ``.itsalive`` (deployToken
-        # JSON), ``ITSALIVE.md`` (DO NOT EDIT marker), and a tiny
-        # pointer-stub ``CLAUDE.md`` into the project root. Treat
-        # these as scaffold-only when their contents still match the
-        # generated template.
-        if _itsalive_path_is_pollypm_managed(project_path, rel_path):
-            continue
-        return False
+        rel_path = _porcelain_status_path(line)
+        if not _path_is_pollypm_scaffold(project_path, rel_path):
+            return False
     return True
 
 
@@ -2874,6 +2885,20 @@ class SQLiteWorkService:
         if already_merged.returncode == 0:
             return
 
+        # #946 — clear PollyPM-allowlisted untracked files from the
+        # project root before invoking ``git merge``. The dirty-tree
+        # gate above lets these files past, but git's merge engine
+        # still refuses to overwrite untracked files. Removing them
+        # lets the merge bring in the worker branch's authoritative
+        # version — the allowlist contract is that every covered path
+        # is exclusively PollyPM-written, so the worker's commit is
+        # the right post-merge truth. Add/add conflicts on tracked
+        # safelisted files (e.g. ``.gitignore``) still flow through
+        # the existing #925 union-strategy logic; non-safelist
+        # conflicts still surface via the existing approve-conflict
+        # path.
+        self._stage_pollypm_untracked_for_merge(project_path, dirty_status)
+
         ff_only = self._git_run(project_path, "merge", "--ff-only", task_branch)
         if ff_only.returncode == 0:
             return
@@ -3032,6 +3057,97 @@ class SQLiteWorkService:
                 f"Could not stage union-merged `{rel_path}`: "
                 f"{add.stderr.strip() or 'git add failed'}"
             )
+
+    # #946 — defensive cap on per-file size for pre-merge auto-stage.
+    # The allowlist predicates already constrain the candidates (200B
+    # CLAUDE.md stub, small JSON ``.itsalive``, marker-bearing
+    # ``ITSALIVE.md``, line-oriented ``issues/`` markdown), so this is
+    # a belt-and-braces guard against an unexpectedly large file
+    # sneaking past the predicate.
+    _PRE_STAGE_MAX_BYTES = 1 * 1024 * 1024
+
+    def _stage_pollypm_untracked_for_merge(
+        self,
+        project_path: Path,
+        status_stdout: str,
+    ) -> None:
+        """Pre-stage PollyPM-allowlisted untracked files for ``git merge``.
+
+        The approve dirty-tree gate (#930 + #945) lets a known set of
+        scaffold files past even when untracked. Git's merge engine,
+        however, refuses to overwrite untracked working-tree files —
+        so when the worker's branch commits the same allowlisted file
+        the merge aborts with "untracked working tree files would be
+        overwritten" (#946).
+
+        Concretely, for each untracked allowlisted entry we delete the
+        working-tree copy. The merge then brings in the worker
+        branch's authoritative content cleanly. This matches the
+        allowlist's contract: every covered path is exclusively
+        PollyPM-written (deployToken JSON, marker-bearing scaffold
+        docs, the issues/ tree, etc.), so the worker's commit is
+        always the right post-merge truth — preferring the worker's
+        side mirrors the issue's "prefer the worker's branch" guidance.
+
+        Only files matching the same allowlist as the dirty-tree gate
+        are touched. Modified-but-tracked entries are skipped (they
+        don't trigger the untracked-overwrite error). Anything outside
+        the allowlist is left alone — we never blanket-delete user
+        content here.
+        """
+        for line in status_stdout.splitlines():
+            if not line.strip():
+                continue
+            # Porcelain XY status: untracked entries are ``??``. We
+            # only need to handle untracked files because tracked
+            # modifications don't trigger the
+            # "untracked-working-tree-files-would-be-overwritten"
+            # merge error.
+            xy = line[:2]
+            if xy != "??":
+                continue
+            rel_path = _porcelain_status_path(line)
+            if not rel_path:
+                continue
+            if not _path_is_pollypm_scaffold(project_path, rel_path):
+                continue
+
+            target = project_path / rel_path
+            # Mirror the predicate's content gate: a binary or
+            # unexpectedly large file aborts the auto-merge with a
+            # clear error rather than getting silently swept into the
+            # commit. Directories (e.g. ``issues/``) are walked
+            # recursively when we remove them.
+            if target.is_file():
+                try:
+                    size = target.stat().st_size
+                except OSError:
+                    size = None
+                if size is not None and size > self._PRE_STAGE_MAX_BYTES:
+                    raise ValidationError(
+                        f"Cannot auto-merge approved work: PollyPM "
+                        f"scaffold file `{rel_path}` is unexpectedly "
+                        f"large ({size} bytes). Inspect it and either "
+                        f"commit or remove it before retrying approve."
+                    )
+
+            try:
+                if target.is_symlink() or target.is_file():
+                    target.unlink()
+                elif target.is_dir():
+                    import shutil
+
+                    shutil.rmtree(target)
+                else:
+                    # Path vanished between status output and now;
+                    # nothing to do.
+                    continue
+            except OSError as exc:
+                raise ValidationError(
+                    f"Cannot auto-merge approved work: failed to "
+                    f"clear PollyPM scaffold path `{rel_path}` from "
+                    f"the working tree before merge: {exc}"
+                ) from exc
 
     def _git_run(self, project_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
