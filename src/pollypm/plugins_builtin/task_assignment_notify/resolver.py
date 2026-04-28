@@ -520,6 +520,15 @@ def _escalate_no_session(event: TaskAssignmentEvent, store: Any | None) -> None:
             # claim spawns a per-task worker, which is the preferred
             # path. See pm worker-start --help.
             try_hint = f"Try: pm task claim {event.task_id}"
+        elif event.actor_name == "reviewer":
+            # #953 — CLI approve is the canonical path for human review;
+            # surface it first. Spinning up a reviewer worker session is
+            # a valid alternative but rarely what users actually want.
+            try_hint = (
+                f"Try: pm task approve {event.task_id} --actor {event.actor_name} --reason \"...\" "
+                f"(or pm worker-start --role {event.actor_name} {event.project} to spin up a reviewer session) "
+                f"(or pm task claim {event.task_id} for a per-task worker)"
+            )
         else:
             try_hint = (
                 f"Try: pm worker-start --role {event.actor_name} {event.project} "

@@ -359,6 +359,42 @@ class TestNotifyEscalation:
         matching = [a for a in alerts if a.alert_type.endswith(":demo/1")]
         assert any("pm task claim" in a.message for a in matching)
 
+    def test_reviewer_no_session_hint_lists_approve_first(self, state_store):
+        """#953 — reviewer-role no-session alerts must surface ``pm task
+        approve`` as the canonical path, BEFORE the worker-start /
+        claim alternatives. The old hint pushed users toward spinning
+        up a reviewer worker, which is rarely what they want."""
+        svc = FakeSessionService(handles=[])  # nobody live
+        services = _RuntimeServices(
+            session_service=svc, state_store=state_store,
+            work_service=None, project_root=Path("."),
+        )
+        outcome = notify(
+            _event(actor_name="reviewer", current_node="review",
+                   current_node_kind="review"),
+            services=services,
+        )
+        assert outcome["outcome"] == "no_session"
+        alerts = state_store.open_alerts()
+        matching = [a for a in alerts if a.alert_type.endswith(":demo/1")]
+        assert matching, "expected a per-task no_session_for_assignment alert"
+        message = matching[0].message
+        # CLI approve must appear first, with the dynamic task id and
+        # reviewer actor name substituted.
+        assert "pm task approve demo/1 --actor reviewer" in message
+        approve_idx = message.find("pm task approve")
+        worker_start_idx = message.find("pm worker-start")
+        claim_idx = message.find("pm task claim")
+        assert approve_idx != -1, "expected `pm task approve` in hint"
+        assert worker_start_idx != -1, "expected worker-start alternative"
+        assert claim_idx != -1, "expected pm task claim alternative"
+        assert approve_idx < worker_start_idx, (
+            "pm task approve must appear BEFORE pm worker-start in reviewer hint"
+        )
+        assert approve_idx < claim_idx, (
+            "pm task approve must appear BEFORE pm task claim in reviewer hint"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Sweeper
