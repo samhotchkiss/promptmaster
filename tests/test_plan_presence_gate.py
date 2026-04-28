@@ -1130,6 +1130,71 @@ class TestSweepHandlerGateIntegration:
 
         store.close()
 
+    def test_workspace_root_pass_applies_gate_for_registered_project(
+        self, tmp_path, monkeypatch,
+    ):
+        """Issue #938: a queued task stored in the workspace-root DB
+        whose ``project`` matches a registered project must honour the
+        plan gate during the workspace-root sweep pass. Without the
+        fix, the sweep pings the worker before the per-project auto-
+        claim pass blocks the same task with ``plan_missing``."""
+        # Project with no plan — gate must close.
+        proj = tmp_path / "proj"
+        proj.mkdir()
+
+        # Workspace-root DB lives at the workspace root, not inside
+        # the project. The queued task is created with ``project="proj"``
+        # so the workspace-root sweep can match it against the
+        # registered project's filesystem anchor.
+        workspace_db = tmp_path / "workspace.db"
+        bus.clear_listeners()
+        ws_work = SQLiteWorkService(db_path=workspace_db, project_path=tmp_path)
+        try:
+            task = ws_work.create(
+                title="Impl without plan",
+                description="x",
+                type="task",
+                project="proj",
+                flow_template="standard",
+                roles={"worker": "agent-1", "reviewer": "agent-2"},
+                priority="normal",
+            )
+            ws_work.queue(task.task_id, "pm")
+        finally:
+            ws_work.close()
+
+        store = StateStore(tmp_path / "workspace_state.db")
+        session_svc = FakeSessionService(handles=[FakeHandle("worker-proj")])
+
+        def _factory():
+            # Reopen so the sweep handler owns the connection lifecycle.
+            return _RuntimeServices(
+                session_service=session_svc,
+                state_store=store,
+                work_service=SQLiteWorkService(
+                    db_path=workspace_db, project_path=tmp_path,
+                ),
+                project_root=tmp_path,
+                known_projects=(
+                    FakeKnownProject(key="proj", path=proj),
+                ),
+                enforce_plan=True,
+                plan_dir="docs/plan",
+            )
+
+        _install_fake_loader(monkeypatch, _factory)
+
+        result = task_assignment_sweep_handler({})
+
+        # Gate must block the workspace-root pass too — no ping should
+        # land for a plan-gated task.
+        assert session_svc.sent == []
+        assert result["by_outcome"].get("sent", 0) == 0
+        assert result["by_outcome"].get("skipped_plan_missing", 0) >= 1
+        assert result["plan_missing_alerts"] >= 1
+
+        store.close()
+
     def test_per_project_enforce_plan_false_disables_gate_for_one_project(
         self, tmp_path, monkeypatch,
     ):

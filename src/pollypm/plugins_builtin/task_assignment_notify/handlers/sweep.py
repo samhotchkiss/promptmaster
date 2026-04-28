@@ -522,6 +522,19 @@ def _sweep_work_service(
     enforce_plan = (
         project_enforce if project_enforce is not None else global_enforce
     )
+    # #938: when the caller didn't anchor the sweep to a specific project
+    # (workspace-root pass), build a lookup of registered projects so we
+    # can still apply the plan gate per task. Workspace-root DBs can hold
+    # tasks belonging to any registered project; without this lookup the
+    # sweep pings plan-gated workers before the per-project auto-claim
+    # pass blocks them, producing the contradictory ``sent`` +
+    # ``auto_claim_skipped_plan_missing`` outcome on the same task.
+    known_by_key: dict[str, Any] = {}
+    if project is None and project_path is None:
+        for known in getattr(services, "known_projects", ()) or ():
+            known_key = getattr(known, "key", None)
+            if known_key:
+                known_by_key[known_key] = known
     for status in _SWEEPABLE_STATUSES:
         try:
             tasks = work.list_tasks(work_status=status)
@@ -561,19 +574,37 @@ def _sweep_work_service(
             # #273: plan-presence gate. Only queued delegation is
             # blocked — review / in_progress items are already in
             # flight and still need recovery pings if the daemon or
-            # target session restarts later. We only apply the gate
-            # for per-project sweeps (``project_path`` supplied)
-            # because workspace-root tasks have no single project path
-            # to anchor to.
+            # target session restarts later. We apply the gate for
+            # per-project sweeps (``project_path`` supplied) and, on
+            # the workspace-root pass, for any task whose ``project``
+            # key matches a registered project — otherwise #938 lets
+            # us ping plan-gated tasks before auto-claim's gate fires.
+            gate_path = project_path
+            gate_enforce = enforce_plan
             if (
-                enforce_plan
-                and project_path is not None
+                gate_path is None
+                and known_by_key
+                and event.project in known_by_key
+            ):
+                anchor = known_by_key[event.project]
+                anchor_path = getattr(anchor, "path", None)
+                if anchor_path is not None:
+                    gate_path = anchor_path
+                    anchor_enforce = getattr(anchor, "enforce_plan", None)
+                    gate_enforce = (
+                        anchor_enforce
+                        if anchor_enforce is not None
+                        else global_enforce
+                    )
+            if (
+                gate_enforce
+                and gate_path is not None
                 and status == WorkStatus.QUEUED.value
                 and not task_bypasses_plan_gate(task)
             ):
                 if not _plan_gate_allows(
                     event.project,
-                    project_path,
+                    gate_path,
                     work,
                     services,
                     plan_decisions,
