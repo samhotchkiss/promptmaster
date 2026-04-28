@@ -31,6 +31,54 @@ _STORAGE_CLOSET_SUFFIX = "-storage-closet"
 _CONSOLE_WINDOW = "PollyPM"
 
 
+def _pane_already_bootstrapped_as_other_role(
+    tmux: TmuxClient, role: str | None, target: str,
+) -> bool:
+    """Return True iff ``target`` shows a canonical role banner for a
+    DIFFERENT role than ``role``.
+
+    Mirror of ``Supervisor._pane_already_bootstrapped_as_other_role`` (#931)
+    so per-task / session-service launches share the same crossed-tuple
+    defense without re-importing supervisor (which would cycle).
+
+    Looks for ``CANONICAL ROLE: <role-key>`` lines that
+    :func:`pollypm.role_banner.render_role_banner` writes at the top of
+    every materialized control-prompts file. The banner appears
+    verbatim in the pane after the agent reads the kickoff file, so a
+    non-matching banner is an unambiguous signal that the pane already
+    belongs to another session.
+
+    Conservative on every failure mode (capture failure, empty pane,
+    no banner present): returns ``False`` so we don't suppress
+    legitimate fresh kickoffs.
+    """
+    if not role:
+        return False
+    try:
+        pane = tmux.capture_pane(target, lines=120)
+    except Exception:  # noqa: BLE001
+        return False
+    if not pane or "CANONICAL ROLE:" not in pane:
+        return False
+    observed_roles: list[str] = []
+    for line in pane.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("CANONICAL ROLE:"):
+            observed = stripped.split(":", 1)[1].strip()
+            if observed:
+                observed_roles.append(observed)
+    if not observed_roles:
+        return False
+    if any(observed == role for observed in observed_roles):
+        return False
+    logger.error(
+        "persona_swap_detected (pre-send): target=%r role=%r "
+        "observed_roles=%r — refusing kickoff to avoid stacking",
+        target, role, observed_roles,
+    )
+    return True
+
+
 class TmuxSessionService:
     """Tmux-backed session service — the default implementation.
 
@@ -201,16 +249,25 @@ class TmuxSessionService:
                     guide_reference=guide_reference,
                     user_id=user_id,
                 )
-                kickoff = self._prepare_initial_input(
-                    name,
-                    injected_input,
-                    expected_window=wname,
-                    session_role=session_role,
-                )
-                time.sleep(0.5)
-                self.tmux.send_keys(target, kickoff)
-                self._verify_input_submitted(target, kickoff, provider)
-                fresh_launch_marker.unlink(missing_ok=True)
+                # #931 — pre-send pane guard. Refuses the kickoff if the
+                # target pane already shows another role's canonical role
+                # banner (i.e. the pane was already bootstrapped as a
+                # different session). Mirrors the supervisor-side guard
+                # so per-task workers and the parallel session_service
+                # launch paths share one identity-stacking defense.
+                if not _pane_already_bootstrapped_as_other_role(
+                    self.tmux, session_role, target,
+                ):
+                    kickoff = self._prepare_initial_input(
+                        name,
+                        injected_input,
+                        expected_window=wname,
+                        session_role=session_role,
+                    )
+                    time.sleep(0.5)
+                    self.tmux.send_keys(target, kickoff)
+                    self._verify_input_submitted(target, kickoff, provider)
+                    fresh_launch_marker.unlink(missing_ok=True)
 
         # Write resume marker
         if resume_marker:

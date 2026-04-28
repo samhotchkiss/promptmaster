@@ -2390,17 +2390,26 @@ class Supervisor:
                 rendered = f"{identity_preamble}\n\n{rendered}"
             if rendered.strip():
                 target = self._resolve_send_target(launch)
-                self.session_service.tmux.send_keys(target, rendered)
-                self._msg_store.append_event(
-                    scope=session_name,
-                    sender=session_name,
-                    subject="recovery_prompt",
-                    payload={
-                        "message": (
-                            "Injected recovery prompt with checkpoint context"
-                        ),
-                    },
-                )
+                # #931 — same pre-send pane guard as ``_send_initial_input_if_fresh``.
+                # The recovery prompt carries an identity preamble that *also*
+                # acts like a bootstrap; sending it into a pane already
+                # bootstrapped as a different role stacks two identities and
+                # corners the agent into the same identity-swap refusal that
+                # the user saw in cockpit Polly · chat.
+                if not self._pane_already_bootstrapped_as_other_role(
+                    launch.session.role, target,
+                ):
+                    self.session_service.tmux.send_keys(target, rendered)
+                    self._msg_store.append_event(
+                        scope=session_name,
+                        sender=session_name,
+                        subject="recovery_prompt",
+                        payload={
+                            "message": (
+                                "Injected recovery prompt with checkpoint context"
+                            ),
+                        },
+                    )
         except Exception:  # noqa: BLE001
             pass  # recovery prompt is best-effort
 
@@ -2783,6 +2792,20 @@ class Supervisor:
         fresh_marker = launch.fresh_launch_marker
         if not initial_input or fresh_marker is None or not fresh_marker.exists():
             return
+        # #931 — pre-send pane guard. If the target pane already contains a
+        # canonical role banner from a *different* role's kickoff, sending
+        # this kickoff would stack two conflicting bootstraps in the same
+        # pane (the user reported this for "Polly · chat" — the pane got a
+        # heartbeat kickoff first, then the operator kickoff, and the agent
+        # correctly refused the identity swap). Skip the send and emit a
+        # persona_swap_detected event instead — the marker stays on disk so
+        # the next attempt with the correct (launch, target) tuple still
+        # works, and the operator-visible diagnostic surfaces the crossed
+        # send before the user has to debug it from the agent transcript.
+        if self._pane_already_bootstrapped_as_other_role(
+            launch.session.role, target,
+        ):
+            return
         kickoff = self._prepare_initial_input(launch.session.name, initial_input)
         # Small delay to let Claude Code's input bar fully initialize
         time.sleep(0.5)
@@ -2793,6 +2816,74 @@ class Supervisor:
         # the pane a few seconds later and confirm the expected persona
         # marker shows up. Non-blocking — fire-and-forget.
         self._schedule_persona_verify(launch, target)
+
+    def _pane_already_bootstrapped_as_other_role(
+        self, role: str | None, target: str,
+    ) -> bool:
+        """Return True iff ``target`` shows a canonical role banner for a
+        DIFFERENT role than ``role``.
+
+        Looks for the ``CANONICAL ROLE: <role-key>`` line that
+        :func:`pollypm.role_banner.render_role_banner` writes at the top
+        of every materialized control-prompts file. The banner appears
+        verbatim in the pane after the agent reads its kickoff file, so
+        a non-matching banner is an unambiguous signal that the pane
+        already belongs to another session — the (launch, target)
+        tuple is crossed.
+
+        Conservative on every failure mode (capture failure, empty pane,
+        no banner present): returns ``False`` so we don't suppress
+        legitimate fresh kickoffs.
+        """
+        if not role:
+            return False
+        try:
+            pane = self.session_service.tmux.capture_pane(target, lines=120)
+        except Exception:  # noqa: BLE001
+            return False
+        if not pane or "CANONICAL ROLE:" not in pane:
+            return False
+        # Find any CANONICAL ROLE banner in the pane and check whether it
+        # names a role *other* than ``role``. The banner format is
+        # ``CANONICAL ROLE: <role>`` on its own line.
+        observed_roles: list[str] = []
+        for line in pane.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("CANONICAL ROLE:"):
+                observed = stripped.split(":", 1)[1].strip()
+                if observed:
+                    observed_roles.append(observed)
+        if not observed_roles:
+            return False
+        # Mismatch only when *every* observed banner names a different
+        # role — if our role's banner is among them the pane was already
+        # bootstrapped correctly for us (idempotent re-send is harmless
+        # and has its own dedupe in the persona-verify backstop).
+        if any(observed == role for observed in observed_roles):
+            return False
+        details = (
+            f"target={target!r} role={role!r} "
+            f"observed_roles={observed_roles!r}"
+        )
+        logger.error(
+            "persona_swap_detected (pre-send): %s — skipping kickoff to "
+            "avoid stacking two bootstraps in one pane",
+            details,
+        )
+        try:
+            self._msg_store.record_event(
+                scope=role,
+                sender="pollypm",
+                subject="persona_swap_detected",
+                payload={
+                    "message": (
+                        f"pre-send pane guard refused kickoff: {details}"
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return True
 
     def _assert_session_launch_matches(
         self, session_name: str, initial_input: str,

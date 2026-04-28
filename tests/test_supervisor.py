@@ -1642,6 +1642,238 @@ def test_send_initial_input_skips_unknown_role(monkeypatch, tmp_path: Path) -> N
     assert launch.fresh_launch_marker.exists()
 
 
+# ---------------------------------------------------------------------------
+# Pre-send pane guard — issue #931 (cockpit Polly · chat double-bootstrap)
+# ---------------------------------------------------------------------------
+#
+# The user reported clicking "Polly · chat" in the rail and seeing the
+# operator pane receive a heartbeat kickoff first ("Read /heartbeat.md…")
+# followed by the operator kickoff — the agent correctly refused the
+# identity swap and stalled. The pre-send guard reads the target pane
+# before sending and refuses any kickoff whose role doesn't match the
+# canonical role banner already present in the pane.
+
+
+def test_send_initial_input_skips_when_pane_already_has_other_role_banner(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#931 — operator kickoff must not stack on top of a heartbeat banner.
+
+    Simulates the bug: operator launch's target points at a pane whose
+    capture already shows ``CANONICAL ROLE: heartbeat-supervisor``. The
+    pre-send guard must skip the send (no double-bootstrap) and keep the
+    fresh-launch marker on disk so the next attempt with the right
+    target still works.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launch = _make_launch_for_role(
+        config, tmp_path, "operator-pm", initial_input="operator kickoff",
+    )
+    assert launch.fresh_launch_marker is not None
+
+    # Pane shows a heartbeat banner — i.e. a heartbeat kickoff already
+    # landed here. Operator kickoff must NOT stack.
+    heartbeat_banner = (
+        "======================================================================\n"
+        "CANONICAL ROLE: heartbeat-supervisor\n"
+        "SESSION NAME:   heartbeat\n"
+        "======================================================================\n"
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "capture_pane",
+        lambda target, lines=None: heartbeat_banner,
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    supervisor._send_initial_input_if_fresh(launch, "pollypm:pm-operator")
+
+    assert sent == [], (
+        "operator kickoff must NOT be sent into a pane already bootstrapped "
+        "as heartbeat-supervisor — that's the #931 double-bootstrap bug"
+    )
+    # Marker stays on disk so the next attempt with the correct target works.
+    assert launch.fresh_launch_marker.exists()
+
+
+def test_send_initial_input_proceeds_when_pane_has_matching_role_banner(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#931 — guard is no-op when banner matches role (idempotent re-send).
+
+    A pane that already shows the operator banner should still accept an
+    operator kickoff (the persona-verify backstop occasionally re-fires a
+    legitimate kickoff and stacking the same role's banner is harmless;
+    the guard only refuses *crossed* roles).
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launch = _make_launch_for_role(
+        config, tmp_path, "operator-pm", initial_input="operator kickoff",
+    )
+    matching_banner = (
+        "======================================================================\n"
+        "CANONICAL ROLE: operator-pm\n"
+        "SESSION NAME:   operator-pm-session\n"
+        "======================================================================\n"
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "capture_pane",
+        lambda target, lines=None: matching_banner,
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    supervisor._send_initial_input_if_fresh(launch, "pollypm:pm-operator")
+
+    assert len(sent) == 1, (
+        "operator kickoff with operator banner already in pane should still "
+        "deliver — the guard only refuses crossed roles"
+    )
+    assert sent[0][1] == "operator kickoff"
+
+
+def test_send_initial_input_proceeds_for_fresh_pane(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#931 — fresh pane (no banner) should bootstrap normally.
+
+    The default case: the pane is empty (or shows the provider's intro)
+    and there is no canonical role banner anywhere. The guard must not
+    interfere with a clean kickoff.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launch = _make_launch_for_role(
+        config, tmp_path, "operator-pm", initial_input="operator kickoff",
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "capture_pane",
+        lambda target, lines=None: "Welcome to Claude Code\n>",
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    supervisor._send_initial_input_if_fresh(launch, "pollypm:pm-operator")
+
+    assert len(sent) == 1
+    assert sent[0][1] == "operator kickoff"
+
+
+def test_send_initial_input_per_task_worker_pane_unaffected(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#931 — per-task worker (post-#919) kickoff path must not regress.
+
+    Per-task workers are launched into uniquely named ``task-<project>-<N>``
+    windows in the storage closet (#919/#921/#924). They share the pre-send
+    guard via the session_services.tmux helper, but the worker role never
+    crosses with operator/heartbeat windows in practice. Verify a fresh
+    worker pane still gets its kickoff cleanly with no surprise rejections.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launch = _make_launch_for_role(
+        config, tmp_path, "worker", initial_input="worker kickoff",
+    )
+    # Pane is fresh — no banners yet (per-task panes wouldn't have the
+    # operator-pm or heartbeat-supervisor banner crossed in).
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "capture_pane",
+        lambda target, lines=None: "",
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    supervisor._send_initial_input_if_fresh(launch, "pollypm:task-pollypm-1")
+
+    assert len(sent) == 1, "per-task worker kickoff must still deliver"
+    assert sent[0][0] == "pollypm:task-pollypm-1"
+    assert sent[0][1] == "worker kickoff"
+    assert not launch.fresh_launch_marker.exists()
+
+
+def test_pane_already_bootstrapped_helper_recognises_other_role_banner(
+    tmp_path: Path,
+) -> None:
+    """#931 — direct unit test for the pane-content classifier.
+
+    The helper is the single seam where the (launch, target) crossed-tuple
+    defense lives; both the supervisor kickoff path and the recovery-prompt
+    path consult it. Pin its semantics so future refactors don't silently
+    break the cross-role check.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    class _FakeTmux:
+        def __init__(self, pane: str) -> None:
+            self.pane = pane
+
+        def capture_pane(self, target: str, lines: int = 0) -> str:
+            return self.pane
+
+    # Banner for a different role → guard fires.
+    supervisor.session_service.tmux = _FakeTmux(
+        "CANONICAL ROLE: heartbeat-supervisor\n"
+    )
+    assert supervisor._pane_already_bootstrapped_as_other_role(
+        "operator-pm", "any-target",
+    ) is True
+
+    # Banner for the same role → guard is no-op.
+    supervisor.session_service.tmux = _FakeTmux(
+        "CANONICAL ROLE: operator-pm\n"
+    )
+    assert supervisor._pane_already_bootstrapped_as_other_role(
+        "operator-pm", "any-target",
+    ) is False
+
+    # No banner at all → guard is no-op.
+    supervisor.session_service.tmux = _FakeTmux("Welcome to Claude Code\n>")
+    assert supervisor._pane_already_bootstrapped_as_other_role(
+        "operator-pm", "any-target",
+    ) is False
+
+    # Empty role argument → guard short-circuits to False.
+    assert supervisor._pane_already_bootstrapped_as_other_role(
+        "", "any-target",
+    ) is False
+
+
 def test_start_cockpit_tui_respawns_rail_pane_with_restart_loop(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     supervisor = Supervisor(config)
