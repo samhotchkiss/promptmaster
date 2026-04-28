@@ -50,14 +50,11 @@ differ; every task id has the form `<project>/<number>`.
 ### 1. See what's queued
 
 The canonical path is **auto-claim**: Polly queues a worker-role task and
-immediately claims it on your behalf, which provisions this very session
-and force-pushes the kickoff prompt through the heartbeat sweep. If you
-are reading the kickoff prompt in your tmux window, the task is already
-claimed for you — go to step 4. You do **not** need to poll `pm task
-next` to find work.
+immediately claims it for you, provisioning this session and pushing the
+kickoff prompt through the heartbeat sweep. If you're reading the kickoff
+in your tmux window, the task is already claimed — skip to step 4.
 
-If you are operating outside that flow (e.g. picking up a stale claim or
-working from a fresh shell), these commands still work:
+If you're operating outside that flow (stale claim, fresh shell):
 
 ```bash
 pm task list --status queued          # full queue
@@ -81,17 +78,15 @@ assuming FOO means BAR. Will revisit in review."
 
 ### 3. Claim the task
 
-In normal operation, **Polly has already claimed the task for you**. The
-auto-claim contract spawns this worker session: when she queues a
-worker-role task, she immediately runs `pm task claim ... --actor worker`,
-the work service provisions the worktree and per-task tmux window, and
-the heartbeat sweep force-pushes the kickoff prompt into your pane. If
-you see the task prompt land in your window, you do not need to run
-`claim` yourself. Run `pwd` or `git status -sb` to confirm where you
-landed and skip to step 4.
+In normal operation, **Polly has already claimed the task for you**: when
+she queues a worker-role task, she runs `pm task claim ... --actor worker`,
+the work service provisions the worktree + per-task tmux window, and the
+heartbeat sweep pushes the kickoff prompt into your pane. If the kickoff
+landed, don't re-run `claim`. Run `pwd` or `git status -sb` to confirm
+location and skip to step 4.
 
-Run `pm task claim` manually only when you are operating outside that
-flow (e.g. recovering a stale claim from a fresh shell):
+Run `pm task claim` manually only when recovering a stale claim from a
+fresh shell:
 
 ```bash
 pm task claim shortlink_gen/1
@@ -99,23 +94,18 @@ pm task claim shortlink_gen/1
 
 In either case, `claim`:
 
-- Sets `work_status = in_progress`.
-- Assigns the task to you (`--actor worker` by default).
-- Provisions a real git worktree at `.pollypm/worktrees/<project>-<number>`.
-- Checks out branch `task/<project>-<number>` in that worktree.
-- Starts that branch from the project's current `HEAD` when the worktree is
-  first created, so you should expect a clean checkout of the repo, not the
-  main working directory with someone else's uncommitted edits.
+- Sets `work_status = in_progress` and assigns the task to you.
+- Provisions a git worktree at `.pollypm/worktrees/<project>-<number>` on
+  branch `task/<project>-<number>`, started from the project's current
+  `HEAD` (clean checkout, not the main working dir).
 - Writes `.pollypm-task-prompt.md` into the worktree root.
-- Launches an interactive Claude session in a tmux window named
-  `task-<project>-<number>` with its current directory already set to that
-  worktree.
+- Launches an interactive Claude session in tmux window
+  `task-<project>-<number>`, cwd already set to the worktree.
 
-If the kickoff prompt does not land in your pane right away, do **not**
-poke yourself with `tmux send-keys`. The heartbeat sweep recognizes the
-per-task session, force-pushes the kickoff on its next cycle, and stamps
-`kickoff_sent_at` only after the pane is ready. Wait one heartbeat tick
-or check `pm status` for a `silent_worker` / `no_session` signal.
+If the kickoff prompt is slow to land, do **not** poke yourself with
+`tmux send-keys`. The heartbeat sweep force-pushes on its next cycle and
+stamps `kickoff_sent_at` only after the pane is ready. Wait a tick, or
+check `pm status` for `silent_worker` / `no_session`.
 
 ### 4. Build
 
