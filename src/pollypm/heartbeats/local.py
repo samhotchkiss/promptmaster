@@ -1038,11 +1038,11 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         on an apply hiccup.
         """
         try:
-            from pollypm.plugins_builtin.task_assignment_notify.handlers.sweep import (
-                _build_event_for_task,
-            )
-            from pollypm.plugins_builtin.task_assignment_notify.resolver import (
+            # #939: route through the plugin's public API rather than
+            # reaching into ``handlers.sweep`` / ``resolver`` privately.
+            from pollypm.plugins_builtin.task_assignment_notify.api import (
                 DEDUPE_WINDOW_SECONDS,
+                build_event_for_task as _build_event_for_task,
                 load_runtime_services,
                 notify as _notify,
             )

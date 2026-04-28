@@ -578,7 +578,10 @@ class WorkTransitionManager:
         caller's cancel transaction is still in flight.
         """
         try:
-            from pollypm.plugins_builtin.task_assignment_notify.resolver import (
+            # #939: route through the plugin's public API rather than
+            # importing from ``resolver`` directly. Keeps core decoupled
+            # from the plugin's internal module layout.
+            from pollypm.plugins_builtin.task_assignment_notify.api import (
                 clear_alerts_for_cancelled_task,
             )
         except Exception:  # noqa: BLE001

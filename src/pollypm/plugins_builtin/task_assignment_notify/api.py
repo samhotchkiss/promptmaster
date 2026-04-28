@@ -13,6 +13,25 @@ hooks) imports from here; the underscored names remain in
 without breaking external callers as long as the names re-exported
 here keep their published shape.
 
+Core runtime callers route through the same surface (#939):
+
+* ``pollypm.work.service_transition_manager`` — uses
+  :func:`clear_alerts_for_cancelled_task` from the cancel path so
+  the alert hygiene fix from #927 doesn't pin core to a private
+  resolver symbol.
+* ``pollypm.heartbeats.local`` — uses :func:`build_event_for_task`,
+  :func:`load_runtime_services`, :func:`notify`, and
+  :data:`DEDUPE_WINDOW_SECONDS` to fire resume pings without
+  reaching into ``handlers.sweep`` / ``resolver`` privately.
+* ``pollypm.cockpit_tasks`` — uses
+  :data:`RECENT_SWEEPER_PING_SECONDS` and
+  :data:`SWEEPER_PING_CONTEXT_ENTRY_TYPE` to derive the recently-
+  pinged badge without importing the sweep handler module.
+
+If a future caller needs another helper, promote it here first, then
+update the caller — never let core depend on an underscored name from
+the plugin's internals.
+
 Each public name is implemented as a thin trampoline that resolves the
 underlying private function via attribute lookup at call time. That
 preserves test ergonomics: monkeypatching the source module
@@ -33,6 +52,8 @@ from pollypm.plugins_builtin.task_assignment_notify.handlers import (
 
 # Re-export plain constants directly — they don't need trampolining.
 DEDUPE_WINDOW_SECONDS = _resolver.DEDUPE_WINDOW_SECONDS
+RECENT_SWEEPER_PING_SECONDS = _sweep.RECENT_SWEEPER_PING_SECONDS
+SWEEPER_PING_CONTEXT_ENTRY_TYPE = _sweep.SWEEPER_PING_CONTEXT_ENTRY_TYPE
 
 
 def load_runtime_services(*args: Any, **kwargs: Any) -> Any:
@@ -41,6 +62,14 @@ def load_runtime_services(*args: Any, **kwargs: Any) -> Any:
 
 def notify(*args: Any, **kwargs: Any) -> Any:
     return _resolver.notify(*args, **kwargs)
+
+
+def clear_alerts_for_cancelled_task(*args: Any, **kwargs: Any) -> Any:
+    """Public re-export of the resolver helper used by the work-service
+    cancel path (#927). Core must not import from
+    :mod:`task_assignment_notify.resolver` directly — go through this
+    surface so the plugin can refactor its internals freely."""
+    return _resolver.clear_alerts_for_cancelled_task(*args, **kwargs)
 
 
 def auto_claim_enabled_for_project(*args: Any, **kwargs: Any) -> Any:
@@ -69,8 +98,11 @@ def recover_dead_claims(*args: Any, **kwargs: Any) -> Any:
 
 __all__ = [
     "DEDUPE_WINDOW_SECONDS",
+    "RECENT_SWEEPER_PING_SECONDS",
+    "SWEEPER_PING_CONTEXT_ENTRY_TYPE",
     "auto_claim_enabled_for_project",
     "build_event_for_task",
+    "clear_alerts_for_cancelled_task",
     "close_quietly",
     "load_runtime_services",
     "notify",
