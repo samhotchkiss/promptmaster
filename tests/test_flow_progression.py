@@ -918,6 +918,104 @@ class TestApprove:
         assert merged.returncode == 0
         assert not (repo / ".git" / "MERGE_HEAD").exists()
 
+    def test_approve_preserves_local_only_file_in_allowlisted_dir_when_worker_changes_other_paths(
+        self, tmp_path
+    ):
+        """#947 (reopen): ``git status`` collapses a fully-untracked
+        tree to ``?? issues/``. The original #947 fix decided per-path
+        based on whether the worker branch contained ANY path under
+        ``issues/`` — if yes, the whole directory was rmtree'd before
+        merge, taking unrelated local-only files with it.
+
+        Repro the owner's exact case: worker branch commits
+        ``issues/03-needs-review/0042-task.md``, the project root has
+        an untracked colliding copy of that file PLUS an unrelated
+        untracked ``issues/03-needs-review/9999-local-only.md`` that
+        the worker never touched. After approve:
+
+        - ``0042-task.md`` matches the worker's version (#946 worker-
+          wins on collision is preserved).
+        - ``9999-local-only.md`` still exists with its original
+          content (the new per-leaf preserve path).
+        """
+        repo = _git_repo(tmp_path)
+        svc = SQLiteWorkService(db_path=tmp_path / "work.db", project_path=repo)
+        task = _create_task(svc)
+        _claim_task(svc, task)
+
+        current_branch = _git_stdout(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        task_branch = f"task/{task.project}-{task.task_number}"
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", "-q", "-b", task_branch],
+            check=True,
+        )
+        # Worker branch commits the colliding file under issues/.
+        worker_dir = repo / "issues" / "03-needs-review"
+        worker_dir.mkdir(parents=True)
+        (worker_dir / "0042-task.md").write_text(
+            "worker's version\n", encoding="utf-8"
+        )
+        # Plus an unrelated file the worker tracks too, so the worker
+        # branch is meaningfully ahead.
+        (repo / "feature.txt").write_text("worker work\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "issues/", "feature.txt"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "feat: worker change"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", "-q", current_branch],
+            check=True,
+        )
+        svc.node_done(task.task_id, "pete", _valid_work_output())
+
+        # Recreate the untracked tree on the current branch:
+        # colliding 0042-task.md (different content from the worker)
+        # + sibling 9999-local-only.md the worker never committed.
+        local_dir = repo / "issues" / "03-needs-review"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        (local_dir / "0042-task.md").write_text(
+            "local edit\n", encoding="utf-8"
+        )
+        local_only_text = "local-only snapshot\n"
+        (local_dir / "9999-local-only.md").write_text(
+            local_only_text, encoding="utf-8"
+        )
+
+        # Sanity: git collapses this to a single ``?? issues/`` line,
+        # which is the exact shape that defeated the first fix.
+        status_before = _git_stdout(repo, "status", "--porcelain")
+        assert "?? issues/" in status_before, (
+            "expected git to collapse the untracked tree to ?? issues/; "
+            f"got: {status_before!r}"
+        )
+
+        result = svc.approve(task.task_id, "polly")
+
+        assert result.work_status == WorkStatus.DONE
+        # Worker-wins on the colliding path (#946 contract).
+        assert (local_dir / "0042-task.md").read_text(encoding="utf-8") == (
+            "worker's version\n"
+        ), "worker-wins on collision was not preserved"
+        # Non-colliding sibling survives — this is the #947-reopen fix.
+        assert (local_dir / "9999-local-only.md").exists(), (
+            "9999-local-only.md was deleted during approve "
+            "(#947 reopen regression)"
+        )
+        assert (local_dir / "9999-local-only.md").read_text(
+            encoding="utf-8"
+        ) == local_only_text
+        # Merge completed cleanly.
+        merged = subprocess.run(
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", task_branch, "HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        assert merged.returncode == 0
+        assert not (repo / ".git" / "MERGE_HEAD").exists()
+
 
 # ---------------------------------------------------------------------------
 # reject

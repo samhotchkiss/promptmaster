@@ -3130,53 +3130,80 @@ class SQLiteWorkService:
             if not _path_is_pollypm_scaffold(project_path, rel_path):
                 continue
 
+            # #947 (reopen): ``git status`` collapses an untracked
+            # tree to a single ``?? issues/`` line, so a per-path
+            # decision lumps the whole directory together. Expand
+            # any directory entry to its individual untracked leaf
+            # files via ``git ls-files --others`` so we can decide
+            # per file: a colliding leaf still gets the #946 worker-
+            # wins delete, but a sibling local-only file under the
+            # same allowlisted dir survives via the #947 preserve
+            # path.
             target = project_path / rel_path
-            # Mirror the predicate's content gate: a binary or
-            # unexpectedly large file aborts the auto-merge with a
-            # clear error rather than getting silently swept into the
-            # commit. Directories (e.g. ``issues/``) are walked
-            # recursively when we remove them.
-            if target.is_file():
-                try:
-                    size = target.stat().st_size
-                except OSError:
-                    size = None
-                if size is not None and size > self._PRE_STAGE_MAX_BYTES:
-                    raise ValidationError(
-                        f"Cannot auto-merge approved work: PollyPM "
-                        f"scaffold file `{rel_path}` is unexpectedly "
-                        f"large ({size} bytes). Inspect it and either "
-                        f"commit or remove it before retrying approve."
-                    )
+            if target.is_dir() and not target.is_symlink():
+                leaf_paths = self._expand_untracked_directory(
+                    project_path, rel_path
+                )
+            else:
+                leaf_paths = [rel_path]
 
-            # #947: if the worker branch doesn't commit this path,
-            # stage + commit it on the current branch so the merge
-            # preserves it. Otherwise (worker branch has the path)
-            # fall back to the #946 behavior: remove the working-tree
-            # copy so the worker's version wins through the merge.
-            if not self._worker_branch_has_path(
-                project_path, task_branch, rel_path
-            ):
-                preserve_paths.append(rel_path)
-                continue
-
-            try:
-                if target.is_symlink() or target.is_file():
-                    target.unlink()
-                elif target.is_dir():
-                    import shutil
-
-                    shutil.rmtree(target)
-                else:
-                    # Path vanished between status output and now;
-                    # nothing to do.
+            for leaf_rel_path in leaf_paths:
+                # Re-apply the allowlist on each leaf: callers
+                # passed the predicate at the directory level, but
+                # individual files under it must still match (in
+                # practice ``_issues_path_is_pollypm_managed``
+                # accepts every path under ``issues/``, but we keep
+                # the check defensive).
+                if not _path_is_pollypm_scaffold(project_path, leaf_rel_path):
                     continue
-            except OSError as exc:
-                raise ValidationError(
-                    f"Cannot auto-merge approved work: failed to "
-                    f"clear PollyPM scaffold path `{rel_path}` from "
-                    f"the working tree before merge: {exc}"
-                ) from exc
+
+                leaf_target = project_path / leaf_rel_path
+                # Mirror the predicate's content gate: a binary or
+                # unexpectedly large file aborts the auto-merge
+                # with a clear error rather than getting silently
+                # swept into the commit.
+                if leaf_target.is_file():
+                    try:
+                        size = leaf_target.stat().st_size
+                    except OSError:
+                        size = None
+                    if size is not None and size > self._PRE_STAGE_MAX_BYTES:
+                        raise ValidationError(
+                            f"Cannot auto-merge approved work: PollyPM "
+                            f"scaffold file `{leaf_rel_path}` is unexpectedly "
+                            f"large ({size} bytes). Inspect it and either "
+                            f"commit or remove it before retrying approve."
+                        )
+
+                # #947: if the worker branch doesn't commit this
+                # path, stage + commit it on the current branch so
+                # the merge preserves it. Otherwise (worker branch
+                # has the path) fall back to the #946 behavior:
+                # remove the working-tree copy so the worker's
+                # version wins through the merge.
+                if not self._worker_branch_has_path(
+                    project_path, task_branch, leaf_rel_path
+                ):
+                    preserve_paths.append(leaf_rel_path)
+                    continue
+
+                try:
+                    if leaf_target.is_symlink() or leaf_target.is_file():
+                        leaf_target.unlink()
+                    elif leaf_target.is_dir():
+                        import shutil
+
+                        shutil.rmtree(leaf_target)
+                    else:
+                        # Path vanished between status output and
+                        # now; nothing to do.
+                        continue
+                except OSError as exc:
+                    raise ValidationError(
+                        f"Cannot auto-merge approved work: failed to "
+                        f"clear PollyPM scaffold path `{leaf_rel_path}` from "
+                        f"the working tree before merge: {exc}"
+                    ) from exc
 
         if preserve_paths:
             # Stage all preserved paths in one ``git add`` and commit
@@ -3239,6 +3266,55 @@ class SQLiteWorkService:
             # forward-progress semantics for the existing test cases.
             return True
         return bool(ls_tree.stdout.strip())
+
+    def _expand_untracked_directory(
+        self,
+        project_path: Path,
+        rel_dir: str,
+    ) -> list[str]:
+        """Expand an untracked directory into its individual leaf files.
+
+        ``git status --porcelain`` collapses a fully-untracked tree to
+        a single ``?? <dir>/`` entry. The #947 reopen showed that a
+        per-directory delete-or-preserve decision destroys non-
+        colliding local-only files when *any* path under the directory
+        is committed on the worker branch. Expanding to per-file
+        granularity lets the caller apply the worker-wins / preserve
+        decision per leaf.
+
+        We use ``git ls-files --others --exclude-standard`` (rather
+        than ``os.walk``) so the result respects ``.gitignore`` —
+        same predicate git itself used to mark the directory
+        untracked in the first place.
+        """
+        cleaned = rel_dir.rstrip("/")
+        ls = self._git_run(
+            project_path,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            cleaned,
+        )
+        if ls.returncode != 0 or not ls.stdout:
+            # Couldn't enumerate — fall back to treating the entry
+            # as a single path so the caller's existing handling
+            # (including the worker-has-path delete) still runs. This
+            # preserves forward-progress semantics; the worst case is
+            # the pre-#947-reopen behavior on this one entry.
+            return [cleaned]
+        leaves: list[str] = []
+        for raw in ls.stdout.split("\x00"):
+            leaf = raw.strip()
+            if not leaf:
+                continue
+            # Defense-in-depth: never touch ``.git/`` if it somehow
+            # surfaces here.
+            if leaf == ".git" or leaf.startswith(".git/"):
+                continue
+            leaves.append(leaf)
+        return leaves or [cleaned]
 
     def _git_run(self, project_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
