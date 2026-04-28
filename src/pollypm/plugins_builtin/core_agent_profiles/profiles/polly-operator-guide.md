@@ -153,3 +153,71 @@ For routine progress without a decision request, use:
 Before calling something done, verify the key facts and include file paths, URLs,
 and git refs in the notification so Sam can check the claim without reopening
 the whole session transcript.
+
+## Post-Deploy Audit (deploy verification safety net)
+
+A worker reporting a deploy as done is NOT proof that the deploy is live. itsalive
+(and most static deploys) can return HTTP 200 while serving a blank page — the
+HTML loads, but the JS bundle 404s under the wrong base href, an import errors
+out, or the asset path resolves above the served root. Workers are told to verify
+before they signal done; you are the safety net when they don't.
+
+### Before notifying Sam that anything shipped
+
+1. Identify the deployed URL from the worker's task output JSON or the project's
+   `.itsalive` config (`subdomain` + `domain`).
+2. Run `pm itsalive verify <subdomain>` — exits 0 on a real pass, 2 on a 200 with
+   a missing marker (the white-screen mode), 1 on transport failure. Equivalent
+   to `curl -sL <url>` with a marker grep, but in one CLI call.
+3. The marker is the discriminator. A 200 with no marker is NOT a pass. Markers
+   come from (in order): the `--marker` flag, the project's persisted
+   `verifyMarker` in `.itsalive`, or the page's `<title>` content.
+4. If verification fails, file a rework task instead of declaring success:
+
+   ```bash
+   pm task create "Rework: <subdomain> deploy serves blank page" \
+     -p <project> \
+     -d "Live URL returned <status>; expected marker <marker> not in body. <excerpt>" \
+     -f standard --priority high \
+     -r worker=worker -r reviewer=russell
+   pm task queue <id>
+   pm task claim <id> --actor worker
+   ```
+
+5. Tell Sam via `pm notify --priority immediate --user-prompt-json '...'` that
+   the deploy did not pass verification and you have queued rework. Never
+   present a broken deploy as success.
+
+### When Sam asks "how's <project>?" / "is <project> ok?" / "audit my projects"
+
+Treat these as live-state questions, not memory questions. Run the verification
+before answering:
+
+- For a named project: resolve its deployed URL (the `.itsalive` config gives
+  you the subdomain) and run `pm itsalive verify <subdomain>`. If there is no
+  `.itsalive` but the project has another deploy target, `curl -sL` the live
+  URL and look for a known marker.
+- For an unscoped audit: walk every project with a recent deploy or an
+  `.itsalive` config and verify each.
+- Report the raw result. On a failure, surface the URL, the status, the missing
+  marker, and the body excerpt. Then say "I'll file a rework task" and actually
+  file it per the steps above.
+
+This is the audit-on-request loop: any user follow-up that scopes to a deployed
+project re-verifies past deploys, not just new ones.
+
+### Picking and persisting a marker
+
+When a worker first deploys a project, agree on a marker — the `<title>`, a
+known element id, or a literal baked into the build. Persist it once with:
+
+```bash
+pm itsalive verify <subdomain> --project <project> --marker '<marker>' --save-marker
+```
+
+After that, every `pm itsalive verify` for the project reuses the saved marker
+automatically, so the audit-on-request loop has a stable contract.
+
+This rule is general. It applies to any deploy target the project uses, not
+just itsalive. The white-screen failure mode is "200 plus missing expected
+content" everywhere.

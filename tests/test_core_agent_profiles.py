@@ -231,6 +231,97 @@ def test_operator_guide_documents_user_prompt_json_contract() -> None:
     assert "user_prompt" in text
 
 
+def test_worker_prompt_requires_post_deploy_url_verification() -> None:
+    """#937 regression: workers used to mark deploys done after a
+    successful ``pm itsalive deploy`` even when the live URL rendered
+    blank (HTTP 200 + JS bundle 404 / base-href bug / import error).
+    The worker prompt must teach the agent that a 200 alone is not a
+    pass — they must fetch the URL and confirm an expected marker is
+    present in the body before signaling done.
+
+    The fix lives in PollyPM core role-guide content (no project-
+    specific shims), so the rule must apply to ANY deploy target, not
+    just itsalive."""
+    from pollypm.plugins_builtin.core_agent_profiles.profiles import (
+        worker_prompt,
+    )
+
+    text = worker_prompt()
+    # The named section anchors future grep-based edits.
+    assert "<deploy_verification>" in text
+    # The discriminator: HTTP 200 alone is not a pass — the body must
+    # contain a pre-committed marker.
+    assert "200 alone is NOT a pass" in text
+    assert "marker" in text.lower()
+    # The literal verify command + curl fallback so the agent has both
+    # routes (the CLI helper and a plain HTTP fetch).
+    assert "pm itsalive verify" in text
+    assert "curl -sL" in text
+    # The behavior on failure must be: do NOT mark done; fix and redeploy.
+    assert "do NOT call `pm task done`" in text
+    # The rule must be general — any deploy target, not project-specific.
+    assert "general" in text.lower()
+    assert "any deploy target" in text
+
+
+def test_polly_prompt_runs_post_deploy_audit_before_notifying_user() -> None:
+    """#937 regression: Polly used to forward worker "deploy done"
+    claims directly to Sam without re-fetching the live URL. A 200-but-
+    blank deploy slipped through. The operator prompt must instruct
+    Polly to verify the URL herself before declaring success, file a
+    rework task on failure, and re-verify on user-initiated audits
+    (\"how's <project>?\").
+
+    The rule is general: it applies to any deployed project, not just
+    ones using itsalive."""
+    from pollypm.plugins_builtin.core_agent_profiles.profiles import (
+        polly_prompt,
+    )
+
+    text = polly_prompt()
+    # Anchor section so future edits don't quietly delete the safety net.
+    assert "<post_deploy_audit>" in text
+    # The discriminator: 200 alone is not a pass.
+    assert "200 alone is not a pass" in text
+    # Polly herself fetches the URL — she does not trust the worker's
+    # claim at face value.
+    assert "pm itsalive verify" in text
+    # Failure path: file a rework task instead of declaring success.
+    assert "rework" in text.lower()
+    assert "pm task create" in text
+    # User-initiated audit triggers re-verification of past deploys.
+    for trigger in ("how's <project>?", "audit my projects"):
+        assert trigger in text, (
+            f"polly prompt must teach the {trigger!r} audit trigger so a "
+            f"natural user follow-up re-verifies past deploys"
+        )
+    # The rule must apply to any deploy target — no project-specific
+    # shims.
+    assert "any deploy target" in text
+
+
+def test_operator_guide_documents_post_deploy_audit_routine() -> None:
+    """The full Polly operator guide must spell out the post-deploy
+    audit so the on-disk reference matches the kickoff prompt. Polly
+    reads the guide on demand for detailed playbooks (#937 safety
+    net)."""
+    from pollypm.plugins_builtin.core_agent_profiles.profiles import (
+        _POLLY_OPERATOR_GUIDE_PATH,
+    )
+
+    text = _POLLY_OPERATOR_GUIDE_PATH.read_text(encoding="utf-8")
+    assert "Post-Deploy Audit" in text
+    assert "pm itsalive verify" in text
+    # The audit-on-request loop is the user-visible trigger.
+    assert 'how\'s <project>?' in text or "how's <project>?" in text
+    # The rework branch must include the concrete `pm task create` call
+    # so Polly does not wing it.
+    assert "Rework:" in text
+    # The marker concept must be documented so persisted markers stay
+    # consistent across audits.
+    assert "verifyMarker" in text
+
+
 def test_worker_profile_explains_optional_overrides_and_missing_files(tmp_path: Path) -> None:
     context, project_root = _make_worker_context(tmp_path)
     profile = core_profiles.plugin.agent_profiles["worker"]()

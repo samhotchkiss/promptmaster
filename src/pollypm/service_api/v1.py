@@ -45,7 +45,12 @@ from pollypm.checkpoints import create_issue_completion_checkpoint, record_check
 from pollypm.config_patches import apply_preference_patch, detect_preference_patch, list_project_overrides
 from pollypm.config import load_config
 from pollypm.plugins_builtin.activity_feed.summaries import activity_summary
-from pollypm.itsalive import deploy_site, pending_deploys, sweep_pending_deploys
+from pollypm.itsalive import (
+    deploy_site,
+    pending_deploys,
+    sweep_pending_deploys,
+    verify_deployment,
+)
 from pollypm.models import ProviderKind, SessionConfig, SessionLaunchSpec
 from pollypm.projects import (
     enable_tracked_project,
@@ -399,6 +404,27 @@ class PollyPMService:
         config = load_config(self.config_path)
         project = config.projects[project_key]
         return sweep_pending_deploys(project.path)
+
+    def itsalive_verify(
+        self,
+        *,
+        url: str,
+        project_key: str | None = None,
+        marker: str | None = None,
+    ):
+        """Fetch a deployed itsalive URL and check the expected marker.
+
+        See ``itsalive.verify_deployment`` for semantics. The service-API
+        wrapper resolves ``project_key`` to a project root so the
+        per-project ``.itsalive`` ``verifyMarker`` is consulted.
+        Workers and Polly use this guard to refuse a 200-but-blank deploy
+        (#937).
+        """
+        project_root = None
+        if project_key is not None:
+            config = load_config(self.config_path)
+            project_root = config.projects[project_key].path
+        return verify_deployment(url, marker=marker, project_root=project_root)
 
     def ensure_pollypm(self) -> str:
         """Ensure the PollyPM tmux session exists and return the controller account name."""

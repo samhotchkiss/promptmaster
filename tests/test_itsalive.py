@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
+from unittest.mock import patch
+from urllib import error
 
 from pollypm import itsalive
 
@@ -173,6 +176,197 @@ def test_sweep_persists_owner_token_from_snake_case_finalize_response(tmp_path: 
     assert len(outcomes) == 1
     saved_global = json.loads(global_config.read_text())
     assert saved_global["ownerToken"] == "owner_tok_snake"
+
+
+class _FakeResponse:
+    """Minimal urllib response stand-in for ``verify_deployment`` tests."""
+
+    def __init__(self, body: bytes, status: int = 200) -> None:
+        self._body = body
+        self.status = status
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+    def getcode(self) -> int:
+        return self.status
+
+
+def _patch_urlopen(response: _FakeResponse | Exception):
+    """Helper to patch ``urllib.request.urlopen`` with a canned response."""
+
+    def fake_urlopen(req, timeout=None):  # noqa: ARG001 - signature compat
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    return patch("pollypm.itsalive.request.urlopen", side_effect=fake_urlopen)
+
+
+def test_verify_deployment_passes_when_marker_present_in_200_body() -> None:
+    """A successful itsalive deploy serves HTTP 200 plus the expected
+    marker in the body — the canonical pass case for #937."""
+    body = (
+        b"<!doctype html><html><head><title>Demo Tracker</title></head>"
+        b"<body><div id=\"app\" data-app=\"demo\"></div>"
+        b"<script src=\"/assets/index.js\"></script></body></html>"
+    )
+    with _patch_urlopen(_FakeResponse(body, status=200)):
+        result = itsalive.verify_deployment(
+            "https://demo.example.test", marker="data-app=\"demo\"",
+        )
+    assert result.ok is True
+    assert result.status_code == 200
+    assert result.marker == "data-app=\"demo\""
+    assert result.title == "Demo Tracker"
+    assert result.reason == "ok"
+
+
+def test_verify_deployment_fails_on_200_with_empty_body() -> None:
+    """The classic white-screen failure mode: HTTP 200 with no body
+    (or a body that doesn't contain the expected marker) must be
+    treated as a failure, not a pass. This is the discriminator the
+    worker + Polly rely on per #937."""
+    with _patch_urlopen(_FakeResponse(b"", status=200)):
+        result = itsalive.verify_deployment(
+            "https://blank.example.test", marker="data-app=\"x\"",
+        )
+    assert result.ok is False
+    assert result.status_code == 200
+    assert "empty body" in result.reason
+
+
+def test_verify_deployment_fails_when_marker_missing_from_200_body() -> None:
+    """itsalive served HTTP 200 but the JS bundle didn't load and the
+    pre-committed marker isn't in the body. ``verify_deployment`` must
+    flag this as broken even though the status code looks healthy."""
+    body = (
+        b"<!doctype html><html><head><title>Some App</title></head>"
+        b"<body><div id=\"root\"></div></body></html>"
+    )
+    with _patch_urlopen(_FakeResponse(body, status=200)):
+        result = itsalive.verify_deployment(
+            "https://broken.example.test", marker="data-app=\"specific\"",
+        )
+    assert result.ok is False
+    assert result.status_code == 200
+    assert "marker not found" in result.reason
+    # The body excerpt is recorded so Polly's rework task has concrete
+    # detail to include in its description.
+    assert "Some App" in result.body_excerpt
+
+
+def test_verify_deployment_falls_back_to_title_marker_when_none_supplied() -> None:
+    """If neither ``--marker`` nor the project's persisted ``verifyMarker``
+    is set, ``verify_deployment`` derives the marker from the served
+    HTML's ``<title>``. A page with no title and no caller-supplied
+    marker must fail closed rather than rubber-stamping a 200."""
+    body = b"<html><head><title>Hello App</title></head><body><script src=\"x.js\"></script>hi</body></html>"
+    with _patch_urlopen(_FakeResponse(body, status=200)):
+        result = itsalive.verify_deployment("https://hello.example.test")
+    assert result.ok is True
+    # The title became the marker.
+    assert result.marker == "Hello App"
+
+    # Empty title + no caller marker → fail closed.
+    body2 = b"<html><head></head><body>nope</body></html>"
+    with _patch_urlopen(_FakeResponse(body2, status=200)):
+        result2 = itsalive.verify_deployment("https://no-title.example.test")
+    assert result2.ok is False
+    assert "no marker" in result2.reason
+
+
+def test_verify_deployment_uses_project_marker_when_caller_omits_one(
+    tmp_path: Path,
+) -> None:
+    """The persisted ``verifyMarker`` in ``.itsalive`` is the audit
+    contract: once Polly saves a marker for a project, every later
+    verify reuses it. This keeps audit-on-request stable across
+    sessions."""
+    itsalive.write_verify_marker(tmp_path, "data-build-id=42")
+    body = b"<html><head><title>x</title></head><body data-build-id=42><script>1</script></body></html>"
+    with _patch_urlopen(_FakeResponse(body, status=200)):
+        result = itsalive.verify_deployment(
+            "https://saved.example.test", project_root=tmp_path,
+        )
+    assert result.ok is True
+    assert result.marker == "data-build-id=42"
+
+
+def test_verify_deployment_fails_on_http_error() -> None:
+    """Transport-level failures (the deploy URL is genuinely 5xx or DNS
+    is broken) must produce ``ok=False`` so the worker / Polly stop the
+    success path. Distinct from the 200-but-broken case so the CLI can
+    surface a different exit code."""
+    http_error = error.HTTPError(
+        "https://err.example.test", 503, "boom", hdrs=None, fp=io.BytesIO(b"down"),
+    )
+    with _patch_urlopen(http_error):
+        result = itsalive.verify_deployment("https://err.example.test")
+    assert result.ok is False
+    assert result.status_code == 503
+    assert "503" in result.reason
+
+
+def test_itsalive_verify_cli_exits_2_on_200_with_missing_marker() -> None:
+    """The ``pm itsalive verify`` CLI must exit with a distinct code
+    for the 200-but-blank case (exit 2) vs transport errors (exit 1)
+    so workers and Polly can branch on the failure mode. A pass exits
+    0. The exit codes are part of the contract documented on the
+    command's help — changing them silently regresses #937."""
+    from typer.testing import CliRunner
+
+    from pollypm.cli_features.issues import itsalive_app
+
+    runner = CliRunner()
+
+    # Case 1: pass — 200 + marker present.
+    body_ok = b"<html><head><title>App</title></head><body><script>1</script>data-app=ok</body></html>"
+    with _patch_urlopen(_FakeResponse(body_ok, status=200)):
+        result = runner.invoke(
+            itsalive_app, ["verify", "demo", "--marker", "data-app=ok"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "ok=True" in result.output
+
+    # Case 2: 200 but missing marker — exit 2 (the white-screen case).
+    body_blank = b"<html><head><title>App</title></head><body><script>1</script></body></html>"
+    with _patch_urlopen(_FakeResponse(body_blank, status=200)):
+        result = runner.invoke(
+            itsalive_app, ["verify", "demo", "--marker", "data-app=ok"],
+        )
+    assert result.exit_code == 2, result.output
+    assert "ok=False" in result.output
+
+    # Case 3: HTTP 5xx — exit 1 (transport / server failure).
+    http_error = error.HTTPError(
+        "https://demo.itsalive.co", 503, "down", hdrs=None, fp=io.BytesIO(b""),
+    )
+    with _patch_urlopen(http_error):
+        result = runner.invoke(
+            itsalive_app, ["verify", "demo", "--marker", "anything"],
+        )
+    assert result.exit_code == 1, result.output
+
+
+def test_verify_deployment_flags_spa_missing_script_tag() -> None:
+    """Heuristic: a SPA mount point (``<div id=\"root\">``) with no
+    ``<script>`` tag in the HTML is the canonical white-screen build
+    failure (Vite/Webpack didn't inject the bundle). Even if a marker
+    matches, the missing script means the page won't bootstrap."""
+    body = b"<html><head><title>Marker Here</title></head><body><div id=\"root\"></div></body></html>"
+    with _patch_urlopen(_FakeResponse(body, status=200)):
+        result = itsalive.verify_deployment(
+            "https://spa.example.test", marker="Marker Here",
+        )
+    assert result.ok is False
+    assert "script" in result.reason.lower()
 
 
 def test_push_deploy_uses_existing_project_token(tmp_path: Path, monkeypatch) -> None:

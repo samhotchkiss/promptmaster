@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 import json
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -22,6 +23,11 @@ GLOBAL_CONFIG_FILE = Path.home() / ".itsalive"
 PENDING_DIR = ".pollypm/itsalive/pending"
 _IGNORE_NAMES = {".DS_Store", ".itsalive", "ITSALIVE.md", "CLAUDE.md"}
 _IGNORE_PARTS = {".git", "node_modules"}
+_VERIFY_TIMEOUT_SECONDS = 15.0
+_TITLE_RE = re.compile(r"<title[^>]*>([^<]+)</title>", re.IGNORECASE)
+_SCRIPT_SRC_RE = re.compile(
+    r"""<script[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>""", re.IGNORECASE
+)
 
 
 @dataclass(slots=True)
@@ -56,6 +62,25 @@ class DeployOutcome:
     pending_path: str | None = None
     expires_at: str | None = None
     email: str | None = None
+
+
+@dataclass(slots=True)
+class VerifyResult:
+    """Outcome of a post-deploy URL health check.
+
+    A successful itsalive deploy returns HTTP 200 even when the served
+    HTML cannot bootstrap the JS bundle — a white-screen ship. Workers
+    and Polly call ``verify_deployment`` after every deploy so a 200
+    plus an expected marker is required to claim done. Per #937.
+    """
+
+    url: str
+    status_code: int
+    ok: bool
+    reason: str
+    marker: str | None = None
+    title: str | None = None
+    body_excerpt: str = ""
 
 
 def deploy_site(
@@ -581,3 +606,179 @@ def _extract_owner_token(payload: dict[str, Any]) -> str:
         if isinstance(nested, str) and nested.strip():
             return nested.strip()
     return ""
+
+
+def verify_marker(project_root: Path | None) -> str | None:
+    """Read the project's expected post-deploy marker, if any.
+
+    Workers and the operator pin a known string from the build (a title,
+    a `data-app=` attribute, an element id) so a 200-but-empty-body
+    deploy fails verification. The marker is stored under ``verifyMarker``
+    in ``.itsalive`` so it survives ``write_project_config`` round-trips.
+    """
+    if project_root is None:
+        return None
+    config = read_project_config(Path(project_root))
+    raw = config.get("verifyMarker") or config.get("verify_marker")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def write_verify_marker(project_root: Path, marker: str) -> Path:
+    """Persist the expected post-deploy marker into the project's ``.itsalive``."""
+    root = Path(project_root).resolve()
+    config = read_project_config(root)
+    config["verifyMarker"] = marker.strip()
+    return write_project_config(root, config)
+
+
+def verify_deployment(
+    url: str,
+    *,
+    marker: str | None = None,
+    project_root: Path | None = None,
+    timeout: float = _VERIFY_TIMEOUT_SECONDS,
+) -> VerifyResult:
+    """Fetch ``url`` and assert HTTP 200 + an expected marker is present.
+
+    A successful itsalive deploy can still serve a white screen: the
+    HTML loads with status 200 but the JS bundle 404s, the asset paths
+    resolve under the wrong base href, or an import error blanks the
+    page. ``verify_deployment`` is the discriminator — workers MUST
+    call it before signaling ``pm task done`` and Polly MUST call it
+    before notifying the user that a task is shipped (#937).
+
+    Marker resolution order:
+      1. The explicit ``marker`` argument.
+      2. The project's persisted marker (``.itsalive`` ``verifyMarker``).
+      3. The fetched body's ``<title>`` content.
+
+    A non-200 response, a missing body, or a marker mismatch all return
+    ``VerifyResult(ok=False)`` with a human-readable ``reason``.
+    """
+    fetch_url = url if "://" in url else f"https://{url}"
+    req = request.Request(
+        fetch_url,
+        method="GET",
+        headers={
+            "User-Agent": "PollyPM-itsalive-verify/0.1",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            status = int(getattr(response, "status", 0) or response.getcode())
+            body_bytes = response.read()
+    except error.HTTPError as exc:
+        body_bytes = b""
+        try:
+            body_bytes = exc.read()
+        except Exception:  # noqa: BLE001
+            body_bytes = b""
+        return VerifyResult(
+            url=fetch_url,
+            status_code=int(exc.code),
+            ok=False,
+            reason=f"HTTP {exc.code} from {fetch_url}",
+            body_excerpt=body_bytes.decode("utf-8", errors="replace")[:200],
+        )
+    except error.URLError as exc:
+        return VerifyResult(
+            url=fetch_url,
+            status_code=0,
+            ok=False,
+            reason=f"network error: {exc.reason}",
+        )
+    except TimeoutError as exc:  # pragma: no cover - depends on socket
+        return VerifyResult(
+            url=fetch_url,
+            status_code=0,
+            ok=False,
+            reason=f"timeout after {timeout:.1f}s: {exc}",
+        )
+
+    body_text = body_bytes.decode("utf-8", errors="replace")
+    title_match = _TITLE_RE.search(body_text)
+    title = title_match.group(1).strip() if title_match else None
+
+    if status != 200:
+        return VerifyResult(
+            url=fetch_url,
+            status_code=status,
+            ok=False,
+            reason=f"HTTP {status} from {fetch_url}",
+            title=title,
+            body_excerpt=body_text[:200],
+        )
+
+    if not body_text.strip():
+        return VerifyResult(
+            url=fetch_url,
+            status_code=status,
+            ok=False,
+            reason="empty body from 200 response",
+            title=title,
+            body_excerpt="",
+        )
+
+    expected = marker if marker is not None else verify_marker(project_root)
+    if expected is None or not expected.strip():
+        expected = title
+
+    if not expected:
+        return VerifyResult(
+            url=fetch_url,
+            status_code=status,
+            ok=False,
+            reason=(
+                "no marker available — pass --marker, set verifyMarker in "
+                ".itsalive, or include a <title> in the deployed HTML"
+            ),
+            title=title,
+            body_excerpt=body_text[:200],
+        )
+
+    if expected not in body_text:
+        return VerifyResult(
+            url=fetch_url,
+            status_code=status,
+            ok=False,
+            reason=f"marker not found in body: {expected!r}",
+            marker=expected,
+            title=title,
+            body_excerpt=body_text[:200],
+        )
+
+    # Cheap heuristic: if a SPA's only `<script src>` is a relative path
+    # that resolves above the served root, the browser renders blank
+    # even though curl is happy. Catch the obvious case where the bundle
+    # path looks unreachable. We do not fetch each script — that's the
+    # operator's call — but we surface the suspicion in ``reason`` if
+    # the body has no script at all (a static landing page is fine; a
+    # built SPA without any script tag is the white-screen smell).
+    has_script = bool(_SCRIPT_SRC_RE.search(body_text)) or "<script" in body_text.lower()
+    looks_like_spa_root = "<div id=\"root\"" in body_text or '<div id="app"' in body_text
+    if looks_like_spa_root and not has_script:
+        return VerifyResult(
+            url=fetch_url,
+            status_code=status,
+            ok=False,
+            reason=(
+                "SPA mount point present but no <script> tag — likely "
+                "a build output that did not inject the bundle"
+            ),
+            marker=expected,
+            title=title,
+            body_excerpt=body_text[:200],
+        )
+
+    return VerifyResult(
+        url=fetch_url,
+        status_code=status,
+        ok=True,
+        reason="ok",
+        marker=expected,
+        title=title,
+        body_excerpt=body_text[:200],
+    )

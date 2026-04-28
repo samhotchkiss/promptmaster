@@ -348,6 +348,103 @@ def itsalive_sweep(
             typer.echo(f"  {outcome.url}")
 
 
+@itsalive_app.command(
+    "verify",
+    help=(
+        "Fetch a deployed itsalive URL and assert HTTP 200 + the project's "
+        "expected marker (a string from the build, defaulting to <title>). "
+        "Workers MUST run this after `pm itsalive deploy` before signaling "
+        "`pm task done`; Polly runs it before notifying the user. Exits 0 "
+        "on pass, 2 on a 200-but-broken render, and 1 on transport errors."
+    ),
+)
+def itsalive_verify(
+    target: str = typer.Argument(
+        ...,
+        help=(
+            "Subdomain (e.g. ``my-app``), full hostname "
+            "(``my-app.itsalive.co``), or full URL."
+        ),
+    ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help=(
+            "Project key. Used to resolve the expected marker from "
+            "``.itsalive`` (``verifyMarker``)."
+        ),
+    ),
+    marker: str | None = typer.Option(
+        None,
+        "--marker",
+        help=(
+            "Expected substring in the response body (e.g. the app's "
+            "<title> or a known build constant). Overrides the project's "
+            "persisted marker."
+        ),
+    ),
+    save_marker: bool = typer.Option(
+        False,
+        "--save-marker",
+        help=(
+            "Persist ``--marker`` into ``.itsalive`` for the project so "
+            "later verifies (and Polly's audit) reuse it."
+        ),
+    ),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
+) -> None:
+    from pollypm.itsalive import (
+        ITSALIVE_API,
+        verify_deployment,
+        write_verify_marker,
+    )
+
+    if target.startswith(("http://", "https://")):
+        url = target
+    elif "." in target:
+        url = f"https://{target}"
+    else:
+        url = f"https://{target}.itsalive.co"
+
+    project_root: Path | None = None
+    if project:
+        try:
+            from pollypm.config import load_config
+
+            cfg = load_config(config_path)
+            project_root = cfg.projects[project].path
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(f"warning: could not resolve project root: {exc}")
+
+    if save_marker:
+        if not marker:
+            typer.echo("error: --save-marker requires --marker")
+            raise typer.Exit(code=1)
+        if project_root is None:
+            typer.echo("error: --save-marker requires --project")
+            raise typer.Exit(code=1)
+        write_verify_marker(project_root, marker)
+        typer.echo(f"saved marker to {project_root}/.itsalive")
+
+    result = verify_deployment(url, marker=marker, project_root=project_root)
+    typer.echo(f"url={result.url}")
+    typer.echo(f"status_code={result.status_code}")
+    typer.echo(f"ok={result.ok}")
+    if result.title:
+        typer.echo(f"title={result.title}")
+    if result.marker:
+        typer.echo(f"marker={result.marker}")
+    typer.echo(f"reason={result.reason}")
+    if result.ok:
+        return
+    # Distinguish rendered-but-broken (200, marker miss) from transport
+    # failure so callers can branch: workers refuse to mark done on either,
+    # Polly's audit uses the distinction to phrase the rework task.
+    if result.status_code == 200:
+        raise typer.Exit(code=2)
+    raise typer.Exit(code=1)
+
+
 @issue_app.command(
     "validate",
     help="Run the issue-tracker backend validation checks for a project.",
