@@ -332,7 +332,12 @@ def _build_review_nudge(supervisor: SupervisorAlertBoundary) -> str | None:
     for project_key in supervisor.config.projects:
         live_keys.add(project_key)
         try:
-            db_path = resolve_work_db_path(project=project_key)
+            # #928: pass the supervisor's bound config so isolated/test
+            # configs aren't bypassed by an implicit load_config() that
+            # picks up the developer's real workspace DB.
+            db_path = resolve_work_db_path(
+                project=project_key, config=supervisor.config
+            )
         except Exception:  # noqa: BLE001
             _logger.exception(
                 "supervisor_alerts: review nudge could not resolve work DB for %s",
@@ -375,7 +380,12 @@ def _build_task_nudge(supervisor: SupervisorAlertBoundary, launch: SessionLaunch
         from pollypm.work.sqlite_service import SQLiteWorkService
 
         project = launch.session.project
-        db_path = resolve_work_db_path(project=project)
+        # #928: same boundary fix as _build_review_nudge — route the
+        # supervisor's bound config through the resolver so test
+        # isolation (and any non-default-config supervisor) is honoured
+        # instead of falling back to load_config() and reading the
+        # developer's workspace DB.
+        db_path = resolve_work_db_path(project=project, config=supervisor.config)
         if not db_path.exists():
             return None
         with SQLiteWorkService(db_path=db_path) as svc:

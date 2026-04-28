@@ -22,11 +22,20 @@ default). Callers that genuinely care about a missing DB should check
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pollypm.config import PollyPMConfig
 
 WORKSPACE_DEFAULT_DB_PATH = ".pollypm/state.db"
 
 
-def resolve_work_db_path(db: str = WORKSPACE_DEFAULT_DB_PATH, project: str | None = None) -> Path:
+def resolve_work_db_path(
+    db: str = WORKSPACE_DEFAULT_DB_PATH,
+    project: str | None = None,
+    *,
+    config: "PollyPMConfig | None" = None,
+) -> Path:
     """Resolve the work-service DB path for ``db`` / optional ``project``.
 
     Behaviour:
@@ -39,6 +48,11 @@ def resolve_work_db_path(db: str = WORKSPACE_DEFAULT_DB_PATH, project: str | Non
     3. Otherwise return ``<workspace_root>/.pollypm/state.db`` from the
        loaded config.
     4. As a last resort (no config), return the cwd-relative default.
+
+    ``config`` (#928): callers that already hold a bound ``PollyPMConfig``
+    (notably the supervisor) can pass it in to avoid a hidden
+    ``load_config()`` call. This keeps test-isolated configs from
+    leaking the developer's real workspace DB into nudge resolution.
     """
     is_default = db == WORKSPACE_DEFAULT_DB_PATH
 
@@ -50,13 +64,22 @@ def resolve_work_db_path(db: str = WORKSPACE_DEFAULT_DB_PATH, project: str | Non
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return db_path
 
-    # Per-project DB when one exists for the named project.
-    if project:
+    def _load() -> "PollyPMConfig | None":
+        if config is not None:
+            return config
         try:
             from pollypm.config import load_config
 
-            config = load_config()
-            known = getattr(config, "projects", {}) or {}
+            return load_config()
+        except Exception:  # noqa: BLE001
+            return None
+
+    resolved_config = _load()
+
+    # Per-project DB when one exists for the named project.
+    if project and resolved_config is not None:
+        try:
+            known = getattr(resolved_config, "projects", {}) or {}
             project_cfg = known.get(project)
             if project_cfg is not None:
                 project_db = Path(project_cfg.path) / ".pollypm" / "state.db"
@@ -68,17 +91,15 @@ def resolve_work_db_path(db: str = WORKSPACE_DEFAULT_DB_PATH, project: str | Non
     # Workspace-root default — every ``pm notify`` / ``pm inbox`` call
     # without an explicit ``--db`` lands here so items stay visible
     # regardless of cwd.
-    try:
-        from pollypm.config import load_config
-
-        config = load_config()
-        workspace_root = getattr(config.project, "workspace_root", None)
-        if workspace_root is not None:
-            candidate = Path(workspace_root) / ".pollypm" / "state.db"
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            return candidate
-    except Exception:  # noqa: BLE001
-        pass
+    if resolved_config is not None:
+        try:
+            workspace_root = getattr(resolved_config.project, "workspace_root", None)
+            if workspace_root is not None:
+                candidate = Path(workspace_root) / ".pollypm" / "state.db"
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                return candidate
+        except Exception:  # noqa: BLE001
+            pass
 
     # Fallback: cwd-relative default when no config is loadable.
     db_path = Path(db)
