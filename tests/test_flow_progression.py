@@ -471,6 +471,97 @@ class TestApprove:
         )
         assert merged.returncode == 0
 
+    def test_approve_allows_untracked_issues_dir(self, tmp_path):
+        """#930: ``FileSyncAdapter`` writes per-task markdown to
+        ``<project>/issues/<phase>/<n>-<slug>.md`` at every status
+        transition without committing. On a fresh project the entire
+        ``issues/`` tree shows up as ``?? issues/`` in
+        ``git status --porcelain``. The approve dirty-tree gate must
+        treat that as scaffold-only and proceed with the auto-merge —
+        otherwise every approve after the very first ``pm task create``
+        would bounce on uncommitted changes."""
+        repo, svc, task, task_branch = _create_review_task_on_git_repo(tmp_path)
+        # Simulate FileSyncAdapter's writes mid-cycle.
+        issues_review = repo / "issues" / "03-needs-review"
+        issues_review.mkdir(parents=True)
+        (issues_review / f"{task.task_number:04d}-test-task.md").write_text(
+            "# Test task\n\nA test task\n", encoding="utf-8",
+        )
+        # The seeded helper files FileTaskBackend.ensure_tracker writes.
+        (repo / "issues" / ".latest_issue_number").write_text("1\n")
+        (repo / "issues" / "notes.md").write_text("# Notes\n")
+        (repo / "issues" / "progress-log.md").write_text("# Progress Log\n")
+
+        # Sanity check: tree looks dirty but only because of issues/.
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        assert "issues" in status
+
+        result = svc.approve(task.task_id, "polly")
+
+        assert result.work_status == WorkStatus.DONE
+        assert (repo / "feature.txt").read_text(encoding="utf-8") == "done\n"
+        merged = subprocess.run(
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", task_branch, "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert merged.returncode == 0
+
+    def test_approve_allows_modified_tracked_issues_files(self, tmp_path):
+        """#930: existing projects (registered before the gitignore
+        fix) have ``issues/`` files already tracked. When a status
+        transition rewrites those tracked files, the approve gate must
+        still pass — the markdown snapshots are pollypm-managed
+        regardless of whether they're tracked or untracked."""
+        repo, svc, task, task_branch = _create_review_task_on_git_repo(tmp_path)
+        # Pretend the user already committed a stale issues/ snapshot
+        # (mirrors counter-trainer / blackjack-trainer).
+        issues_review = repo / "issues" / "03-needs-review"
+        issues_review.mkdir(parents=True)
+        snapshot = issues_review / f"{task.task_number:04d}-test-task.md"
+        snapshot.write_text("# stale\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "issues/"], check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "track issues"],
+            check=True,
+        )
+        # Now FileSyncAdapter rewrites the tracked file at the next
+        # transition — modified tracked file, dirty tree.
+        snapshot.write_text("# fresh\n\nUpdated content\n", encoding="utf-8")
+
+        result = svc.approve(task.task_id, "polly")
+        assert result.work_status == WorkStatus.DONE
+        merged = subprocess.run(
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", task_branch, "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert merged.returncode == 0
+
+    def test_approve_still_blocks_user_dirt_with_issues_clean(self, tmp_path):
+        """#930 sanity check: widening the gate for issues/ must NOT
+        widen it for unrelated user files. A modified ``src.py`` plus
+        an untracked ``issues/`` tree should still bounce the approve."""
+        repo, svc, task, _task_branch = _create_review_task_on_git_repo(tmp_path)
+        # FileSyncAdapter scribbles into issues/.
+        (repo / "issues" / "01-ready").mkdir(parents=True)
+        (repo / "issues" / "01-ready" / "0001-foo.md").write_text(
+            "# foo\n", encoding="utf-8",
+        )
+        # User has uncommitted src.py changes (dirty tracked file).
+        (repo / "README.md").write_text("dirty user edit\n", encoding="utf-8")
+
+        with pytest.raises(ValidationError, match="uncommitted changes"):
+            svc.approve(task.task_id, "polly")
+        assert svc.get(task.task_id).work_status == WorkStatus.REVIEW
+
 
 # ---------------------------------------------------------------------------
 # reject

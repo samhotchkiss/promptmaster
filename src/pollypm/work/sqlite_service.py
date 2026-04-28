@@ -264,12 +264,35 @@ def _docs_change_is_pollypm_only(project_path: Path, rel_path: str) -> bool:
     return bool(files) and all(_doc_file_is_pollypm_generated(path) for path in files)
 
 
+def _issues_path_is_pollypm_managed(rel_path: str) -> bool:
+    """Return True if ``rel_path`` (relative to the project root) lies
+    inside the PollyPM-managed ``issues/`` tree.
+
+    Every file under ``issues/`` is written exclusively by the
+    file-sync adapter / ``FileTaskBackend`` (phase folders, the
+    per-task markdown snapshots, ``.latest_issue_number``, and the
+    seeded ``notes.md`` / ``progress-log.md`` / ``instructions.md``).
+    The user never edits paths inside this tree by hand, so any dirty
+    or untracked entry whose path starts with ``issues/`` is safe to
+    treat as scaffold-only and is allowed past the approve dirty-tree
+    gate (#930).
+    """
+    cleaned = rel_path.rstrip("/")
+    return cleaned == "issues" or cleaned.startswith("issues/")
+
+
 def _status_is_only_pollypm_scaffold(project_path: Path, status_stdout: str) -> bool:
     lines = [line for line in status_stdout.splitlines() if line.strip()]
     if not lines:
         return False
     for line in lines:
-        rel_path = line[3:].strip() if len(line) > 3 else ""
+        # Each porcelain line is 2 status chars + space + path. The
+        # status chars can be a literal space (e.g. ` M` for "modified
+        # in worktree, not staged") so we slice from index 3 directly
+        # rather than ``.strip``-ing the line first — that would eat
+        # the leading space and shift the path by one character (#930).
+        rel_path = line[3:] if len(line) > 3 else ""
+        rel_path = rel_path.rstrip()
         if " -> " in rel_path:
             rel_path = rel_path.rsplit(" -> ", 1)[1].strip()
         rel_path = rel_path.strip('"')
@@ -278,6 +301,12 @@ def _status_is_only_pollypm_scaffold(project_path: Path, status_stdout: str) -> 
         if (rel_path == "docs" or rel_path.startswith("docs/")) and (
             _docs_change_is_pollypm_only(project_path, rel_path)
         ):
+            continue
+        # #930 — every path under ``issues/`` is exclusively written by
+        # the FileSyncAdapter / FileTaskBackend at task transitions.
+        # The user never edits these paths by hand, so untracked or
+        # modified entries here must not bounce ``pm task approve``.
+        if _issues_path_is_pollypm_managed(rel_path):
             continue
         return False
     return True
@@ -2717,7 +2746,12 @@ class SQLiteWorkService:
                 "Cannot auto-merge approved work right now. "
                 f"Git status failed in {project_path}: {detail}"
             )
-        dirty_status = status.stdout.strip()
+        # ``rstrip`` not ``strip`` so we keep any leading space from
+        # the first porcelain status code (e.g. ` M path` for a
+        # modified-in-worktree-only file). ``.strip()`` would shift
+        # the path by one character and break the helper's parser
+        # (#930).
+        dirty_status = status.stdout.rstrip()
         if dirty_status and not _status_is_only_pollypm_scaffold(
             project_path,
             dirty_status,
