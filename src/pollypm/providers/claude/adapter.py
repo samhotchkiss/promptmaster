@@ -30,6 +30,7 @@ from pollypm.runtime_env import claude_config_dir
 from .probe import collect_usage_snapshot as _collect_usage_snapshot
 from .resume import recorded_session_id as _recorded_session_id
 from .resume import resume_argv as _resume_argv
+from .resume import transcript_matches_session as _transcript_matches_session
 from .usage_parse import parse_claude_usage_snapshot
 
 if TYPE_CHECKING:
@@ -71,10 +72,44 @@ class ClaudeAdapter(ProviderAdapterBase):
                 account.home / ".pollypm" / "session-markers" / f"{session.name}.resume"
             )
             session_id = _recorded_session_id(resume_marker)
+            # #935 — control sessions sharing one ``cwd`` (operator +
+            # heartbeat both default to the workspace root) write into
+            # one Claude transcript bucket. A capture-time race or a
+            # legacy marker poisoned before the capture-time validator
+            # can leave ``session_name.resume`` pointing at a sibling
+            # session's transcript, which then ``claude --resume``s
+            # into the wrong conversation and replays the sibling's
+            # ``Read .../<other>.md`` bootstrap into this session's
+            # pane. Verify the marker still belongs to this session by
+            # checking the transcript's first user message references
+            # ``<session_name>.md``; drop the marker (so the runtime
+            # launcher fresh-spawns) when it doesn't.
             if session_id:
-                resume_argv = _resume_argv(session_id, list(session.args))
+                if _transcript_matches_session(
+                    account.home, session.cwd, session_id, session.name,
+                ):
+                    resume_argv = _resume_argv(session_id, list(session.args))
+                else:
+                    # Poisoned marker — refuse to resume into another
+                    # session's transcript. Delete it so the launcher
+                    # fresh-spawns; explicitly leave ``resume_argv``
+                    # empty (NOT ``--continue``) because Claude's
+                    # ``--continue`` picks the most-recently-modified
+                    # transcript in the shared bucket, which is exactly
+                    # the sibling we're trying to escape.
+                    try:
+                        resume_marker.unlink()
+                    except OSError:
+                        pass
+                    resume_argv = None
             else:
-                resume_argv = [self.binary, "--continue", *session.args]
+                # No marker at all: the legacy fallback ``claude
+                # --continue`` is unsafe in shared-bucket setups (it
+                # picks whichever transcript was last touched, which
+                # may belong to a sibling session). Force a fresh
+                # launch instead — the supervisor's post-bootstrap
+                # capture will record the right UUID for next time.
+                resume_argv = None
         return LaunchCommand(
             argv=argv,
             env=dict(account.env),

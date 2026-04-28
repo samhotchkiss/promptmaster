@@ -738,9 +738,30 @@ def test_create_session_window_records_claude_resume_ids(tmp_path: Path, monkeyp
     created_tmux_sessions: set[str] = set()
 
     def _write_transcript(session_name: str) -> None:
+        # #935 — write a first user message that references the
+        # session's control-prompts file so the capture-time validator
+        # can prove the transcript belongs to this launch (control
+        # sessions sharing a Claude bucket otherwise get
+        # cross-attributed; see issue #935).
         bucket.mkdir(parents=True, exist_ok=True)
         session_id = f"{session_name}-uuid"
-        (bucket / f"{session_id}.jsonl").write_text('{"sessionId": "%s"}\n' % session_id)
+        bootstrap = (
+            "[PollyPM bootstrap]\rRead "
+            f"/x/.pollypm/control-prompts/{session_name}.md, "
+            'adopt it as your operating instructions.'
+        )
+        records = [
+            {"sessionId": session_id, "type": "permission-mode"},
+            {
+                "type": "user",
+                "message": {"role": "user", "content": bootstrap},
+                "sessionId": session_id,
+            },
+        ]
+        (bucket / f"{session_id}.jsonl").write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
 
     def _create_session(tmux_session: str, window_name: str, command: str) -> str:
         del command
@@ -774,6 +795,24 @@ def test_create_session_window_records_claude_resume_ids(tmp_path: Path, monkeyp
     assert operator_target == "%2"
     assert heartbeat_launch.resume_marker is not None
     assert operator_launch.resume_marker is not None
+    # #935 — the resume-UUID capture moved out of
+    # ``create_session_window`` and into ``_stabilize_launch`` so it
+    # runs AFTER the bootstrap lands in the new transcript (the only
+    # durable signal that disambiguates two control sessions sharing
+    # one Claude transcript bucket). The pre-launch transcript
+    # snapshot is stashed on the supervisor for the post-bootstrap
+    # capture to consume; firing the capture here directly exercises
+    # the capture path against the fixture transcripts written above.
+    assert "heartbeat" in supervisor._pre_launch_claude_ids
+    assert "operator" in supervisor._pre_launch_claude_ids
+    supervisor._capture_claude_resume_session_id(
+        heartbeat_launch,
+        previous_ids=supervisor._pre_launch_claude_ids.pop("heartbeat"),
+    )
+    supervisor._capture_claude_resume_session_id(
+        operator_launch,
+        previous_ids=supervisor._pre_launch_claude_ids.pop("operator"),
+    )
     assert heartbeat_launch.resume_marker.read_text(encoding="utf-8").strip() == "heartbeat-uuid"
     assert operator_launch.resume_marker.read_text(encoding="utf-8").strip() == "operator-uuid"
 

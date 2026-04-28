@@ -78,6 +78,9 @@ from pollypm.projects import ensure_project_scaffold
 from pollypm.projects import project_checkpoints_dir, project_transcripts_dir, project_worktrees_dir, release_session_lock
 from pollypm.providers.claude.resume import recorded_session_id as _recorded_claude_session_id
 from pollypm.providers.claude.resume import session_ids as _claude_session_ids
+from pollypm.providers.claude.resume import (
+    transcript_matches_session as _claude_transcript_matches_session,
+)
 from pollypm.schedulers import ScheduledJob, get_scheduler_backend
 from pollypm.store.registry import get_store
 from pollypm.transcript_ledger import sync_token_ledger_for_config
@@ -301,6 +304,14 @@ class Supervisor:
         # Lazy-init console window manager — ConsoleWindowManager owns
         # the cockpit window create/repair/focus lifecycle.
         self._console_window_manager = None
+        # #935 — pre-launch Claude transcript-bucket snapshots, keyed by
+        # session name. Captured in :meth:`create_session_window` and
+        # consumed by :meth:`_stabilize_launch` so the resume-marker
+        # capture runs AFTER the bootstrap text lands in the new
+        # transcript (the only durable signal that disambiguates which
+        # fresh UUID belongs to this tmux window when control sessions
+        # share one Claude transcript bucket).
+        self._pre_launch_claude_ids: dict[str, set[str]] = {}
         # Register ourselves as a subsystem so CoreRail.start()/stop() can
         # drive our lifecycle. Readonly supervisors (used by the cockpit
         # for passive inspection) don't register — they never drive boot.
@@ -2553,11 +2564,15 @@ class Supervisor:
         self.session_service.tmux.set_pane_history_limit(target, 200)
         self.session_service.tmux.pipe_pane(target, launch.log_path)
         self._record_launch(launch)
+        # #935 — defer the resume-UUID capture until after the bootstrap
+        # text lands in the transcript. Stash the pre-launch snapshot
+        # here so :meth:`_stabilize_launch` (the post-bootstrap caller)
+        # can validate fresh UUIDs against ``previous_ids`` and against
+        # the first-user-message ``Read .../<session_name>.md`` proof
+        # of ownership. Captures still skipped (snapshot left ``None``)
+        # for non-Claude / no-marker / no-home launches.
         if existing_claude_ids is not None:
-            self._capture_claude_resume_session_id(
-                launch,
-                previous_ids=existing_claude_ids,
-            )
+            self._pre_launch_claude_ids[session_name] = existing_claude_ids
         return launch, target
 
     def stop_session(self, session_name: str) -> None:
@@ -2759,6 +2774,19 @@ class Supervisor:
             )
         _prefixed_status("Sending initial input...")
         self._send_initial_input_if_fresh(launch, target)
+        # #935 — capture the resume UUID AFTER the bootstrap text lands
+        # in the new transcript. The validator inside
+        # ``_capture_claude_resume_session_id`` reads the transcript's
+        # first user message to confirm ownership; running before the
+        # send misses the bootstrap and either captures nothing
+        # (strict) or captures a sibling's UUID (legacy permissive
+        # behavior, the #935 reproduction). Pre-launch snapshot was
+        # stashed by ``create_session_window``.
+        previous_claude_ids = self._pre_launch_claude_ids.pop(name, None)
+        if previous_claude_ids is not None:
+            self._capture_claude_resume_session_id(
+                launch, previous_ids=previous_claude_ids,
+            )
         self._mark_session_resume_ready(launch)
 
     def _mark_session_resume_ready(self, launch: SessionLaunchSpec) -> None:
@@ -2786,6 +2814,33 @@ class Supervisor:
         ``claude --continue`` can jump into a sibling session's transcript.
         Capturing the UUID created for this tmux window lets later restarts
         use ``claude --resume <uuid>`` instead.
+
+        #935 — control sessions sharing one ``cwd`` (operator + heartbeat
+        both default to the workspace root) write into one Claude
+        transcript bucket. ``previous_ids`` alone can't disambiguate
+        which fresh UUID belongs to *this* tmux window when both control
+        launches race to create transcripts in the same bucket. Mis-
+        attribution stuck the operator's resume marker on the
+        heartbeat's transcript UUID, so every later operator launch
+        ``claude --resume``'d into the heartbeat conversation and the
+        ``Read .../heartbeat.md`` bootstrap replayed verbatim into the
+        operator pane (issue #935 reproduction). Defense: only persist
+        a UUID that is BOTH (a) freshly created by this launch — i.e.
+        not in ``previous_ids`` — AND (b) whose transcript's first user
+        message references this session's ``<session_name>.md`` control
+        prompt — the bootstrap text PollyPM itself materialised in
+        :meth:`_prepare_initial_input` for this launch and no other. If
+        no candidate matches, no marker is written and the next launch
+        starts cleanly via the fresh-launch path rather than poisoning
+        the operator pane with a sibling role's replayed transcript.
+
+        This method is called AFTER :meth:`_send_initial_input_if_fresh`
+        so the bootstrap text has already been written into the
+        transcript by Claude Code by the time the validator reads the
+        first user message — earlier (pre-bootstrap) call sites would
+        see only the empty pre-bootstrap transcript and either fail to
+        capture (refuses to write) or — under the older permissive
+        rule — capture the wrong sibling's UUID.
         """
         marker = launch.resume_marker
         home = launch.account.home
@@ -2796,19 +2851,32 @@ class Supervisor:
         ):
             return
 
+        session_name = launch.session.name
         before = set(previous_ids or set())
         deadline = time.monotonic() + poll_timeout_s
         chosen: str | None = None
         while time.monotonic() < deadline:
             ids = _claude_session_ids(home, launch.session.cwd)
-            fresh = [sid for sid in ids if sid not in before]
-            if fresh:
-                chosen = fresh[0]
+            # Strict: only accept a UUID that this launch created
+            # AND whose first user message proves the bootstrap was
+            # ``Read .../<session_name>.md ...``. Both conditions are
+            # required; relaxing either re-opens the #935 mis-
+            # attribution race.
+            for sid in ids:
+                if sid in before:
+                    continue
+                if _claude_transcript_matches_session(
+                    home, launch.session.cwd, sid, session_name,
+                ):
+                    chosen = sid
+                    break
+            if chosen is not None:
                 break
-            if ids:
-                chosen = ids[0]
             time.sleep(0.2)
         if chosen is None:
+            # No transcript matches this session — refuse to write a
+            # marker rather than poison it with a sibling's UUID. The
+            # next launch will fresh-spawn the session.
             return
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(chosen + "\n", encoding="utf-8")
