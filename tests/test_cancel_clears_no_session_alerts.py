@@ -31,6 +31,13 @@ from pollypm.plugins_builtin.task_assignment_notify.handlers.sweep import (
 from pollypm.plugins_builtin.task_assignment_notify.resolver import (
     _RuntimeServices,
     clear_alerts_for_cancelled_task,
+    clear_no_session_alert_for_task,
+)
+from pollypm.work.models import (
+    Artifact,
+    ArtifactKind,
+    OutputType,
+    WorkOutput,
 )
 from pollypm.storage.state import StateStore
 from pollypm.work import task_assignment as bus
@@ -93,6 +100,34 @@ def _claim_worker_task(work: SQLiteWorkService, *, project: str, title: str):
     task = _create_worker_task(work, project=project, title=title)
     work.queue(task.task_id, "pm")
     work.claim(task.task_id, "worker")
+    return work.get(task.task_id)
+
+
+def _drive_task_to_review(
+    work: SQLiteWorkService, *, project: str, title: str,
+):
+    """Create, queue, claim, and ``node_done`` a worker task so it lands
+    in ``review`` ready for ``approve``. Used by the #953 regression
+    tests that need an actually-in-review task — the cancel tests above
+    happily work on plain in_progress tasks, but the approve transition
+    only fires on the review state.
+    """
+    task = _claim_worker_task(work, project=project, title=title)
+    work.node_done(
+        task.task_id,
+        "worker",
+        WorkOutput(
+            type=OutputType.CODE_CHANGE,
+            summary="implemented the thing",
+            artifacts=[
+                Artifact(
+                    kind=ArtifactKind.COMMIT,
+                    description="feat: did the work",
+                    ref="abc123",
+                ),
+            ],
+        ),
+    )
     return work.get(task.task_id)
 
 
@@ -561,4 +596,142 @@ class TestStaleAlertGuardIntact:
         assert 'alert_type.startswith("no_session_for_assignment:")' in source, (
             "#919 guard for no_session_for_assignment:* alert_type "
             "missing from _sweep_stale_alerts."
+        )
+
+
+# ---------------------------------------------------------------------------
+# #953 — approve clears the per-task no_session alert on review-exit
+# ---------------------------------------------------------------------------
+
+
+class TestApproveClearsNoSessionAlert:
+    """The CLI approve path is the canonical reviewer action. The
+    heartbeat sweep raises ``no_session_for_assignment:<task_id>`` while
+    the task sits in ``review`` waiting for a reviewer session. The
+    moment ``approve`` succeeds, that alert is stale — clear it
+    synchronously instead of waiting for a later sweep tick to notice
+    (#953 reopen).
+    """
+
+    def test_approve_clears_no_session_alert_for_reviewer(
+        self, tmp_path, monkeypatch,
+    ):
+        """Set up: task sitting in ``review`` with a per-task
+        ``no_session_for_assignment:proj/1`` alert open. Run approve via
+        the work service. Assert: the per-task alert is no longer in the
+        open-alerts list.
+        """
+        work, store = _make_environment(tmp_path)
+        task = _drive_task_to_review(
+            work, project="demo", title="Reviewable task",
+        )
+
+        # Pre-seed the per-task alert the heartbeat sweep would have
+        # raised while the task was waiting for a reviewer session.
+        store.upsert_alert(
+            "task_assignment",
+            f"no_session_for_assignment:{task.task_id}",
+            "warning",
+            "Task demo/1 was routed to the reviewer role but no "
+            "matching session is running.",
+        )
+
+        services = _RuntimeServices(
+            session_service=None, state_store=store,
+            work_service=None, project_root=tmp_path,
+            msg_store=store,
+        )
+        _install_resolver_loader(monkeypatch, services)
+
+        # Approve — the post-transition hook should walk the same
+        # plugin public API surface the cancel path uses (#939) and
+        # close out the per-task alert.
+        work.approve(task.task_id, "reviewer", reason="LGTM")
+
+        open_keys = _open_alerts(store)
+        assert (
+            "task_assignment", f"no_session_for_assignment:{task.task_id}",
+        ) not in open_keys, (
+            "approve should clear the per-task no_session_for_assignment "
+            f"alert as part of the review-exit transition; saw {open_keys!r}"
+        )
+
+    def test_approve_leaves_unrelated_per_task_alert_open(
+        self, tmp_path, monkeypatch,
+    ):
+        """Approving task A must not touch task B's per-task alert. The
+        helper keys on the just-approved task id, so a sibling task
+        sitting in review with its own no-session alert should still
+        have that alert open after we approve A.
+        """
+        work, store = _make_environment(tmp_path)
+        task_a = _drive_task_to_review(
+            work, project="demo", title="A",
+        )
+        task_b = _drive_task_to_review(
+            work, project="demo", title="B",
+        )
+        store.upsert_alert(
+            "task_assignment",
+            f"no_session_for_assignment:{task_a.task_id}",
+            "warning", "A no session.",
+        )
+        store.upsert_alert(
+            "task_assignment",
+            f"no_session_for_assignment:{task_b.task_id}",
+            "warning", "B no session.",
+        )
+
+        services = _RuntimeServices(
+            session_service=None, state_store=store,
+            work_service=None, project_root=tmp_path, msg_store=store,
+        )
+        _install_resolver_loader(monkeypatch, services)
+
+        work.approve(task_a.task_id, "reviewer", reason="LGTM")
+
+        open_keys = _open_alerts(store)
+        assert (
+            "task_assignment", f"no_session_for_assignment:{task_a.task_id}",
+        ) not in open_keys
+        assert (
+            "task_assignment", f"no_session_for_assignment:{task_b.task_id}",
+        ) in open_keys, (
+            "approving task A must NOT clear task B's per-task alert; "
+            f"saw {open_keys!r}"
+        )
+
+
+class TestClearNoSessionAlertHelper:
+    """Direct unit tests on ``clear_no_session_alert_for_task``."""
+
+    def test_clears_per_task_alert_only(self, tmp_path, monkeypatch):
+        bus.clear_listeners()
+        store = StateStore(tmp_path / "state.db")
+        store.upsert_alert(
+            "task_assignment",
+            "no_session_for_assignment:demo/1",
+            "warning", "msg",
+        )
+        # Project-level alert MUST survive — approve doesn't necessarily
+        # mean the role is no longer needed on the project.
+        store.upsert_alert(
+            "worker-demo", "no_session", "warn", "msg",
+        )
+        services = _RuntimeServices(
+            session_service=None, state_store=store,
+            work_service=None, project_root=tmp_path, msg_store=store,
+        )
+        _install_resolver_loader(monkeypatch, services)
+
+        result = clear_no_session_alert_for_task(task_id="demo/1")
+
+        assert result["cleared_per_task"] is True
+        open_keys = _open_alerts(store)
+        assert (
+            "task_assignment", "no_session_for_assignment:demo/1",
+        ) not in open_keys
+        assert ("worker-demo", "no_session") in open_keys, (
+            "project-level alert must NOT be cleared by the approve-side "
+            "helper; only the per-task alert is unambiguously stale"
         )

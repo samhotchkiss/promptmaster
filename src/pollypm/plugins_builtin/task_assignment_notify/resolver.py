@@ -564,6 +564,62 @@ def clear_alerts_for_cancelled_task(
     }
 
 
+def clear_no_session_alert_for_task(
+    *,
+    task_id: str,
+    config_path: Path | None = None,
+    store: Any | None = None,
+) -> dict[str, Any]:
+    """Clear the per-task ``no_session_for_assignment:<task_id>`` alert.
+
+    Narrower companion to :func:`clear_alerts_for_cancelled_task` for
+    transitions where only the per-task alert is unambiguously stale,
+    e.g. ``approve`` taking a task out of ``review`` (#953). The
+    project-level ``worker-<project>/no_session`` alert is intentionally
+    left alone — the task may still be active under a new role on the
+    same project, and other active siblings may still need the role.
+
+    Best-effort: any error opening services / clearing the alert is
+    swallowed. The next sweep tick will re-emit if the task somehow
+    re-enters an active state with no matching session.
+
+    ``store`` lets the caller inject the alert store directly — the
+    work-service approve path does this so we don't open a second
+    SQLite connection against the same DB while the caller's
+    transaction is still in flight. When ``store`` is ``None`` we
+    resolve runtime services from config and use the resulting
+    msg_store/state_store handle.
+    """
+    cleared_per_task = False
+    owns_work_service = False
+    services = None
+    if store is None:
+        services = load_runtime_services(config_path=config_path)
+        owns_work_service = True
+        store = services.msg_store or services.state_store
+    try:
+        if store is not None:
+            try:
+                store.clear_alert(
+                    "task_assignment", f"no_session_for_assignment:{task_id}",
+                )
+                cleared_per_task = True
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "task_assignment_notify: clear_alert(no_session_for_assignment) "
+                    "failed for %s", task_id, exc_info=True,
+                )
+    finally:
+        if owns_work_service and services is not None:
+            work_closer = getattr(services.work_service, "close", None)
+            if callable(work_closer):
+                try:
+                    work_closer()
+                except Exception:  # noqa: BLE001
+                    pass
+    return {"cleared_per_task": cleared_per_task}
+
+
 def _escalate_no_session(event: TaskAssignmentEvent, store: Any | None) -> None:
     """Raise (or refresh) a user-inbox alert when no session matches."""
     if store is None:

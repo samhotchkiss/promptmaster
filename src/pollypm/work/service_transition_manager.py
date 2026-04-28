@@ -641,6 +641,39 @@ class WorkTransitionManager:
                 task.task_id, exc_info=True,
             )
 
+    def _clear_no_session_alert_after_approve(self, task: Task) -> None:
+        """Clear the per-task no_session alert after an approve transition.
+
+        Defers to ``task_assignment_notify.api.clear_no_session_alert_for_task``
+        — narrower than the cancel cleanup (#927): only the per-task
+        ``no_session_for_assignment:<task_id>`` alert is cleared. The
+        project-level ``worker-<project>/no_session`` alert is left
+        alone, because the just-approved task may now route to a new
+        role on the same project, or other active siblings may still
+        need the role.
+
+        Routed through the plugin's public API surface so core stays
+        decoupled from the plugin's internal module layout (#939).
+        Any error is swallowed.
+        """
+        try:
+            from pollypm.plugins_builtin.task_assignment_notify.api import (
+                clear_no_session_alert_for_task,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        store = self._resolve_alert_store()
+        try:
+            clear_no_session_alert_for_task(
+                task_id=task.task_id,
+                store=store,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "clear_no_session_alert_for_task failed for %s",
+                task.task_id, exc_info=True,
+            )
+
     @staticmethod
     def _resolve_alert_store() -> object | None:
         """Best-effort resolve a Store handle for alert writes.
@@ -1044,6 +1077,14 @@ class WorkTransitionManager:
                             exc,
                         )
                 self.service._on_task_done(task_id, actor)
+            # #953: clear the per-task no_session_for_assignment alert
+            # the heartbeat sweep raised while the task was sitting in
+            # ``review`` waiting for a reviewer session. The CLI approve
+            # the user just ran IS the canonical reviewer path, so the
+            # alert is stale the moment we leave ``review``. Best-effort
+            # — any error is swallowed so a misconfigured alert store
+            # can't block the approve transition.
+            self._clear_no_session_alert_after_approve(task)
 
         return self._finish(
             task_id,

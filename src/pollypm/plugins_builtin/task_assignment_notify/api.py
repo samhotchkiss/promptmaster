@@ -18,7 +18,8 @@ Core runtime callers route through the same surface (#939):
 * ``pollypm.work.service_transition_manager`` — uses
   :func:`clear_alerts_for_cancelled_task` from the cancel path so
   the alert hygiene fix from #927 doesn't pin core to a private
-  resolver symbol.
+  resolver symbol; and :func:`clear_no_session_alert_for_task`
+  from the approve path for the same reason (#953).
 * ``pollypm.heartbeats.local`` — uses :func:`build_event_for_task`,
   :func:`load_runtime_services`, :func:`notify`, and
   :data:`DEDUPE_WINDOW_SECONDS` to fire resume pings without
@@ -72,6 +73,15 @@ def clear_alerts_for_cancelled_task(*args: Any, **kwargs: Any) -> Any:
     return _resolver.clear_alerts_for_cancelled_task(*args, **kwargs)
 
 
+def clear_no_session_alert_for_task(*args: Any, **kwargs: Any) -> Any:
+    """Public re-export of the per-task no_session alert clear used by
+    the work-service approve path (#953). Narrower than
+    :func:`clear_alerts_for_cancelled_task` — only the per-task alert
+    is cleared, since approve doesn't necessarily mean the role is no
+    longer needed on the project."""
+    return _resolver.clear_no_session_alert_for_task(*args, **kwargs)
+
+
 def auto_claim_enabled_for_project(*args: Any, **kwargs: Any) -> Any:
     return _sweep._auto_claim_enabled_for_project(*args, **kwargs)
 
@@ -103,6 +113,7 @@ __all__ = [
     "auto_claim_enabled_for_project",
     "build_event_for_task",
     "clear_alerts_for_cancelled_task",
+    "clear_no_session_alert_for_task",
     "close_quietly",
     "load_runtime_services",
     "notify",
