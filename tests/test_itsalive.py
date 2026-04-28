@@ -6,7 +6,25 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib import error
 
+import pytest
+
 from pollypm import itsalive
+
+
+@pytest.fixture(autouse=True)
+def _redirect_owner_tokens_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Quarantine the workspace-level owner-token store under tmp_path.
+
+    The per-email map at :data:`itsalive.OWNER_TOKENS_FILE` defaults to
+    ``~/.pollypm/itsalive_owner_tokens.json`` (#954). Without this
+    fixture, any test that exercises ``deploy_site`` or
+    ``_complete_pending`` would write the test's fake email/token into
+    the developer's real workspace store. Redirecting per-test keeps
+    the suite hermetic.
+    """
+    monkeypatch.setattr(
+        itsalive, "OWNER_TOKENS_FILE", tmp_path / "owner_tokens.json"
+    )
 
 
 def test_list_publish_files_filters_control_files(tmp_path: Path) -> None:
@@ -388,3 +406,152 @@ def test_push_deploy_uses_existing_project_token(tmp_path: Path, monkeypatch) ->
     outcome = itsalive.deploy_site(tmp_path)
     assert outcome.status == "deployed"
     assert uploads == ["index.html:deploy_tok"]
+
+
+# --- #954: workspace-level per-email owner_token store ---------------------
+
+
+def test_finalize_persists_owner_token_to_per_email_workspace_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``_complete_pending`` MUST capture the ``ownerToken`` from the
+    finalize response and write it to the workspace-level per-email map
+    (#954). Without this, every fresh subdomain re-prompts for
+    verification even though the email was already verified upstream."""
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.html").write_text("<h1>ok</h1>")
+    monkeypatch.setattr(itsalive, "GLOBAL_CONFIG_FILE", tmp_path / "global.json")
+    pending = itsalive.PendingDeploy(
+        deploy_id="dep_per_email",
+        subdomain="alpha",
+        email="alpha@example.com",
+        publish_dir="dist",
+        files=["index.html"],
+        project_root=str(tmp_path),
+        api_url=itsalive.ITSALIVE_API,
+        created_at="2026-04-12T00:00:00+00:00",
+        expires_at="2099-04-13T00:00:00+00:00",
+    )
+    itsalive.write_pending_deploy(tmp_path, pending)
+
+    def fake_api(method: str, url: str, *, payload=None, headers=None):
+        if url.endswith("/deploy/dep_per_email/status"):
+            return {"verified": True, "subdomain": "alpha"}
+        if url.endswith("/deploy/dep_per_email/finalize"):
+            return {
+                "subdomain": "alpha",
+                "email": "alpha@example.com",
+                "deployToken": "deploy_tok_alpha",
+                "ownerToken": "owner_tok_alpha",
+            }
+        raise AssertionError(url)
+
+    monkeypatch.setattr(itsalive, "api_json", fake_api)
+    monkeypatch.setattr(itsalive, "_upload_file", lambda *args, **kwargs: None)
+
+    outcomes = itsalive.sweep_pending_deploys(tmp_path)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].status == "deployed"
+    assert itsalive.owner_token_for_email("alpha@example.com") == "owner_tok_alpha"
+    # Case-insensitive lookup — itsalive normalises emails server-side.
+    assert itsalive.owner_token_for_email("Alpha@Example.com") == "owner_tok_alpha"
+
+
+def test_init_includes_owner_token_when_stored_for_email(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``deploy_site`` MUST forward the saved per-email owner_token on
+    ``/deploy/init`` so a fresh subdomain skips email verification when
+    the email is already verified upstream (#954)."""
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "index.html").write_text("<h1>ok</h1>")
+    # No legacy ~/.itsalive — proves the per-email map alone is enough.
+    monkeypatch.setattr(itsalive, "GLOBAL_CONFIG_FILE", tmp_path / "missing-global.json")
+    itsalive.write_owner_token_for_email("ops@example.com", "owner_tok_ops")
+
+    seen: dict[str, object] = {}
+
+    def fake_api(method: str, url: str, *, payload=None, headers=None):
+        if url.endswith("/deploy/init"):
+            seen["init_payload"] = payload
+            return {"deploy_id": "dep_ops", "pre_verified": True}
+        if url.endswith("/deploy/dep_ops/finalize"):
+            return {
+                "subdomain": "ops-site",
+                "email": "ops@example.com",
+                "deployToken": "deploy_tok_ops",
+                "ownerToken": "owner_tok_ops_rotated",
+            }
+        raise AssertionError(url)
+
+    monkeypatch.setattr(itsalive, "api_json", fake_api)
+    monkeypatch.setattr(itsalive, "_upload_file", lambda *args, **kwargs: None)
+
+    outcome = itsalive.deploy_site(
+        tmp_path, subdomain="ops-site", email="ops@example.com", publish_dir="site",
+    )
+    assert outcome.status == "deployed"
+    init_payload = seen["init_payload"]
+    assert isinstance(init_payload, dict)
+    assert init_payload["owner_token"] == "owner_tok_ops"
+    # Rotated token from finalize should overwrite the per-email entry.
+    assert itsalive.owner_token_for_email("ops@example.com") == "owner_tok_ops_rotated"
+
+
+def test_init_omits_owner_token_when_none_stored_for_email(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Cold first deploy: no token stored anywhere → ``/deploy/init``
+    body must NOT include ``owner_token`` and the deploy must walk the
+    normal email-verification path (#954 regression guard)."""
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.html").write_text("<h1>ok</h1>")
+    monkeypatch.setattr(itsalive, "GLOBAL_CONFIG_FILE", tmp_path / "missing-global.json")
+    # OWNER_TOKENS_FILE is already redirected by the autouse fixture
+    # and is empty — this is the "fresh install" baseline.
+    seen: dict[str, object] = {}
+
+    def fake_api(method: str, url: str, *, payload=None, headers=None):
+        assert url.endswith("/deploy/init")
+        seen["init_payload"] = payload
+        return {"deploy_id": "dep_cold", "pre_verified": False}
+
+    monkeypatch.setattr(itsalive, "api_json", fake_api)
+    monkeypatch.setattr(
+        itsalive, "notify_deploy_verification_required", lambda *a, **k: None,
+    )
+
+    outcome = itsalive.deploy_site(
+        tmp_path,
+        subdomain="cold",
+        email="new@example.com",
+        publish_dir="dist",
+    )
+    assert outcome.status == "pending_verification"
+    init_payload = seen["init_payload"]
+    assert isinstance(init_payload, dict)
+    assert "owner_token" not in init_payload
+    assert init_payload["email"] == "new@example.com"
+
+
+def test_owner_token_for_email_returns_none_for_unknown_email(tmp_path: Path) -> None:
+    """A different email than what's stored returns None — the legacy
+    single-email ``~/.itsalive`` value must not masquerade as some other
+    user's verification (#954)."""
+    itsalive.write_owner_token_for_email("alice@example.com", "tok_alice")
+    assert itsalive.owner_token_for_email("alice@example.com") == "tok_alice"
+    assert itsalive.owner_token_for_email("bob@example.com") is None
+    assert itsalive.owner_token_for_email("") is None
+    assert itsalive.owner_token_for_email(None) is None
+
+
+def test_read_owner_tokens_tolerates_corrupt_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A malformed JSON file must not crash the deploy path — at worst
+    the operator re-verifies via email."""
+    monkeypatch.setattr(itsalive, "OWNER_TOKENS_FILE", tmp_path / "bad.json")
+    (tmp_path / "bad.json").write_text("not json {")
+    assert itsalive.read_owner_tokens() == {}
+    assert itsalive.owner_token_for_email("anyone@example.com") is None

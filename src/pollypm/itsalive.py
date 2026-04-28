@@ -20,6 +20,13 @@ from pollypm.messaging import (
 ITSALIVE_API = "https://api.itsalive.co"
 CONFIG_FILE = ".itsalive"
 GLOBAL_CONFIG_FILE = Path.home() / ".itsalive"
+# Workspace-level per-email owner token store (#954). itsalive's API mints an
+# account-level ownerToken on first successful email verification and accepts
+# it on /deploy/init to skip email verification for subsequent fresh
+# subdomains under the same email. Keyed by email so a single operator can
+# manage multiple verified accounts and a fresh project never re-prompts for
+# verification on a previously-verified email.
+OWNER_TOKENS_FILE = Path.home() / ".pollypm" / "itsalive_owner_tokens.json"
 PENDING_DIR = ".pollypm/itsalive/pending"
 _IGNORE_NAMES = {".DS_Store", ".itsalive", "ITSALIVE.md", "CLAUDE.md"}
 _IGNORE_PARTS = {".git", "node_modules"}
@@ -106,7 +113,12 @@ def deploy_site(
         publish_dir=publish_dir,
         api_url=api_url,
     )
-    owner_token = read_owner_token()
+    # Look up an owner_token for the resolved email first so a fresh
+    # subdomain under a previously-verified account skips email
+    # verification entirely (#954). Fall back to the legacy single-email
+    # ~/.itsalive store for back-compat with installs from before the
+    # per-email map landed.
+    owner_token = owner_token_for_email(request_data.email) or read_owner_token()
     payload: dict[str, Any] = {
         "subdomain": request_data.subdomain,
         "email": request_data.email,
@@ -117,6 +129,15 @@ def deploy_site(
     init_data = api_json("POST", f"{api_url}/deploy/init", payload=payload)
     deploy_id = str(init_data["deploy_id"])
     if bool(init_data.get("pre_verified")):
+        # The upstream accepted the saved owner_token and skipped sending
+        # a verification email. Surface that in the heartbeat log so a
+        # human reading "no email arrived" knows the deploy is healthy
+        # (#954).
+        if owner_token:
+            print(
+                f"[itsalive] Skipping email verification — using saved owner token for {request_data.email}",
+                flush=True,
+            )
         return _complete_pending(
             PendingDeploy(
                 deploy_id=deploy_id,
@@ -278,11 +299,70 @@ def list_publish_files(project_root: Path, publish_dir: str = ".") -> list[str]:
 
 
 def read_owner_token() -> str | None:
+    """Return the legacy single-email owner token from ``~/.itsalive``.
+
+    Kept for back-compat with callers that don't know the requesting
+    email (``build_deploy_instructions``, the magic plugin's preflight).
+    Per-email lookups should use :func:`owner_token_for_email`.
+    """
     data = read_global_config()
     token = data.get("ownerToken") or data.get("owner_token")
     if isinstance(token, str) and token.strip():
         return token.strip()
     return None
+
+
+def read_owner_tokens() -> dict[str, str]:
+    """Return the per-email owner-token map from the workspace store.
+
+    The store at :data:`OWNER_TOKENS_FILE` is a flat ``{email: token}``
+    dict. Missing file, malformed JSON, and non-dict payloads all
+    degrade silently to ``{}`` so a corrupt file never breaks the
+    deploy path — at worst the user re-verifies via email (#954).
+    """
+    if not OWNER_TOKENS_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(OWNER_TOKENS_FILE.read_text())
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(email).strip().lower(): str(token).strip()
+        for email, token in payload.items()
+        if isinstance(email, str)
+        and isinstance(token, str)
+        and email.strip()
+        and token.strip()
+    }
+
+
+def owner_token_for_email(email: str | None) -> str | None:
+    """Return the saved owner token for ``email``, if any (#954).
+
+    Email lookup is case-insensitive — itsalive normalizes emails
+    server-side and the operator may type ``Sam@Example.com`` once and
+    ``sam@example.com`` next time. The legacy ``~/.itsalive`` is only
+    consulted by :func:`read_owner_token`; this function strictly reads
+    the per-email map so a stale single-email token can't masquerade as
+    a different user's verification.
+    """
+    if not email:
+        return None
+    tokens = read_owner_tokens()
+    token = tokens.get(email.strip().lower())
+    return token or None
+
+
+def write_owner_token_for_email(email: str, owner_token: str) -> None:
+    """Persist ``owner_token`` under ``email`` in the workspace store (#954)."""
+    if not email or not owner_token:
+        return
+    tokens = read_owner_tokens()
+    tokens[email.strip().lower()] = owner_token.strip()
+    OWNER_TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(OWNER_TOKENS_FILE, tokens)
 
 
 def read_global_config() -> dict[str, Any]:
@@ -532,7 +612,14 @@ def _complete_pending(pending: PendingDeploy, *, notify: bool) -> DeployOutcome:
     )
     owner_token = _extract_owner_token(finalize)
     if owner_token:
-        write_global_config(str(finalize["email"]), owner_token)
+        finalized_email = str(finalize["email"])
+        # Workspace per-email map is the canonical store from #954 onwards
+        # — persists even if the operator deploys with multiple emails.
+        write_owner_token_for_email(finalized_email, owner_token)
+        # Legacy ~/.itsalive write retained for back-compat with
+        # build_deploy_instructions and the magic plugin preflight which
+        # still call read_owner_token() without an email.
+        write_global_config(finalized_email, owner_token)
     write_itsalive_docs(root, domain, publish_dir=pending.publish_dir)
     delete_pending_deploy(root, pending.deploy_id)
     if notify:
