@@ -254,6 +254,73 @@ class TestCancelClearsNoSessionAlerts:
             f"active task on the project still routes to worker; got {open_keys!r}"
         )
 
+    def test_cancel_only_active_with_blocked_sibling_clears_project_alert(
+        self, tmp_path, monkeypatch,
+    ):
+        """#941 — cancelling the only active worker task on a project
+        whose only remaining worker-role sibling is ``blocked`` must
+        clear BOTH the per-task alert and the project-level
+        ``worker-<project>/no_session`` alert.
+
+        Rationale: the heartbeat sweep refuses to raise
+        ``no_session_for_assignment`` for blocked tasks (sweep contract
+        in ``_NON_ACTIVE_SWEEP_STATUSES`` — blocked tasks have their own
+        gate-blocked alert family). So a blocked sibling cannot keep the
+        project-level alert refreshed; leaving it open after cancel is
+        pure noise.
+        """
+        work, store = _make_environment(tmp_path)
+        to_cancel = _claim_worker_task(
+            work, project="demo", title="active to cancel",
+        )
+        # Set up a sibling that is blocked on another task. ``block``
+        # requires a blocker task id, so build a throwaway blocker that
+        # is itself unrelated to the worker role decision.
+        sibling = _claim_worker_task(
+            work, project="demo", title="blocked sibling",
+        )
+        blocker = _create_worker_task(
+            work, project="demo", title="the blocker",
+        )
+        work.block(sibling.task_id, "tester", blocker.task_id)
+
+        store.upsert_alert(
+            "task_assignment",
+            f"no_session_for_assignment:{to_cancel.task_id}",
+            "warning", "Task no session.",
+        )
+        store.upsert_alert(
+            "worker-demo", "no_session",
+            "warn", "No worker running.",
+        )
+
+        services = _RuntimeServices(
+            session_service=None, state_store=store,
+            work_service=None, project_root=tmp_path,
+            msg_store=store,
+        )
+        _install_resolver_loader(monkeypatch, services)
+
+        work.cancel(to_cancel.task_id, "tester", reason="dropped")
+
+        open_keys = _open_alerts(store)
+        # Per-task alert for the cancelled task is gone.
+        assert (
+            "task_assignment", f"no_session_for_assignment:{to_cancel.task_id}",
+        ) not in open_keys, (
+            f"per-task alert should be cleared; saw {open_keys!r}"
+        )
+        # Project-level alert MUST clear — the only remaining sibling is
+        # blocked, which the sweep won't ping for, so keeping the
+        # ``worker-demo/no_session`` alert open is stale noise.
+        assert (
+            "worker-demo", "no_session",
+        ) not in open_keys, (
+            "#941: project-level worker alert must clear when the only "
+            "remaining worker-role sibling is blocked (sweep won't "
+            f"re-emit for blocked tasks); saw {open_keys!r}"
+        )
+
 
 class TestClearHelperRespectsHasOtherActive:
     """Direct unit tests on ``clear_alerts_for_cancelled_task``."""

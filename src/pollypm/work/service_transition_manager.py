@@ -591,12 +591,22 @@ class WorkTransitionManager:
         except Exception:  # noqa: BLE001
             roles = ("worker",)
         active_map: dict[str, bool] = {}
+        # #941: ``BLOCKED`` is intentionally excluded. The sweep contract
+        # in ``task_assignment_notify/handlers/sweep.py`` (see
+        # ``_NON_ACTIVE_SWEEP_STATUSES``) refuses to raise
+        # ``no_session_for_assignment`` for blocked tasks — they live in
+        # their own gate-blocked alert family. Treating a blocked sibling
+        # as "active" here would keep the project-level
+        # ``worker-<project>/no_session`` alert open even though no future
+        # sweep will ever re-raise it, recreating part of the alert-noise
+        # bug #927 fixed. Queued / in_progress / review / rework siblings
+        # remain "active" — the sweep WILL re-emit for those, so the
+        # project-level alert must stay open for them.
         active_statuses = (
             WorkStatus.QUEUED.value,
             WorkStatus.IN_PROGRESS.value,
             WorkStatus.REVIEW.value,
             WorkStatus.REWORK.value,
-            WorkStatus.BLOCKED.value,
         )
         for role in roles:
             active_map[role] = False
