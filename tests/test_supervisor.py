@@ -1874,6 +1874,345 @@ def test_pane_already_bootstrapped_helper_recognises_other_role_banner(
     ) is False
 
 
+# ---------------------------------------------------------------------------
+# Target-window pane guard — issue #932 (primary crossed-(launch, target))
+# ---------------------------------------------------------------------------
+#
+# #931's banner-based guard catches the *secondary* kickoff send (after
+# another role's banner has already landed in the pane). It cannot catch
+# a crossed kickoff fired into a pristine pane that *belongs* to another
+# session — the pane has no banner yet, so the banner classifier
+# returns ``no banner present``. The user reported this as "Polly · chat
+# loads, the agent reads heartbeat.md (the wrong primary), then
+# operator.md is correctly blocked by #931's guard but the agent has
+# already adopted the heartbeat identity".
+#
+# The fix: resolve the target pane to its tmux window and refuse the
+# send unless ``pane.window_name == launch.window_name``. The dispatcher
+# becomes explicit per pane: each (launch, target) tuple is verified at
+# the boundary, regardless of upstream wiring.
+
+
+def _make_pane(window_name: str, pane_id: str = "%fake") -> object:
+    """Build a minimal pane stub that exposes window_name + pane_id."""
+    return type(
+        "Pane", (),
+        {
+            "window_name": window_name,
+            "pane_id": pane_id,
+            "pane_left": 0,
+            "pane_current_command": "claude",
+            "pane_dead": False,
+        },
+    )()
+
+
+def test_send_initial_input_refuses_kickoff_when_target_in_other_window(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#932 — heartbeat kickoff into an operator pane is refused before send.
+
+    Simulates the live failure: the operator pane (window pm-operator,
+    fresh / no banner) is somehow handed to ``_send_initial_input_if_fresh``
+    paired with the *heartbeat* launch. The new target-window guard must
+    refuse the send because ``launch.window_name == "pm-heartbeat"`` does
+    not match the target pane's actual window (``pm-operator``). The
+    fresh-launch marker stays on disk so the next attempt with the right
+    target still works.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launch = _make_launch_for_role(
+        config, tmp_path, "heartbeat-supervisor",
+        initial_input="heartbeat kickoff",
+    )
+    # Crossed (launch, target): the target pane lives in pm-operator-pm
+    # (the cockpit's right pane after _show_live_session joined it from
+    # storage closet), but the launch is heartbeat. Guard must refuse.
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "list_panes",
+        lambda target: [_make_pane(window_name="pm-operator-pm", pane_id="%op")],
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    supervisor._send_initial_input_if_fresh(launch, "%op")
+
+    assert sent == [], (
+        "heartbeat kickoff must NOT land in a pane that belongs to "
+        "pm-operator — that's the #932 crossed-primary bug"
+    )
+    # Marker stays on disk so the next attempt with the right target works.
+    assert launch.fresh_launch_marker.exists()
+
+
+def test_send_initial_input_proceeds_when_target_window_matches_launch(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#932 — kickoff proceeds when the target pane is in the launch's window.
+
+    The mainline case: operator launch fires its kickoff into a pane
+    that lives in window ``pm-operator``. The target-window guard must
+    pass through and let the send happen. Pane is otherwise fresh (no
+    banner) so the #931 banner guard is a no-op.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launch = _make_launch_for_role(
+        config, tmp_path, "operator-pm", initial_input="operator kickoff",
+    )
+    # Target pane lives in pm-operator-pm — matches launch.window_name.
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "list_panes",
+        lambda target: [_make_pane(window_name="pm-operator-pm", pane_id="%op")],
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "capture_pane",
+        lambda target, lines=None: "Welcome to Claude Code\n>",
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    supervisor._send_initial_input_if_fresh(launch, "%op")
+
+    assert len(sent) == 1, "matching window should accept the kickoff"
+    assert sent[0][1] == "operator kickoff"
+    assert not launch.fresh_launch_marker.exists()
+
+
+def test_send_initial_input_heartbeat_pane_gets_heartbeat_kickoff(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#932 — heartbeat kickoff into a pm-heartbeat pane proceeds.
+
+    The mainline case for the storage-closet heartbeat window. The
+    target-window guard verifies ``window_name == "pm-heartbeat"`` and
+    lets the send through. Confirms the guard isn't biased toward
+    operator-pm — every role's kickoff routes to its own window.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launch = _make_launch_for_role(
+        config, tmp_path, "heartbeat-supervisor",
+        initial_input="heartbeat kickoff",
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "list_panes",
+        lambda target: [_make_pane(window_name="pm-heartbeat-supervisor", pane_id="%hb")],
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "capture_pane",
+        lambda target, lines=None: "",
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    supervisor._send_initial_input_if_fresh(launch, "%hb")
+
+    assert len(sent) == 1
+    assert sent[0][1] == "heartbeat kickoff"
+
+
+def test_send_initial_input_per_task_worker_window_matches(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#932 — per-task worker (post-#919) launch routes to its task-* window.
+
+    Per-task workers spawn into ``task-<project>-<N>`` windows. Verify the
+    target-window guard passes through when target is a pane in the
+    matching ``task-<project>-<N>`` window — the per-task naming
+    convention from #919 is preserved end-to-end.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    # Build a worker launch whose window_name matches the per-task naming.
+    launch = _make_launch_for_role(
+        config, tmp_path, "worker", initial_input="worker kickoff",
+    )
+    # Override window_name to the per-task convention. The launch builder
+    # defaults to pm-worker; #919 puts per-task workers at task-<proj>-<N>.
+    from dataclasses import replace as _replace
+    launch = _replace(launch, window_name="task-pollypm-7")
+
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "list_panes",
+        lambda target: [
+            _make_pane(window_name="task-pollypm-7", pane_id="%task"),
+        ],
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "capture_pane",
+        lambda target, lines=None: "",
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    supervisor._send_initial_input_if_fresh(launch, "%task")
+
+    assert len(sent) == 1, "per-task worker kickoff must still deliver"
+    assert sent[0][1] == "worker kickoff"
+
+
+def test_target_window_helper_short_circuits_on_probe_failure(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#932 — the helper is conservative: probe failure must NOT block sends.
+
+    If ``list_panes`` raises (transient tmux error, race against window
+    teardown, etc.) the guard must return True so the kickoff still
+    proceeds. The role-banner guard (#931) and the persona-verify
+    backstop continue to layer defensively. Suppressing legitimate
+    kickoffs on a probe blip would regress the user-visible behavior
+    far worse than the crossed-tuple it's defending against.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    launch = _make_launch_for_role(
+        config, tmp_path, "operator-pm", initial_input="operator kickoff",
+    )
+
+    def _raises(target: str) -> list[object]:
+        raise RuntimeError("tmux: no current target")
+
+    monkeypatch.setattr(
+        supervisor.session_service.tmux, "list_panes", _raises,
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "capture_pane",
+        lambda target, lines=None: "",
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    supervisor._send_initial_input_if_fresh(launch, "%anything")
+
+    assert len(sent) == 1, (
+        "transient list_panes failure must not block the kickoff — "
+        "the guard is fail-open by design"
+    )
+
+
+def test_target_window_helper_recognises_crossed_pane_via_send_log(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#932 — observable kickoff sequence, the unit-test analogue of the
+    cockpit smoke test the user requested.
+
+    Drives two consecutive kickoffs against the supervisor's send-keys
+    log to mirror the live failure mode: heartbeat launch → pm-heartbeat
+    pane (must succeed), operator launch → pm-operator pane (must
+    succeed). Then the *crossed* attempt — heartbeat launch into the
+    pm-operator pane — must produce no additional send. Replicates the
+    ordering invariant from the issue without any tmux interaction.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    heartbeat_launch = _make_launch_for_role(
+        config, tmp_path, "heartbeat-supervisor",
+        initial_input="heartbeat kickoff",
+    )
+    operator_launch = _make_launch_for_role(
+        config, tmp_path, "operator-pm",
+        initial_input="operator kickoff",
+    )
+
+    pane_window = {
+        "%hb": "pm-heartbeat-supervisor",
+        "%op": "pm-operator-pm",
+    }
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "list_panes",
+        lambda target: [
+            _make_pane(window_name=pane_window.get(target, ""), pane_id=target),
+        ],
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "capture_pane",
+        lambda target, lines=None: "",
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+    monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
+    monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
+
+    # Step 1: legitimate heartbeat kickoff to its own pane.
+    supervisor._send_initial_input_if_fresh(heartbeat_launch, "%hb")
+    # Step 2: legitimate operator kickoff to its own pane.
+    supervisor._send_initial_input_if_fresh(operator_launch, "%op")
+    # Step 3: the bug — heartbeat kickoff into the operator pane. Must
+    # be refused without ever calling send_keys.
+    # The fresh-launch marker for heartbeat was consumed in Step 1, so
+    # use a fresh launch built with a brand-new marker for this attempt.
+    crossed_launch = _make_launch_for_role(
+        config, tmp_path, "heartbeat-supervisor",
+        initial_input="heartbeat kickoff (crossed)",
+    )
+    # _make_launch_for_role registers a session named ``heartbeat-supervisor-session``;
+    # both heartbeat launches share that registration so launch_by_session
+    # still resolves correctly. The marker has been re-created though.
+    supervisor._send_initial_input_if_fresh(crossed_launch, "%op")
+
+    targets_sent = [t for t, _ in sent]
+    texts_sent = [text for _, text in sent]
+    assert targets_sent == ["%hb", "%op"], (
+        f"only the two legitimate sends should land — got {targets_sent!r}"
+    )
+    assert "heartbeat kickoff (crossed)" not in texts_sent, (
+        "the crossed heartbeat kickoff into the operator pane must NOT "
+        "have been delivered"
+    )
+
+
 def test_start_cockpit_tui_respawns_rail_pane_with_restart_loop(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     supervisor = Supervisor(config)

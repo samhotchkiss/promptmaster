@@ -233,6 +233,51 @@ def test_session_service_prepare_happy_path(tmp_path: Path) -> None:
     assert result == "short"
 
 
+def test_session_service_target_window_helper_refuses_crossed_pane(
+    tmp_path: Path,
+) -> None:
+    """#932 — session-service kickoff path refuses crossed (wname, target).
+
+    The session-service ``create()`` path runs the same target-window
+    crossing guard the supervisor does. Verify directly via the
+    module-level ``_target_window_matches_expected`` helper that a pane
+    living in a different window is rejected, while a pane in the
+    expected window is accepted.
+    """
+    from pollypm.session_services.tmux import _target_window_matches_expected
+
+    class _FakeTmux:
+        def __init__(self, window_name: str) -> None:
+            self._window_name = window_name
+
+        def list_panes(self, target: str) -> list[object]:
+            return [type("P", (), {"window_name": self._window_name})()]
+
+    # Crossed: pane belongs to pm-operator but expected window is pm-heartbeat.
+    assert _target_window_matches_expected(
+        _FakeTmux("pm-operator"), "pm-heartbeat", "%any",
+    ) is False
+
+    # Match: pane belongs to pm-operator and expected window is pm-operator.
+    assert _target_window_matches_expected(
+        _FakeTmux("pm-operator"), "pm-operator", "%any",
+    ) is True
+
+    # Probe failure (raise): conservative pass-through (returns True).
+    class _RaisingTmux:
+        def list_panes(self, target: str) -> list[object]:
+            raise RuntimeError("transient tmux error")
+
+    assert _target_window_matches_expected(
+        _RaisingTmux(), "pm-operator", "%any",
+    ) is True
+
+    # No expected window: no-op (returns True).
+    assert _target_window_matches_expected(
+        _FakeTmux("pm-operator"), None, "%any",
+    ) is True
+
+
 def test_session_service_prepare_skips_check_for_worker(tmp_path: Path) -> None:
     """Worker sessions are transient and not in static config; the
     session-service assertion must no-op for them."""

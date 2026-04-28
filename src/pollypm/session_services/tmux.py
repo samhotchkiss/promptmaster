@@ -79,6 +79,46 @@ def _pane_already_bootstrapped_as_other_role(
     return True
 
 
+def _target_window_matches_expected(
+    tmux: TmuxClient, expected_window: str | None, target: str,
+) -> bool:
+    """Return True iff ``target`` resolves to a pane in ``expected_window``.
+
+    Mirror of ``Supervisor._target_window_matches_launch`` (#932) so the
+    per-task / session-service kickoff path shares the same crossed-
+    (launch, target) defense as the supervisor bootstrap path. The role-
+    banner guard above only catches a *secondary* send (after another
+    role has stamped its banner into the pane); a fresh pane cannot be
+    distinguished by banner contents until the kickoff lands. Resolving
+    the pane to its window and matching against the expected window
+    catches the crossed primary send before delivery.
+
+    Conservative on every failure mode (no expected window, list_panes
+    raised, empty result): returns ``True`` so we never suppress a
+    legitimate kickoff because of a transient probe failure.
+    """
+    if not expected_window:
+        return True
+    try:
+        panes = tmux.list_panes(target)
+    except Exception:  # noqa: BLE001
+        return True
+    if not panes:
+        return True
+    observed_window = getattr(panes[0], "window_name", "") or ""
+    if not observed_window:
+        return True
+    if observed_window == expected_window:
+        return True
+    logger.error(
+        "persona_swap_detected (target-window): target=%r expected_window=%r "
+        "observed_window=%r — refusing kickoff into pane belonging to "
+        "another window",
+        target, expected_window, observed_window,
+    )
+    return False
+
+
 class TmuxSessionService:
     """Tmux-backed session service — the default implementation.
 
@@ -249,14 +289,23 @@ class TmuxSessionService:
                     guide_reference=guide_reference,
                     user_id=user_id,
                 )
+                # #932 — primary (launch, target) crossing guard. The
+                # banner guard below only catches the *secondary* send
+                # after another role's banner has already landed; a
+                # crossed kickoff into a fresh pane belonging to another
+                # session would otherwise slip through. Refuse before
+                # the banner check fires.
                 # #931 — pre-send pane guard. Refuses the kickoff if the
                 # target pane already shows another role's canonical role
                 # banner (i.e. the pane was already bootstrapped as a
                 # different session). Mirrors the supervisor-side guard
                 # so per-task workers and the parallel session_service
                 # launch paths share one identity-stacking defense.
-                if not _pane_already_bootstrapped_as_other_role(
-                    self.tmux, session_role, target,
+                if (
+                    _target_window_matches_expected(self.tmux, wname, target)
+                    and not _pane_already_bootstrapped_as_other_role(
+                        self.tmux, session_role, target,
+                    )
                 ):
                     kickoff = self._prepare_initial_input(
                         name,

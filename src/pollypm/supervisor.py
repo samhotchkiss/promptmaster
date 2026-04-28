@@ -2390,14 +2390,25 @@ class Supervisor:
                 rendered = f"{identity_preamble}\n\n{rendered}"
             if rendered.strip():
                 target = self._resolve_send_target(launch)
+                # #932 — primary (launch, target) crossing guard. If the
+                # send target's pane belongs to a different window than
+                # ``launch.window_name``, refuse before the role-banner
+                # guard runs. The role-banner guard only fires after
+                # another role's banner has already landed; a recovery
+                # prompt landing in a freshly-rebooted pane that turned
+                # out to belong to another session would otherwise slip
+                # through.
                 # #931 — same pre-send pane guard as ``_send_initial_input_if_fresh``.
                 # The recovery prompt carries an identity preamble that *also*
                 # acts like a bootstrap; sending it into a pane already
                 # bootstrapped as a different role stacks two identities and
                 # corners the agent into the same identity-swap refusal that
                 # the user saw in cockpit Polly · chat.
-                if not self._pane_already_bootstrapped_as_other_role(
-                    launch.session.role, target,
+                if (
+                    self._target_window_matches_launch(launch, target)
+                    and not self._pane_already_bootstrapped_as_other_role(
+                        launch.session.role, target,
+                    )
                 ):
                     self.session_service.tmux.send_keys(target, rendered)
                     self._msg_store.append_event(
@@ -2792,6 +2803,17 @@ class Supervisor:
         fresh_marker = launch.fresh_launch_marker
         if not initial_input or fresh_marker is None or not fresh_marker.exists():
             return
+        # #932 — primary (launch, target) crossing guard. Resolve the
+        # target pane to the tmux window it actually lives in and refuse
+        # the send unless that window matches ``launch.window_name``. The
+        # downstream banner check (#931) only fires AFTER another role
+        # has stamped its banner into the pane, so it can't catch a
+        # crossed kickoff sent into a pristine pane belonging to another
+        # session — this guard does. The fresh-launch marker stays on
+        # disk so the next attempt with the correct (launch, target)
+        # tuple still works.
+        if not self._target_window_matches_launch(launch, target):
+            return
         # #931 — pre-send pane guard. If the target pane already contains a
         # canonical role banner from a *different* role's kickoff, sending
         # this kickoff would stack two conflicting bootstraps in the same
@@ -2884,6 +2906,73 @@ class Supervisor:
         except Exception:  # noqa: BLE001
             pass
         return True
+
+    def _target_window_matches_launch(
+        self, launch: SessionLaunchSpec, target: str,
+    ) -> bool:
+        """Return True iff ``target``'s pane lives in ``launch.window_name``.
+
+        This is the primary guard for crossed (launch, target) tuples
+        introduced in #932. The #931 banner-based guard only catches the
+        *secondary* send (after a wrong role's banner has already landed
+        in the pane); a fresh pane bootstrapping for the wrong role
+        looks identical to a fresh pane awaiting the right role until
+        the kickoff actually lands. Resolving the pane to its window
+        and matching against ``launch.window_name`` catches the crossed
+        primary send before the kickoff is delivered.
+
+        ``target`` may be a pane id (``%5``), a window target
+        (``session:window``), or a window-and-pane target
+        (``session:window.0``); ``list_panes`` accepts all three. We
+        check the *first* pane returned: when ``target`` is a pane id
+        tmux returns just that pane, and when ``target`` is a window
+        all panes share the same ``window_name`` so the first one is
+        representative.
+
+        Conservative on every failure mode (no panes, capture exception,
+        empty window_name): returns ``True`` so we don't suppress a
+        legitimate fresh kickoff because of a transient tmux probe
+        failure. The role-banner guard (#931) and the persona-verify
+        backstop continue to layer on top.
+        """
+        expected_window = launch.window_name
+        if not expected_window:
+            return True
+        try:
+            panes = self.session_service.tmux.list_panes(target)
+        except Exception:  # noqa: BLE001
+            return True
+        if not panes:
+            return True
+        observed_window = getattr(panes[0], "window_name", "") or ""
+        if not observed_window:
+            return True
+        if observed_window == expected_window:
+            return True
+        details = (
+            f"target={target!r} expected_window={expected_window!r} "
+            f"observed_window={observed_window!r} "
+            f"session_name={launch.session.name!r} role={launch.session.role!r}"
+        )
+        logger.error(
+            "persona_swap_detected (target-window): %s — refusing kickoff "
+            "into pane that does not belong to the launch's window",
+            details,
+        )
+        try:
+            self._msg_store.record_event(
+                scope=launch.session.name,
+                sender="pollypm",
+                subject="persona_swap_detected",
+                payload={
+                    "message": (
+                        f"target-window pane guard refused kickoff: {details}"
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
     def _assert_session_launch_matches(
         self, session_name: str, initial_input: str,
