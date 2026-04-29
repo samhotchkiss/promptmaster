@@ -1095,8 +1095,12 @@ def test_codex_control_launches_use_agents_md_instead_of_visible_prompt(tmp_path
     argv = decoded["argv"]
     env = decoded["env"]
 
-    assert argv == [
-        "codex",
+    # #965 — argv[0] is resolved to an absolute path so the launcher's
+    # ``os.execvpe`` does not search a sanitized child PATH. The
+    # binary's basename is still ``codex``; if shutil.which finds no
+    # codex on this machine, argv[0] stays as the bare name.
+    assert Path(argv[0]).name == "codex"
+    assert argv[1:] == [
         "--sandbox",
         "read-only",
         "--ask-for-approval",
@@ -1127,9 +1131,12 @@ def test_codex_worker_launches_do_not_auto_send_prompt(tmp_path: Path) -> None:
     decoded = _decode_launch_payload(launch.command)
 
     # Worker prompt should NOT be baked into argv
-    assert not any("do some work" in arg for arg in decoded["argv"])
-    assert decoded["argv"] == [
-        "codex",
+    argv = decoded["argv"]
+    assert not any("do some work" in arg for arg in argv)
+    # #965 — argv[0] is resolved to an absolute path before launcher
+    # serialization; basename is still ``codex``.
+    assert Path(argv[0]).name == "codex"
+    assert argv[1:] == [
         "--sandbox",
         "workspace-write",
         "--ask-for-approval",

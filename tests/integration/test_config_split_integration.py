@@ -137,7 +137,10 @@ def test_split_config_plan_launches_discovers_project_local_worker(tmp_path: Pat
 
     payload = _decode_launch_payload(worker_launch.command)
     assert payload["cwd"] == str(project_root)
-    assert payload["argv"][0] == "claude"
+    # #965 — argv[0] resolves to an absolute path when claude is on PATH;
+    # basename remains ``claude`` regardless.
+    from pathlib import Path as _P
+    assert _P(payload["argv"][0]).name == "claude"
 
 
 def test_pm_up_bootstraps_worker_from_project_local_config(monkeypatch, tmp_path: Path) -> None:

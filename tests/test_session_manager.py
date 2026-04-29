@@ -641,8 +641,14 @@ class TestProvisionWorker:
         assert kwargs["provider"] == "codex"
         assert kwargs["account"] == "codex-main"
         payload = _decode_local_runtime_payload(kwargs["command"])
-        assert payload["argv"] == [
-            "codex",
+        argv = payload["argv"]
+        # #965 — argv[0] is resolved to an absolute path before
+        # serialization into the runtime_launcher payload, so the
+        # launcher's ``os.execvpe`` doesn't have to search a sanitized
+        # child PATH. Basename remains ``codex``.
+        from pathlib import Path as _P
+        assert _P(argv[0]).name == "codex"
+        assert argv[1:] == [
             "--sandbox",
             "workspace-write",
             "--ask-for-approval",
@@ -703,7 +709,11 @@ class TestProvisionWorker:
         kwargs = session_service.create.call_args.kwargs
         assert kwargs["provider"] == "claude"
         payload = _decode_local_runtime_payload(kwargs["command"])
-        assert payload["argv"] == ["claude"]
+        argv = payload["argv"]
+        # #965 — see neighboring test; argv[0] is now an absolute path.
+        from pathlib import Path as _P
+        assert _P(argv[0]).name == "claude"
+        assert argv[1:] == []
 
 
 # ---------------------------------------------------------------------------

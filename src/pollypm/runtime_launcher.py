@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     exec_env.update(env)
 
     if resume_argv and isinstance(resume_marker, str) and Path(resume_marker).exists():
-        os.execvpe(resume_argv[0], resume_argv, exec_env)
+        _exec(resume_argv, exec_env)
 
     if isinstance(fresh_marker, str):
         Path(fresh_marker).unlink(missing_ok=True)
@@ -93,8 +93,37 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(fresh_marker, str):
         _touch(fresh_marker)
 
-    os.execvpe(command_argv[0], command_argv, exec_env)
+    _exec(command_argv, exec_env)
     return 0
+
+
+def _exec(argv: list[str], exec_env: dict[str, str]) -> None:
+    """Replace this process with ``argv`` after resolving the binary.
+
+    Wraps ``os.execvpe`` with a final ``shutil.which`` resolution against
+    ``exec_env['PATH']`` so a binary that lives in a non-default location
+    (e.g. ``~/.npm-global/bin/codex`` under tmux's sanitized PATH —
+    issue #965) is still found. When resolution fails, raises ``SystemExit``
+    with a human-readable message naming the missing binary and the PATH
+    that was searched, so the user sees a meaningful error rather than the
+    bare ``FileNotFoundError: '/bin/codex'`` traceback.
+    """
+    if not argv:
+        raise SystemExit("runtime_launcher: empty argv")
+    binary = argv[0]
+    if not os.path.isabs(binary):
+        resolved = shutil.which(binary, path=exec_env.get("PATH"))
+        if resolved is None:
+            search_path = exec_env.get("PATH", "")
+            raise SystemExit(
+                f"runtime_launcher: cannot find agent binary {binary!r} on PATH.\n"
+                f"\nPATH searched:\n  {search_path}\n"
+                f"\nFix: ensure the binary's directory is on PATH for the cockpit "
+                f"process, or install the binary into a canonical location "
+                f"(/usr/local/bin, /opt/homebrew/bin, ~/.local/bin)."
+            )
+        argv = [resolved, *argv[1:]]
+    os.execvpe(argv[0], argv, exec_env)
 
 
 if __name__ == "__main__":

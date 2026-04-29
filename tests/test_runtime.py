@@ -248,3 +248,148 @@ def test_probe_runner_uses_shell_false(monkeypatch, tmp_path: Path) -> None:
     assert kwargs["shell"] is False
     assert kwargs["cwd"] == tmp_path
     assert kwargs["env"] == {"TEST_ENV": "1"}
+
+
+# ---------------------------------------------------------------------------
+# #965 — agent binary resolution before runtime_launcher serialization
+# ---------------------------------------------------------------------------
+
+
+def _decoded_payload(wrapped_cmd: str) -> dict:
+    """Pull the base64 payload out of the ``sh -lc`` wrap_command output."""
+    import base64
+    import json
+    import shlex
+
+    parts = shlex.split(wrapped_cmd)
+    inner = parts[-1]
+    inner_parts = shlex.split(inner)
+    b64 = inner_parts[-1]
+    padded = b64 + "=" * (-len(b64) % 4)
+    return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+
+
+def test_resolve_argv_binary_finds_codex_in_npm_global(tmp_path: Path, monkeypatch) -> None:
+    """#965 — ``resolve_argv_binary`` resolves a bare binary name to an
+    absolute path using the enriched PATH, even when the binary lives
+    in a non-default location like ``~/.npm-global/bin``.
+    """
+    from pollypm.runtimes import local as _local_module
+
+    fake_npm_global = tmp_path / "npm-global" / "bin"
+    fake_npm_global.mkdir(parents=True)
+    fake_codex = fake_npm_global / "codex"
+    fake_codex.write_text("#!/bin/sh\n")
+    fake_codex.chmod(0o755)
+
+    # Reset and seed the cached enriched PATH so the test is hermetic.
+    monkeypatch.setattr(_local_module, "_CACHED_RESOLVE_PATH", str(fake_npm_global))
+
+    resolved = _local_module.resolve_argv_binary(["codex", "--flag"])
+    assert resolved == [str(fake_codex), "--flag"]
+
+
+def test_resolve_argv_binary_leaves_absolute_argv_unchanged(tmp_path: Path) -> None:
+    """When ``argv[0]`` is already absolute, no PATH search happens."""
+    from pollypm.runtimes import local as _local_module
+
+    abs_path = tmp_path / "already-absolute"
+    resolved = _local_module.resolve_argv_binary([str(abs_path), "--x"])
+    assert resolved == [str(abs_path), "--x"]
+
+
+def test_resolve_argv_binary_returns_unchanged_when_missing(tmp_path: Path, monkeypatch) -> None:
+    """Missing binary → return argv unchanged so the launcher can surface
+    a clear, named error rather than swallowing the failure here.
+    """
+    from pollypm.runtimes import local as _local_module
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    monkeypatch.setattr(_local_module, "_CACHED_RESOLVE_PATH", str(empty_dir))
+    resolved = _local_module.resolve_argv_binary(["nonexistent-agent-bin", "--x"])
+    assert resolved == ["nonexistent-agent-bin", "--x"]
+
+
+def test_local_runtime_payload_uses_absolute_argv_for_codex(tmp_path: Path, monkeypatch) -> None:
+    """#965 — the launcher payload built by ``LocalRuntimeAdapter`` carries
+    an absolute path for the codex binary, so ``runtime_launcher.os.execvpe``
+    never has to search a sanitized child-process PATH.
+    """
+    from pollypm.runtimes import local as _local_module
+
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_codex = fake_bin_dir / "codex"
+    fake_codex.write_text("#!/bin/sh\n")
+    fake_codex.chmod(0o755)
+    monkeypatch.setattr(_local_module, "_CACHED_RESOLVE_PATH", str(fake_bin_dir))
+
+    session = SessionConfig(
+        name="worker",
+        role="worker",
+        provider=ProviderKind.CODEX,
+        account="codex_primary",
+        cwd=tmp_path,
+        project="demo-project",
+    )
+    account = AccountConfig(
+        name="codex_primary",
+        provider=ProviderKind.CODEX,
+        email="codex@example.com",
+        runtime=RuntimeKind.LOCAL,
+        home=tmp_path / "home",
+    )
+    command = CodexAdapter().build_launch_command(session, account)
+    wrapped = LocalRuntimeAdapter().wrap_command(
+        command,
+        account,
+        ProjectSettings(root_dir=tmp_path),
+    )
+
+    payload = _decoded_payload(wrapped)
+    assert payload["argv"][0] == str(fake_codex), (
+        f"expected absolute path to codex binary, got {payload['argv'][0]!r}"
+    )
+    assert Path(payload["argv"][0]).is_absolute()
+
+
+def test_local_runtime_payload_uses_absolute_argv_for_claude(tmp_path: Path, monkeypatch) -> None:
+    """#965 sibling-coverage — the same resolution applies to Claude
+    launches so a future tmux PATH-stripping change cannot break Claude
+    while leaving Codex working.
+    """
+    from pollypm.runtimes import local as _local_module
+
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_claude = fake_bin_dir / "claude"
+    fake_claude.write_text("#!/bin/sh\n")
+    fake_claude.chmod(0o755)
+    monkeypatch.setattr(_local_module, "_CACHED_RESOLVE_PATH", str(fake_bin_dir))
+
+    session = SessionConfig(
+        name="operator",
+        role="operator-pm",
+        provider=ProviderKind.CLAUDE,
+        account="claude_primary",
+        cwd=tmp_path,
+        project="pollypm",
+    )
+    account = AccountConfig(
+        name="claude_primary",
+        provider=ProviderKind.CLAUDE,
+        email="claude@example.com",
+        runtime=RuntimeKind.LOCAL,
+        home=tmp_path / "home",
+    )
+    command = ClaudeAdapter().build_launch_command(session, account)
+    wrapped = LocalRuntimeAdapter().wrap_command(
+        command,
+        account,
+        ProjectSettings(root_dir=tmp_path),
+    )
+
+    payload = _decoded_payload(wrapped)
+    assert payload["argv"][0] == str(fake_claude)
+    assert Path(payload["argv"][0]).is_absolute()

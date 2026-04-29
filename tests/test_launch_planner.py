@@ -206,8 +206,11 @@ def test_planner_routes_architect_launch_to_project_override(tmp_path: Path) -> 
     payload = _decode_launch_payload(launch.command)
 
     assert launch.session.provider is ProviderKind.CLAUDE
-    assert payload["argv"] == [
-        "claude",
+    # #965 — argv[0] is resolved to an absolute path; basename remains.
+    from pathlib import Path as _P
+    argv = payload["argv"]
+    assert _P(argv[0]).name == "claude"
+    assert argv[1:] == [
         "--dangerously-skip-permissions",
         "--model",
         "claude-sonnet-4-6",
@@ -233,8 +236,11 @@ def test_planner_routes_operator_to_codex_when_compatible_account_exists(tmp_pat
 
     assert launch.session.provider is ProviderKind.CODEX
     assert launch.session.account == "codex_backup"
-    assert payload["argv"] == [
-        "codex",
+    # #965 — argv[0] is resolved to an absolute path; basename remains.
+    from pathlib import Path as _P
+    argv = payload["argv"]
+    assert _P(argv[0]).name == "codex"
+    assert argv[1:] == [
         "--sandbox",
         "read-only",
         "--ask-for-approval",
