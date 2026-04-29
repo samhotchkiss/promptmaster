@@ -27,7 +27,7 @@ NavigationState = Literal[
 
 
 @dataclass(frozen=True, slots=True)
-class NavigationRequest:
+class NavigationCommand:
     request_id: int
     key: str
 
@@ -39,7 +39,7 @@ class NavigationContent:
 
 
 @dataclass(frozen=True, slots=True)
-class NavigationResult:
+class NavigationTransition:
     request_id: int
     key: str
     state: NavigationState
@@ -52,19 +52,19 @@ class NavigationResult:
 
 
 class NavigationStateStore(Protocol):
-    def record(self, result: NavigationResult) -> None:
+    def record(self, result: NavigationTransition) -> None:
         ...
 
 
 class NavigationContentResolver(Protocol):
-    def resolve(self, request: NavigationRequest) -> object | Awaitable[object]:
+    def resolve(self, request: NavigationCommand) -> object | Awaitable[object]:
         ...
 
 
 class NavigationWindowManager(Protocol):
     def apply(
         self,
-        request: NavigationRequest,
+        request: NavigationCommand,
         content: object,
     ) -> object | Awaitable[object]:
         ...
@@ -74,10 +74,10 @@ class InMemoryNavigationStateStore:
     """Small default store useful for tests and simple integrations."""
 
     def __init__(self) -> None:
-        self.history: list[NavigationResult] = []
-        self.by_request: dict[int, NavigationResult] = {}
+        self.history: list[NavigationTransition] = []
+        self.by_request: dict[int, NavigationTransition] = {}
 
-    def record(self, result: NavigationResult) -> None:
+    def record(self, result: NavigationTransition) -> None:
         self.history.append(result)
         self.by_request[result.request_id] = result
 
@@ -101,27 +101,27 @@ class NavigationController:
         self._timeout_seconds = timeout_seconds
         self._next_request_id = 0
         self._current_request_id: int | None = None
-        self._requests: dict[int, NavigationRequest] = {}
-        self._results: dict[int, NavigationResult] = {}
+        self._requests: dict[int, NavigationCommand] = {}
+        self._results: dict[int, NavigationTransition] = {}
 
     @property
     def current_request_id(self) -> int | None:
         return self._current_request_id
 
     @property
-    def current_result(self) -> NavigationResult | None:
+    def current_result(self) -> NavigationTransition | None:
         if self._current_request_id is None:
             return None
         return self._results.get(self._current_request_id)
 
-    def result_for(self, request_id: int) -> NavigationResult | None:
+    def result_for(self, request_id: int) -> NavigationTransition | None:
         return self._results.get(request_id)
 
-    def accept(self, key: str) -> NavigationRequest:
+    def accept(self, key: str) -> NavigationCommand:
         """Synchronously acknowledge a rail click before slow work starts."""
 
         self._next_request_id += 1
-        request = NavigationRequest(request_id=self._next_request_id, key=key)
+        request = NavigationCommand(request_id=self._next_request_id, key=key)
         previous_id = self._current_request_id
 
         if previous_id is not None and self._is_active(previous_id):
@@ -140,7 +140,7 @@ class NavigationController:
         self._record(request, "loading", destination_key=key)
         return request
 
-    def cancel(self, request_id: int | None = None) -> NavigationResult | None:
+    def cancel(self, request_id: int | None = None) -> NavigationTransition | None:
         """Mark a pending request as cancelled.
 
         Cancelling is separate from staleness: a newer accepted request marks
@@ -169,7 +169,7 @@ class NavigationController:
             message="Navigation cancelled.",
         )
 
-    async def navigate(self, key: str) -> NavigationResult:
+    async def navigate(self, key: str) -> NavigationTransition:
         """Accept, resolve, and apply a rail navigation request."""
 
         request = self.accept(key)
@@ -177,8 +177,8 @@ class NavigationController:
 
     async def resolve_and_apply(
         self,
-        request: NavigationRequest,
-    ) -> NavigationResult:
+        request: NavigationCommand,
+    ) -> NavigationTransition:
         """Resolve content and apply it if ``request`` is still newest."""
 
         inactive = self._inactive_result(request)
@@ -211,8 +211,8 @@ class NavigationController:
 
     async def _resolve_and_apply_without_timeout(
         self,
-        request: NavigationRequest,
-    ) -> NavigationResult:
+        request: NavigationCommand,
+    ) -> NavigationTransition:
         content = await _maybe_await(self._content_resolver.resolve(request))
 
         inactive = self._inactive_result(request)
@@ -234,7 +234,7 @@ class NavigationController:
             window_result=window_result,
         )
 
-    def _inactive_result(self, request: NavigationRequest) -> NavigationResult | None:
+    def _inactive_result(self, request: NavigationCommand) -> NavigationTransition | None:
         existing = self._results.get(request.request_id)
         if request.request_id != self._current_request_id:
             return self._record(
@@ -250,13 +250,13 @@ class NavigationController:
 
     def _finish_or_stale(
         self,
-        request: NavigationRequest,
+        request: NavigationCommand,
         state: Literal["timed_out", "failed"],
         *,
         destination_key: str,
         message: str,
         error: str,
-    ) -> NavigationResult:
+    ) -> NavigationTransition:
         inactive = self._inactive_result(request)
         if inactive is not None:
             return inactive
@@ -274,7 +274,7 @@ class NavigationController:
 
     def _record(
         self,
-        request: NavigationRequest,
+        request: NavigationCommand,
         state: NavigationState,
         *,
         destination_key: str | None = None,
@@ -283,8 +283,8 @@ class NavigationController:
         message: str | None = None,
         error: str | None = None,
         superseded_by: int | None = None,
-    ) -> NavigationResult:
-        result = NavigationResult(
+    ) -> NavigationTransition:
+        result = NavigationTransition(
             request_id=request.request_id,
             key=request.key,
             state=state,
@@ -306,7 +306,7 @@ async def _maybe_await(value: object | Awaitable[object]) -> object:
     return value
 
 
-def _destination_key(request: NavigationRequest, content: object) -> str:
+def _destination_key(request: NavigationCommand, content: object) -> str:
     if isinstance(content, NavigationContent):
         return content.destination_key
     if isinstance(content, str):
@@ -315,3 +315,16 @@ def _destination_key(request: NavigationRequest, content: object) -> str:
     if isinstance(destination_key, str) and destination_key:
         return destination_key
     return request.key
+
+
+__all__ = [
+    "InMemoryNavigationStateStore",
+    "NavigationCommand",
+    "NavigationContent",
+    "NavigationContentResolver",
+    "NavigationController",
+    "NavigationState",
+    "NavigationStateStore",
+    "NavigationTransition",
+    "NavigationWindowManager",
+]

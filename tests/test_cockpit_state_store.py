@@ -8,10 +8,15 @@ import pytest
 from pollypm.cockpit_state_store import (
     DEFAULT_RAIL_WIDTH,
     DEFAULT_SELECTED_KEY,
+    LIFECYCLE_TO_RIGHT_PANE_STATE,
     MAX_RAIL_WIDTH,
     MIN_RAIL_WIDTH,
+    RIGHT_PANE_STATE_TO_LIFECYCLE,
     CockpitStateStore,
+    lifecycle_to_right_pane_state,
+    right_pane_state_to_lifecycle,
 )
+from pollypm.cockpit_contracts import RightPaneLifecycleState
 
 
 def _store(tmp_path: Path) -> CockpitStateStore:
@@ -152,6 +157,28 @@ def test_right_pane_lifecycle_states_and_active_request_id(tmp_path: Path) -> No
     store.mark_right_pane_idle()
     assert store.right_pane_state() == "idle"
     assert "right_pane_error" not in _read_json(store.path)
+
+
+def test_persisted_right_pane_state_maps_to_public_lifecycle_contract() -> None:
+    expected = {
+        "idle": RightPaneLifecycleState.UNMOUNTED,
+        "loading": RightPaneLifecycleState.INITIALIZING,
+        "static": RightPaneLifecycleState.STATIC_VIEW,
+        "live_agent": RightPaneLifecycleState.LIVE_SESSION,
+        "error": RightPaneLifecycleState.ERROR,
+    }
+
+    assert RIGHT_PANE_STATE_TO_LIFECYCLE == expected
+    assert LIFECYCLE_TO_RIGHT_PANE_STATE == {
+        lifecycle: state for state, lifecycle in expected.items()
+    }
+
+    for state, lifecycle in expected.items():
+        assert right_pane_state_to_lifecycle(state) is lifecycle
+        assert lifecycle_to_right_pane_state(lifecycle) == state
+
+    with pytest.raises(ValueError):
+        lifecycle_to_right_pane_state(RightPaneLifecycleState.STALE)
 
 
 def test_active_request_id_can_be_set_and_cleared(tmp_path: Path) -> None:

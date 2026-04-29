@@ -2880,7 +2880,7 @@ class CockpitRouter:
         message: str,
     ) -> None:
         body = f"{title}\n\n{message}\n\nSelect another rail item to continue."
-        script = f"printf '%s\\n' {shlex.quote(body)}; sleep 3600"
+        script = f"printf '%s\\n' {shlex.quote(body)}; while IFS= read -r _; do :; done"
         self._show_command_view(
             supervisor,
             window_target,

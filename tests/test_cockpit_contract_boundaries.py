@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import importlib
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,6 +130,24 @@ def _imported_roots(path: Path) -> tuple[str, ...]:
     return tuple(roots)
 
 
+def _export_shape(obj: object) -> tuple[str, tuple[str, ...]] | None:
+    if dataclasses.is_dataclass(obj):
+        return ("dataclass", tuple(field.name for field in dataclasses.fields(obj)))
+    if inspect.isclass(obj) and hasattr(obj, "__members__"):
+        members = getattr(obj, "__members__")
+        return ("enum", tuple(sorted(members)))
+    if inspect.isclass(obj) and getattr(obj, "_is_protocol", False):
+        methods = tuple(
+            sorted(
+                name
+                for name, member in obj.__dict__.items()
+                if callable(member) and not name.startswith("_")
+            )
+        )
+        return ("protocol", methods)
+    return None
+
+
 def test_contract_records_are_frozen_slot_dataclasses() -> None:
     dataclass_types = (
         contracts.NavigationRequest,
@@ -163,6 +183,37 @@ def test_mount_result_ok_is_false_for_failed_disposition() -> None:
         lifecycle=lifecycle,
     )
     assert result.ok is False
+
+
+def test_cockpit_modules_do_not_export_conflicting_contract_names() -> None:
+    modules = [
+        contracts,
+        importlib.import_module("pollypm.cockpit_content"),
+        importlib.import_module("pollypm.cockpit_navigation"),
+        importlib.import_module("pollypm.cockpit_navigation_client"),
+        importlib.import_module("pollypm.cockpit_state_store"),
+    ]
+    seen: dict[str, tuple[str, tuple[str, tuple[str, ...]]]] = {}
+    conflicts: list[str] = []
+
+    for module in modules:
+        for name in getattr(module, "__all__", ()):
+            obj = getattr(module, name)
+            if getattr(obj, "__module__", module.__name__) != module.__name__:
+                continue
+            shape = _export_shape(obj)
+            if shape is None:
+                continue
+            previous = seen.get(name)
+            if previous is not None and previous[1] != shape:
+                conflicts.append(
+                    f"{name}: {previous[0]} {previous[1]} != "
+                    f"{module.__name__} {shape}"
+                )
+                continue
+            seen[name] = (module.__name__, shape)
+
+    assert conflicts == []
 
 
 def test_cockpit_contracts_keep_imports_light() -> None:

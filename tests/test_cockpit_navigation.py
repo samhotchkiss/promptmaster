@@ -1,10 +1,10 @@
 import asyncio
 
 from pollypm.cockpit_navigation import (
+    NavigationCommand,
     NavigationContent,
     NavigationController,
-    NavigationRequest,
-    NavigationResult,
+    NavigationTransition,
 )
 
 
@@ -14,10 +14,10 @@ def _run(coro):
 
 class FakeStateStore:
     def __init__(self) -> None:
-        self.history: list[NavigationResult] = []
-        self.by_request: dict[int, NavigationResult] = {}
+        self.history: list[NavigationTransition] = []
+        self.by_request: dict[int, NavigationTransition] = {}
 
-    def record(self, result: NavigationResult) -> None:
+    def record(self, result: NavigationTransition) -> None:
         self.history.append(result)
         self.by_request[result.request_id] = result
 
@@ -34,7 +34,7 @@ class ManualResolver:
         self.calls: list[tuple[int, str]] = []
         self._futures: dict[int, asyncio.Future[object]] = {}
 
-    async def resolve(self, request: NavigationRequest) -> object:
+    async def resolve(self, request: NavigationCommand) -> object:
         self.calls.append((request.request_id, request.key))
         future = asyncio.get_running_loop().create_future()
         self._futures[request.request_id] = future
@@ -53,18 +53,18 @@ class StaticResolver:
         self.content = content or NavigationContent("resolved")
         self.calls: list[tuple[int, str]] = []
 
-    async def resolve(self, request: NavigationRequest) -> object:
+    async def resolve(self, request: NavigationCommand) -> object:
         self.calls.append((request.request_id, request.key))
         return self.content
 
 
 class FailingResolver:
-    async def resolve(self, _request: NavigationRequest) -> object:
+    async def resolve(self, _request: NavigationCommand) -> object:
         raise RuntimeError("resolver exploded")
 
 
 class NeverResolver:
-    async def resolve(self, _request: NavigationRequest) -> object:
+    async def resolve(self, _request: NavigationCommand) -> object:
         await asyncio.Event().wait()
         return NavigationContent("never")
 
@@ -73,7 +73,7 @@ class FakeWindowManager:
     def __init__(self) -> None:
         self.calls: list[tuple[int, str, str]] = []
 
-    async def apply(self, request: NavigationRequest, content: object) -> object:
+    async def apply(self, request: NavigationCommand, content: object) -> object:
         destination = getattr(content, "destination_key", str(content))
         self.calls.append((request.request_id, request.key, destination))
         return {"shown": destination}
@@ -83,7 +83,7 @@ class FailingWindowManager:
     def __init__(self) -> None:
         self.calls: list[tuple[int, str]] = []
 
-    async def apply(self, request: NavigationRequest, _content: object) -> object:
+    async def apply(self, request: NavigationCommand, _content: object) -> object:
         self.calls.append((request.request_id, request.key))
         raise RuntimeError("window exploded")
 
@@ -230,14 +230,14 @@ def test_acknowledgement_happens_before_resolver_and_window_work() -> None:
         events: list[tuple[str, list[str]]] = []
 
         class ObservingResolver:
-            async def resolve(self, _request: NavigationRequest) -> object:
+            async def resolve(self, _request: NavigationCommand) -> object:
                 events.append(("resolver", [result.state for result in store.history]))
                 return NavigationContent("dashboard")
 
         class ObservingWindowManager:
             async def apply(
                 self,
-                _request: NavigationRequest,
+                _request: NavigationCommand,
                 _content: object,
             ) -> object:
                 events.append(("window", [result.state for result in store.history]))

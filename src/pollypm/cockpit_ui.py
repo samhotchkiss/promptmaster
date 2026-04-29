@@ -131,9 +131,9 @@ if TYPE_CHECKING:
 from pollypm.cockpit import build_cockpit_detail
 from pollypm.cockpit_navigation import (
     InMemoryNavigationStateStore,
+    NavigationCommand,
     NavigationContent,
     NavigationController,
-    NavigationRequest,
 )
 from pollypm.cockpit_navigation_client import (
     FileCockpitNavigationQueue,
@@ -170,7 +170,7 @@ class _CockpitRouteContentResolver:
     step; the navigation controller owns acknowledgement/cancellation state.
     """
 
-    def resolve(self, request: NavigationRequest) -> NavigationContent:
+    def resolve(self, request: NavigationCommand) -> NavigationContent:
         return NavigationContent(request.key)
 
 
@@ -178,7 +178,7 @@ class _CockpitRouteWindowApplier:
     def __init__(self, app: "PollyCockpitApp") -> None:
         self._app = app
 
-    def apply(self, request: NavigationRequest, _content: object) -> str:
+    def apply(self, request: NavigationCommand, _content: object) -> str:
         return self._app._route_selected_with_deadline(request.key)
 
 
@@ -1023,20 +1023,16 @@ class PollyCockpitApp(App[None]):
     def _drain_cockpit_navigation_queue(self) -> None:
         try:
             queue = self._cockpit_navigation_queue()
-            pending = queue.pending()
+            pending = queue.drain()
         except Exception:  # noqa: BLE001
             return
         if not pending:
             return
-        try:
-            queue.clear()
-        except Exception:  # noqa: BLE001
-            pass
-        latest = pending[-1]
-        self._schedule_route_selected(
-            latest.selected_key,
-            label=latest.selected_key,
-        )
+        for request in pending:
+            self._schedule_route_selected(
+                request.selected_key,
+                label=request.selected_key,
+            )
 
     # Layout check (pane recovery, rail width) — only every ~30s
     _LAYOUT_CHECK_INTERVAL = 38  # ~30s at 0.8s/tick
@@ -1745,7 +1741,7 @@ class PollyCockpitApp(App[None]):
             seq = request.request_id
             self._route_click_seq = seq
         else:
-            request = NavigationRequest(seq, key)
+            request = NavigationCommand(seq, key)
 
         try:
             result = asyncio.run(controller.resolve_and_apply(request))

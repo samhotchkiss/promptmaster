@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import multiprocessing
 from pathlib import Path
 
 from pollypm.cockpit_navigation_client import (
@@ -17,6 +18,21 @@ from pollypm.cockpit_navigation_client import (
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _submit_file_queue_request(
+    queue_path: str,
+    client_id: str,
+    key: str,
+    sequence_start: int,
+) -> None:
+    queue = FileCockpitNavigationQueue(Path(queue_path), max_entries=50)
+    client = CockpitNavigationClient(
+        queue,
+        client_id=client_id,
+        sequence_start=sequence_start,
+    )
+    client.navigate(key)
 
 
 def test_direct_adapter_receives_navigation_requests() -> None:
@@ -137,8 +153,77 @@ def test_file_queue_records_pending_requests(tmp_path: Path) -> None:
     assert raw["last_sequence"] == 1
     assert raw["requests"][0]["request_id"] == "pane-00000001"
 
-    queue.clear()
+    drained = queue.drain()
+    assert [request.selected_key for request in drained] == ["activity:demo"]
     assert queue.pending() == ()
+    assert json.loads(queue_path.read_text(encoding="utf-8"))[
+        "last_drained_sequence"
+    ] == 1
+
+
+def test_file_queue_drain_does_not_clear_later_submits(tmp_path: Path) -> None:
+    queue_path = tmp_path / "cockpit_navigation_queue.json"
+    queue = FileCockpitNavigationQueue(queue_path)
+    pane_a = CockpitNavigationClient(queue, client_id="pane-a")
+    pane_b = CockpitNavigationClient(queue, client_id="pane-b")
+
+    pane_a.navigate("inbox:demo")
+    drained = queue.drain()
+    pane_b.navigate("activity:demo")
+
+    assert [request.selected_key for request in drained] == ["inbox:demo"]
+    assert [request.selected_key for request in queue.pending()] == ["activity:demo"]
+
+
+def test_file_queue_serializes_concurrent_submitters(tmp_path: Path) -> None:
+    queue_path = tmp_path / "cockpit_navigation_queue.json"
+    processes: list[multiprocessing.Process] = []
+    context = multiprocessing.get_context("spawn")
+
+    for index in range(16):
+        process = context.Process(
+            target=_submit_file_queue_request,
+            args=(
+                str(queue_path),
+                f"pane-{index}",
+                f"project:demo:{index:02d}",
+                index,
+            ),
+        )
+        process.start()
+        processes.append(process)
+
+    for process in processes:
+        process.join(timeout=10)
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
+
+    exitcodes = [process.exitcode for process in processes]
+    assert exitcodes == [0] * len(processes)
+
+    pending = FileCockpitNavigationQueue(queue_path).pending()
+    assert sorted(request.selected_key for request in pending) == [
+        f"project:demo:{index:02d}" for index in range(16)
+    ]
+
+
+def test_file_queue_caps_oldest_entries(tmp_path: Path) -> None:
+    queue_path = tmp_path / "cockpit_navigation_queue.json"
+    queue = FileCockpitNavigationQueue(queue_path, max_entries=3)
+    client = CockpitNavigationClient(queue, client_id="pane")
+
+    for index in range(5):
+        result = client.navigate(f"project:demo:{index}")
+
+    assert result.details["dropped_count"] == 1
+    assert [request.selected_key for request in queue.pending()] == [
+        "project:demo:2",
+        "project:demo:3",
+        "project:demo:4",
+    ]
+    assert json.loads(queue_path.read_text(encoding="utf-8"))["dropped_count"] == 2
 
 
 def test_file_navigation_client_uses_project_local_queue(tmp_path: Path) -> None:

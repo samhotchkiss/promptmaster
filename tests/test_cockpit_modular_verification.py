@@ -16,9 +16,9 @@ from pollypm.cockpit_content import (
 )
 from pollypm.cockpit_contracts import PaneSnapshot, WindowSnapshot
 from pollypm.cockpit_navigation import (
+    NavigationCommand,
     NavigationController,
-    NavigationRequest,
-    NavigationResult,
+    NavigationTransition,
 )
 from pollypm.cockpit_state_store import CockpitStateStore
 
@@ -54,7 +54,7 @@ class ManualContentResolver:
         self.calls: list[tuple[int, str]] = []
         self._futures: dict[int, asyncio.Future[str | BaseException | None]] = {}
 
-    async def resolve(self, request: NavigationRequest) -> ResolvedPaneContent:
+    async def resolve(self, request: NavigationCommand) -> ResolvedPaneContent:
         self.calls.append((request.request_id, request.key))
         future = asyncio.get_running_loop().create_future()
         self._futures[request.request_id] = future
@@ -85,7 +85,7 @@ class ImmediateContentResolver:
     def __init__(self, context: CockpitContentContext) -> None:
         self.context = context
 
-    async def resolve(self, request: NavigationRequest) -> ResolvedPaneContent:
+    async def resolve(self, request: NavigationCommand) -> ResolvedPaneContent:
         plan = resolve_cockpit_content(request.key, self.context)
         return ResolvedPaneContent(
             route_key=request.key,
@@ -99,10 +99,10 @@ class ModularStateStore:
 
     def __init__(self, path: Path) -> None:
         self.persisted = CockpitStateStore(path)
-        self.history: list[NavigationResult] = []
-        self.by_request: dict[int, NavigationResult] = {}
+        self.history: list[NavigationTransition] = []
+        self.by_request: dict[int, NavigationTransition] = {}
 
-    def record(self, result: NavigationResult) -> None:
+    def record(self, result: NavigationTransition) -> None:
         self.history.append(result)
         self.by_request[result.request_id] = result
 
@@ -127,7 +127,7 @@ class ModularStateStore:
             if result.request_id == request_id
         ]
 
-    def _record_applied(self, result: NavigationResult) -> None:
+    def _record_applied(self, result: NavigationTransition) -> None:
         content = result.content
         plan = content.plan if isinstance(content, ResolvedPaneContent) else None
         destination_key = result.destination_key or result.key
@@ -162,7 +162,7 @@ class DeterministicWindowManager:
 
     async def apply(
         self,
-        request: NavigationRequest,
+        request: NavigationCommand,
         content: ResolvedPaneContent,
     ) -> VisiblePane | str:
         future = self._held.get(request.request_id)
@@ -229,7 +229,7 @@ class DeterministicWindowManager:
 
     @staticmethod
     def _render(
-        request: NavigationRequest,
+        request: NavigationCommand,
         content: ResolvedPaneContent,
     ) -> VisiblePane:
         plan = content.plan

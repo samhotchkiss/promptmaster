@@ -11,16 +11,18 @@ Integration points for later wiring:
 * The cockpit owner can install :class:`DirectCockpitNavigationAdapter` with a
   callback that hands ``request.navigation`` to the owner-side routing path.
 * Out-of-process right-pane apps can use :class:`FileCockpitNavigationQueue`;
-  the cockpit owner can poll :meth:`FileCockpitNavigationQueue.pending` and
-  apply the newest request through the same owner-side routing path.
+  the cockpit owner can call :meth:`FileCockpitNavigationQueue.drain` and
+  apply the queued requests through the same owner-side routing path.
 * Standalone pane processes can keep the default fallback and surface the
   unsupported result instead of trying to create their own router.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -43,6 +45,7 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 
 QUEUE_VERSION = 1
 QUEUE_FILE_NAME = "cockpit_navigation_queue.json"
+DEFAULT_QUEUE_MAX_ENTRIES = 100
 DEFAULT_CLIENT_ID = "right-pane"
 DEFAULT_ORIGIN = "right_pane"
 
@@ -224,47 +227,100 @@ class StandaloneCockpitNavigationAdapter:
 
 
 class FileCockpitNavigationQueue:
-    """JSON state-file backed queue for cross-process navigation requests."""
+    """JSON state-file backed queue for cross-process navigation requests.
 
-    def __init__(self, path: Path) -> None:
+    The queue is an owner-polled inbox. Requests are delivered in locked
+    append order when the cockpit owner drains the file. If the owner is unavailable
+    and the file exceeds ``max_entries``, the oldest queued requests are
+    dropped first so the state file stays bounded.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        max_entries: int = DEFAULT_QUEUE_MAX_ENTRIES,
+    ) -> None:
+        if max_entries < 1:
+            raise ValueError("max_entries must be positive")
         self.path = path
+        self.max_entries = max_entries
 
     def submit_navigation_request(
         self,
         request: CockpitNavigationClientRequest,
     ) -> CockpitNavigationClientResult:
-        state = self._load_state()
-        requests = _request_dicts(state.get("requests", []))
-        requests.append(request.to_dict())
-        state["version"] = QUEUE_VERSION
-        state["last_sequence"] = max(
-            request.sequence,
-            _safe_int(state.get("last_sequence"), default=0),
-        )
-        state["requests"] = requests
-        atomic_write_json(self.path, state)
+        with self._locked_state(write=True) as state:
+            requests = _request_dicts(state.get("requests", []))
+            requests.append(request.to_dict())
+            dropped_count = max(0, len(requests) - self.max_entries)
+            if dropped_count:
+                requests = requests[dropped_count:]
+            state["version"] = QUEUE_VERSION
+            state["last_sequence"] = max(
+                request.sequence,
+                _safe_int(state.get("last_sequence"), default=0),
+            )
+            state["dropped_count"] = (
+                _safe_int(state.get("dropped_count"), default=0) + dropped_count
+            )
+            state["requests"] = requests
         return CockpitNavigationClientResult(
             request=request,
             outcome=CockpitNavigationClientOutcome.QUEUED,
             handled=True,
             message=f"Navigation request queued for {request.selected_key}.",
-            details={"queue_path": str(self.path)},
+            details={
+                "queue_path": str(self.path),
+                "dropped_count": dropped_count,
+                "max_entries": self.max_entries,
+            },
         )
 
     def pending(self) -> tuple[CockpitNavigationClientRequest, ...]:
-        state = self._load_state()
-        requests: list[CockpitNavigationClientRequest] = []
-        for item in _request_dicts(state.get("requests", [])):
-            requests.append(CockpitNavigationClientRequest.from_dict(item))
-        return tuple(sorted(requests, key=lambda request: request.sequence))
+        with self._locked_state(write=False) as state:
+            return self._requests_from_state(state)
+
+    def drain(self) -> tuple[CockpitNavigationClientRequest, ...]:
+        """Atomically read and remove all currently queued requests."""
+        with self._locked_state(write=True) as state:
+            requests = self._requests_from_state(state)
+            state["version"] = QUEUE_VERSION
+            state["requests"] = []
+            if requests:
+                state["last_drained_sequence"] = max(
+                    request.sequence for request in requests
+                )
+            return requests
 
     def clear(self) -> None:
-        state = self._load_state()
-        state["version"] = QUEUE_VERSION
-        state["requests"] = []
-        atomic_write_json(self.path, state)
+        with self._locked_state(write=True) as state:
+            state["version"] = QUEUE_VERSION
+            state["requests"] = []
 
     def _load_state(self) -> JsonObject:
+        with self._locked_state(write=False) as state:
+            return dict(state)
+
+    @contextmanager
+    def _locked_state(self, *, write: bool):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock_path.open("a+", encoding="utf-8") as lock_file:
+            operation = fcntl.LOCK_EX if write else fcntl.LOCK_SH
+            fcntl.flock(lock_file.fileno(), operation)
+            try:
+                state = self._load_state_unlocked()
+                yield state
+                if write:
+                    atomic_write_json(self.path, state)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @property
+    def _lock_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.lock")
+
+    def _load_state_unlocked(self) -> JsonObject:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -275,6 +331,15 @@ class FileCockpitNavigationQueue:
         state.setdefault("version", QUEUE_VERSION)
         state.setdefault("requests", [])
         return state
+
+    @staticmethod
+    def _requests_from_state(
+        state: Mapping[str, JsonValue],
+    ) -> tuple[CockpitNavigationClientRequest, ...]:
+        requests: list[CockpitNavigationClientRequest] = []
+        for item in _request_dicts(state.get("requests", [])):
+            requests.append(CockpitNavigationClientRequest.from_dict(item))
+        return tuple(requests)
 
 
 class CockpitNavigationClient:
@@ -306,7 +371,12 @@ class CockpitNavigationClient:
         task_id: str | None = None,
         payload: Mapping[str, object] | None = None,
     ) -> CockpitNavigationClientResult:
-        """Submit an arbitrary cockpit selection key."""
+        """Submit an arbitrary cockpit selection key.
+
+        File-backed submissions are queued for the cockpit owner to drain in
+        locked append order. If the owner is offline long enough for the queue to
+        exceed its cap, the oldest requests are dropped before newer requests.
+        """
         request = self._build_request(
             selected_key,
             intent=intent,
@@ -534,6 +604,7 @@ __all__ = [
     "CockpitNavigationClientOutcome",
     "CockpitNavigationClientRequest",
     "CockpitNavigationClientResult",
+    "DEFAULT_QUEUE_MAX_ENTRIES",
     "DirectCockpitNavigationAdapter",
     "FileCockpitNavigationQueue",
     "StandaloneCockpitNavigationAdapter",

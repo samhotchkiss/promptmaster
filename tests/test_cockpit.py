@@ -99,6 +99,25 @@ def test_cockpit_router_build_items_includes_core_entries(monkeypatch, tmp_path:
     assert "PollyPM" in project_labels
 
 
+def test_cockpit_router_message_view_does_not_spawn_bounded_sleep() -> None:
+    router = CockpitRouter.__new__(CockpitRouter)
+    commands: list[str] = []
+    router._show_command_view = (  # type: ignore[attr-defined]
+        lambda _supervisor, _window_target, command: commands.append(command)
+    )
+
+    CockpitRouter._show_message_view(
+        router,
+        object(),
+        "test-window",
+        "Unable to open pane",
+        "Mount failed",
+    )
+
+    assert "sleep 3600" not in commands[0]
+    assert "read -r" in commands[0]
+
+
 def test_cockpit_router_build_items_keeps_mounted_task_worker_visible(
     monkeypatch, tmp_path: Path,
 ) -> None:
@@ -3557,21 +3576,19 @@ def test_cockpit_app_adopts_external_router_selection_without_stomping_cursor() 
     assert app.selected_key == "inbox"
 
 
-def test_cockpit_app_drains_right_pane_navigation_queue_to_latest_request() -> None:
+def test_cockpit_app_drains_right_pane_navigation_queue_in_sequence() -> None:
     app = PollyCockpitApp.__new__(PollyCockpitApp)
     scheduled: list[tuple[str, str | None]] = []
 
     class _Queue:
-        cleared = False
+        drained = False
 
-        def pending(self):
+        def drain(self):
+            self.drained = True
             return (
                 SimpleNamespace(sequence=1, selected_key="inbox:demo"),
                 SimpleNamespace(sequence=2, selected_key="activity:demo"),
             )
-
-        def clear(self) -> None:
-            self.cleared = True
 
     queue = _Queue()
     app._cockpit_navigation_queue = lambda: queue  # type: ignore[method-assign]
@@ -3581,8 +3598,11 @@ def test_cockpit_app_drains_right_pane_navigation_queue_to_latest_request() -> N
 
     app._drain_cockpit_navigation_queue()
 
-    assert queue.cleared is True
-    assert scheduled == [("activity:demo", "activity:demo")]
+    assert queue.drained is True
+    assert scheduled == [
+        ("inbox:demo", "inbox:demo"),
+        ("activity:demo", "activity:demo"),
+    ]
 
 
 def test_cockpit_app_routes_detail_hint_keys_from_rail() -> None:

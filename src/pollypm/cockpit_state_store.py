@@ -4,11 +4,10 @@ This module owns only JSON state shape and validation. It intentionally
 does not know how to find a project config, talk to tmux, create tmux
 clients, or load supervisors; callers pass the exact state-file path.
 
-The #970 persisted right-pane state contract is local for now because it
-uses the explicit ``idle`` / ``loading`` / ``static`` / ``live_agent`` /
-``error`` states. When shared cockpit contracts adopt that exact persisted
-shape, ``RightPaneState`` and ``MountedIdentityPayload`` can move there (or
-be imported from there) so cockpit rail/router/UI code share one boundary.
+The #970 persisted right-pane state contract intentionally uses compact
+``idle`` / ``loading`` / ``static`` / ``live_agent`` / ``error`` values in
+JSON. Public cockpit modules use ``RightPaneLifecycleState``; the explicit
+mapping functions in this module are the boundary between those shapes.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Union, cast
 
 from pollypm.atomic_io import atomic_write_json
+from pollypm.cockpit_contracts import RightPaneLifecycleState
 
 
 JsonValue = Union[
@@ -41,6 +41,40 @@ MAX_RAIL_WIDTH = 120
 RIGHT_PANE_STATES: frozenset[str] = frozenset(
     {"idle", "loading", "static", "live_agent", "error"}
 )
+RIGHT_PANE_STATE_TO_LIFECYCLE: dict[RightPaneState, RightPaneLifecycleState] = {
+    "idle": RightPaneLifecycleState.UNMOUNTED,
+    "loading": RightPaneLifecycleState.INITIALIZING,
+    "static": RightPaneLifecycleState.STATIC_VIEW,
+    "live_agent": RightPaneLifecycleState.LIVE_SESSION,
+    "error": RightPaneLifecycleState.ERROR,
+}
+LIFECYCLE_TO_RIGHT_PANE_STATE: dict[RightPaneLifecycleState, RightPaneState] = {
+    lifecycle: state for state, lifecycle in RIGHT_PANE_STATE_TO_LIFECYCLE.items()
+}
+
+
+def right_pane_state_to_lifecycle(state: RightPaneState) -> RightPaneLifecycleState:
+    """Translate the persisted JSON state into the public lifecycle contract."""
+    if state not in RIGHT_PANE_STATE_TO_LIFECYCLE:
+        _raise_invalid_right_pane_state(state)
+    return RIGHT_PANE_STATE_TO_LIFECYCLE[state]
+
+
+def lifecycle_to_right_pane_state(state: RightPaneLifecycleState) -> RightPaneState:
+    """Translate a public lifecycle state into the persisted JSON state."""
+    try:
+        return LIFECYCLE_TO_RIGHT_PANE_STATE[state]
+    except KeyError as exc:
+        allowed = ", ".join(item.value for item in RIGHT_PANE_STATE_TO_LIFECYCLE.values())
+        raise ValueError(
+            f"lifecycle state cannot be persisted as right-pane state: {state}"
+            f" (allowed: {allowed})"
+        ) from exc
+
+
+def _raise_invalid_right_pane_state(value: str) -> None:
+    allowed = ", ".join(sorted(RIGHT_PANE_STATES))
+    raise ValueError(f"right pane state must be one of: {allowed}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,5 +405,22 @@ class CockpitStateStore:
     @staticmethod
     def _require_right_pane_state(value: str) -> None:
         if value not in RIGHT_PANE_STATES:
-            allowed = ", ".join(sorted(RIGHT_PANE_STATES))
-            raise ValueError(f"right pane state must be one of: {allowed}")
+            _raise_invalid_right_pane_state(value)
+
+
+__all__ = [
+    "CockpitStateSnapshot",
+    "CockpitStateStore",
+    "DEFAULT_RAIL_WIDTH",
+    "DEFAULT_SELECTED_KEY",
+    "LIFECYCLE_TO_RIGHT_PANE_STATE",
+    "MAX_RAIL_WIDTH",
+    "MIN_RAIL_WIDTH",
+    "MountedIdentityPayload",
+    "RIGHT_PANE_STATE_TO_LIFECYCLE",
+    "RIGHT_PANE_STATES",
+    "RightPaneState",
+    "STATE_FILE_NAME",
+    "lifecycle_to_right_pane_state",
+    "right_pane_state_to_lifecycle",
+]
