@@ -1657,7 +1657,10 @@ def test_task_app_approve_undo_banner_and_auto_merge(env, monkeypatch) -> None:
     notification_calls: list[str] = []
 
     monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
-    monkeypatch.setattr("pollypm.cockpit_tasks._PENDING_UNDO_SECONDS", 0.2)
+    # #955 — this test checks the banner/undo state explicitly, so keep
+    # the undo window long and commit manually. A 0.2s timer can clear the
+    # banner before a busy full-suite ``pilot.pause()`` returns.
+    monkeypatch.setattr("pollypm.cockpit_tasks._PENDING_UNDO_SECONDS", 5.0)
     monkeypatch.setattr(
         "pollypm.cockpit_tasks.notify_task_approved",
         lambda task, *, notify: notification_calls.append(task.task_id),
@@ -1675,14 +1678,25 @@ def test_task_app_approve_undo_banner_and_auto_merge(env, monkeypatch) -> None:
     app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
 
     async def body() -> None:
+        from time import monotonic
+
+        async def wait_for_banner(expected: str) -> str:
+            deadline = monotonic() + 10.0
+            banner = ""
+            while monotonic() < deadline:
+                await pilot.pause()
+                banner = str(app.query_one("#tasks-banner", Static).render())
+                if expected in banner:
+                    return banner
+            return banner
+
         async with app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
             # #881 — single-letter `a` arms the destructive action on
             # first press. The second press within 3s confirms.
             await pilot.press("a")
             await pilot.press("a")
-            await pilot.pause()
-            banner = str(app.query_one("#tasks-banner", Static).render())
+            banner = await wait_for_banner("APPROVED")
             # #767 — banner reads "APPROVED · #1   Undo press Z (Ns)".
             assert "APPROVED" in banner
             assert "Undo" in banner
@@ -1705,7 +1719,9 @@ def test_task_app_approve_undo_banner_and_auto_merge(env, monkeypatch) -> None:
 
             await pilot.press("a")
             await pilot.press("a")
-            await asyncio.sleep(0.3)
+            banner = await wait_for_banner("APPROVED")
+            assert "APPROVED" in banner
+            app._commit_pending_review_action()
             await pilot.pause()
             assert fake_svc.approve_calls == [
                 ("demo/1", "user", "Approved from task cockpit")

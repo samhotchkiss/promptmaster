@@ -622,13 +622,20 @@ def _sweep_work_service(
                     continue
 
             totals["considered"] += 1
-            # #922: when the kickoff hasn't been delivered yet, drop
-            # the throttle to 0 so the dedupe table doesn't suppress
-            # the first push. The stamp landing on success keeps the
-            # next sweep tick on the normal throttle.
+            # #922/#952: when kickoff hasn't been delivered yet, bypass
+            # stale normal notification rows so a poisoned pre-pane send
+            # can't suppress the first real push. Still claim a short,
+            # separate forced-kickoff dedupe slot so concurrent sweep ticks
+            # cannot stack duplicate Resume-work pings during boot.
             effective_throttle = 0 if kickoff_pending else throttle_override
             result = notify(
-                event, services=services, throttle_seconds=effective_throttle,
+                event,
+                services=services,
+                throttle_seconds=effective_throttle,
+                atomic_dedupe_seconds=(
+                    RECENT_SWEEPER_PING_SECONDS if kickoff_pending else None
+                ),
+                dedupe_scope="forced_kickoff" if kickoff_pending else "normal",
             )
             outcome = str(result.get("outcome", "unknown"))
             if kickoff_pending and outcome == "sent":

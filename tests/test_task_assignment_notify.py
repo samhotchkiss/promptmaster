@@ -16,7 +16,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -25,7 +24,6 @@ from pollypm.plugins_builtin.task_assignment_notify.handlers.notify import (
 )
 from pollypm.plugins_builtin.task_assignment_notify.resolver import (
     _RuntimeServices,
-    DEDUPE_WINDOW_SECONDS,
     notify,
 )
 from pollypm.plugins_builtin.task_assignment_notify.handlers.sweep import (
@@ -351,7 +349,7 @@ class TestNotifyEscalation:
         outcome = notify(_event(), services=services)
         assert outcome["outcome"] == "no_session"
         alerts = state_store.open_alerts()
-        assert any(a.alert_type == f"no_session_for_assignment:demo/1" for a in alerts)
+        assert any(a.alert_type == "no_session_for_assignment:demo/1" for a in alerts)
         # Message guides the user to the supported fix command.
         # Worker-role tasks get ``pm task claim`` (pm worker-start
         # --role=worker is deprecated in favour of per-task workers).
@@ -432,9 +430,6 @@ class TestSweeper:
 
         # Sweeper runs on its own resolution of runtime services; patch
         # the loader so it returns our harness.
-        from pollypm.plugins_builtin.task_assignment_notify import handlers
-        import pollypm.plugins_builtin.task_assignment_notify.resolver as resolver_mod
-
         def _fake_loader(*, config_path=None):
             return _RuntimeServices(
                 session_service=svc,
@@ -774,6 +769,53 @@ class TestSweeperInProgressBranch:
         resume_messages = [t for _n, t in svc.sent if "Resume work" in t]
         assert resume_messages, f"expected a Resume ping, got {svc.sent!r}"
         assert f"[{task.task_id}]" in resume_messages[0]
+
+    def test_sweeper_forced_kickoff_ignores_stale_normal_and_throttles_followup(
+        self, tmp_path,
+    ):
+        """A forced kickoff must bypass poisoned normal rows, then throttle
+        the ordinary recovery sweep that runs after kickoff_sent_at is
+        stamped. This is the actual sweeper path behind #952."""
+        work, store, svc = self._make_services(
+            tmp_path, [FakeHandle("worker-proj")], busy=(),
+        )
+        task = self._queue_and_claim(work)
+        store.record_notification(
+            session_name="worker-proj",
+            task_id=task.task_id,
+            project="proj",
+            message="poisoned pre-pane send",
+            delivery_status="sent",
+            execution_version=1,
+        )
+
+        from pollypm.plugins_builtin.task_assignment_notify.handlers.sweep import (
+            _sweep_work_service,
+        )
+
+        services = _RuntimeServices(
+            session_service=svc,
+            state_store=store,
+            work_service=work,
+            project_root=tmp_path,
+        )
+        first_totals = {"considered": 0, "by_outcome": {}}
+        second_totals = {"considered": 0, "by_outcome": {}}
+        sweep_args = {
+            "throttle_override": 300,
+            "alerted_pairs": set(),
+            "plan_missing_projects": set(),
+            "plan_decisions": {},
+        }
+
+        _sweep_work_service(work, services, totals=first_totals, **sweep_args)
+        _sweep_work_service(work, services, totals=second_totals, **sweep_args)
+
+        assert first_totals["by_outcome"].get("forced_kickoff", 0) >= 1
+        assert first_totals["by_outcome"].get("sent", 0) >= 1
+        assert second_totals["by_outcome"].get("deduped", 0) >= 1
+        assert second_totals["by_outcome"].get("sent", 0) == 0
+        assert len(svc.sent) == 1
 
     def test_sweeper_skips_in_progress_when_worker_is_busy(
         self, tmp_path, monkeypatch,
@@ -1984,3 +2026,107 @@ class TestConcurrentSweepDedupeRace:
         assert len(svc.sent) == 1, (
             f"expected exactly one delivered message under race, got {svc.sent!r}"
         )
+
+    def test_claim_failure_falls_back_to_send_instead_of_false_dedupe(self):
+        """If the atomic claim helper itself errors, ``notify()`` must not
+        label the event ``deduped`` and drop the kickoff. It should fall
+        back to the legacy serial dedupe path and still send when that
+        path reports no recent ping (#952 follow-up)."""
+
+        class BrokenClaimStore:
+            def __init__(self) -> None:
+                self.records: list[dict] = []
+
+            def claim_notification_slot(self, **kwargs):  # noqa: ANN001
+                raise RuntimeError("db temporarily locked")
+
+            def was_notified_within(self, *args, **kwargs):  # noqa: ANN001
+                return False
+
+            def record_notification(self, **kwargs):  # noqa: ANN001
+                self.records.append(dict(kwargs))
+
+        store = BrokenClaimStore()
+        svc = FakeSessionService(handles=[FakeHandle("worker-demo")])
+        services = _RuntimeServices(
+            session_service=svc,
+            state_store=store,
+            work_service=None,
+            project_root=Path("."),
+        )
+
+        outcome = notify(_event(), services=services, throttle_seconds=300)
+
+        assert outcome["outcome"] == "sent"
+        assert len(svc.sent) == 1
+        assert len(store.records) == 1
+
+    def test_forced_kickoff_dedupes_without_historical_throttle(self, state_store):
+        """Forced kickoff uses ``throttle_seconds=0`` to bypass stale
+        normal notification rows, but it still needs a short atomic slot
+        so repeated/concurrent kickoff-pending sweeps don't stack Resume
+        pings during boot (#952 follow-up)."""
+        svc = FakeSessionService(handles=[FakeHandle("worker-demo")])
+        services = _RuntimeServices(
+            session_service=svc,
+            state_store=state_store,
+            work_service=None,
+            project_root=Path("."),
+        )
+
+        first = notify(
+            _event(work_status="in_progress"),
+            services=services,
+            throttle_seconds=0,
+            atomic_dedupe_seconds=60,
+            dedupe_scope="forced_kickoff",
+        )
+        second = notify(
+            _event(work_status="in_progress"),
+            services=services,
+            throttle_seconds=0,
+            atomic_dedupe_seconds=60,
+            dedupe_scope="forced_kickoff",
+        )
+        normal_followup = notify(
+            _event(work_status="in_progress"),
+            services=services,
+            throttle_seconds=300,
+        )
+
+        assert first["outcome"] == "sent"
+        assert second["outcome"] == "deduped"
+        assert normal_followup["outcome"] == "deduped"
+        assert len(svc.sent) == 1
+
+    def test_forced_kickoff_ignores_stale_normal_notification(self, state_store):
+        """A previous normal notification row should not suppress a forced
+        kickoff. That's the poisoned-row case #922 introduced
+        ``throttle_seconds=0`` for; the forced-kickoff scope must bypass
+        it while still deduping other forced-kickoff rows."""
+        state_store.record_notification(
+            session_name="worker-demo",
+            task_id="demo/1",
+            project="demo",
+            message="poisoned pre-pane send",
+            delivery_status="sent",
+            execution_version=0,
+        )
+        svc = FakeSessionService(handles=[FakeHandle("worker-demo")])
+        services = _RuntimeServices(
+            session_service=svc,
+            state_store=state_store,
+            work_service=None,
+            project_root=Path("."),
+        )
+
+        outcome = notify(
+            _event(work_status="in_progress"),
+            services=services,
+            throttle_seconds=0,
+            atomic_dedupe_seconds=60,
+            dedupe_scope="forced_kickoff",
+        )
+
+        assert outcome["outcome"] == "sent"
+        assert len(svc.sent) == 1

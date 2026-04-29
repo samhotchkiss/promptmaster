@@ -170,6 +170,8 @@ def notify(
     *,
     services: _RuntimeServices,
     throttle_seconds: int = DEDUPE_WINDOW_SECONDS,
+    atomic_dedupe_seconds: int | None = None,
+    dedupe_scope: str = "normal",
 ) -> dict[str, Any]:
     """Resolve + dedupe + send a single assignment ping.
 
@@ -221,19 +223,19 @@ def notify(
 
     message = format_ping_for_role(event)
 
-    # #952: dedupe the slot atomically BEFORE the send, not after.
-    # The legacy flow was [check was_notified_within → send →
-    # record_notification], which left a TOCTOU window: concurrent
-    # sweep ticks all saw "not yet sent" and each fired the same
-    # ``Resume work`` ping before any of them committed the row.
-    # ``claim_notification_slot`` checks + inserts under the connection
-    # lock in one atomic step. The first caller wins (returns a rowid);
-    # losers see the placeholder row and return None → ``deduped``. We
-    # then update the row's ``delivery_status`` once the send finishes.
+    # #952: dedupe the slot atomically BEFORE the send, not after. The
+    # legacy flow was [check was_notified_within → send → record_notification],
+    # which let concurrent sweep ticks all see "not yet sent" and each fire.
+    # ``atomic_dedupe_seconds`` lets forced-kickoff callers bypass stale
+    # historical rows while still deduping same-window concurrent sends.
     notification_id: int | None = None
+    claim_window_seconds = (
+        throttle_seconds if throttle_seconds > 0 else atomic_dedupe_seconds
+    )
     can_claim = (
         store is not None
-        and throttle_seconds > 0
+        and claim_window_seconds is not None
+        and claim_window_seconds > 0
         and hasattr(store, "claim_notification_slot")
     )
     if can_claim:
@@ -241,10 +243,11 @@ def notify(
             notification_id = store.claim_notification_slot(
                 session_name=target_name,
                 task_id=event.task_id,
-                window_seconds=throttle_seconds,
+                window_seconds=claim_window_seconds,
                 execution_version=execution_version,
                 project=event.project,
                 message=message,
+                dedupe_scope=dedupe_scope,
             )
         except Exception:  # noqa: BLE001
             logger.debug(
@@ -252,18 +255,19 @@ def notify(
                 event.task_id, exc_info=True,
             )
             notification_id = None
-        if notification_id is None:
-            return {
-                "outcome": "deduped",
-                "task_id": event.task_id,
-                "session": target_name,
-                "execution_version": execution_version,
-            }
-    elif store is not None and throttle_seconds > 0:
-        # Legacy fallback for stores that don't expose the atomic
-        # claim helper (test doubles, custom backends). Preserves the
-        # old behaviour — racy on concurrent sweeps but correct for
-        # serial callers.
+        else:
+            if notification_id is None:
+                return {
+                    "outcome": "deduped",
+                    "task_id": event.task_id,
+                    "session": target_name,
+                    "execution_version": execution_version,
+                }
+
+    if notification_id is None and store is not None and throttle_seconds > 0:
+        # Legacy fallback for stores without the atomic claim helper, and for
+        # transient claim-helper failures. A failed claim must not masquerade
+        # as a dedupe hit — that silently drops the kickoff/resume ping.
         try:
             if store.was_notified_within(
                 target_name,

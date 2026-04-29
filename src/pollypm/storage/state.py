@@ -1560,6 +1560,7 @@ class StateStore:
         execution_version: int = 0,
         project: str = "",
         message: str = "",
+        dedupe_scope: str = "normal",
     ) -> int | None:
         """Atomically claim a dedupe slot for a ``(session, task, version)`` ping.
 
@@ -1574,8 +1575,12 @@ class StateStore:
         one atomic step:
 
         * If a row already exists within ``window_seconds`` for the
-          ``(session, task, execution_version)`` tuple, returns ``None``
-          (caller should treat as ``deduped``).
+          ``(session, task, execution_version, dedupe_scope)`` tuple,
+          returns ``None`` (caller should treat as ``deduped``).
+          Normal-scope claims match any recent scope so a successful
+          forced kickoff also throttles ordinary follow-up sweeps; scoped
+          claims only match the same scope so stale normal rows cannot
+          suppress the forced kickoff path.
         * Otherwise inserts a placeholder row with
           ``delivery_status="pending"`` and returns its rowid. The
           caller then attempts the send and updates the row's
@@ -1590,6 +1595,7 @@ class StateStore:
         """
         from datetime import timedelta
 
+        scope = (dedupe_scope or "normal").strip() or "normal"
         with self._lock:
             cutoff = (
                 datetime.now(UTC) - timedelta(seconds=window_seconds)
@@ -1601,6 +1607,12 @@ class StateStore:
                   AND scope = ?
                   AND sender = ?
                   AND COALESCE(json_extract(payload_json, '$.execution_version'), 0) = ?
+                  AND (
+                    ? = 'normal'
+                    OR
+                    (? != 'normal'
+                      AND json_extract(payload_json, '$.dedupe_scope') = ?)
+                  )
                   AND created_at >= ?
                 LIMIT 1
                 """,
@@ -1608,6 +1620,9 @@ class StateStore:
                     session_name,
                     task_id,
                     int(execution_version),
+                    scope,
+                    scope,
+                    scope,
                     cutoff,
                 ),
             ).fetchone()
@@ -1633,6 +1648,7 @@ class StateStore:
                             "project": project,
                             "delivery_status": "pending",
                             "execution_version": int(execution_version),
+                            "dedupe_scope": scope,
                         }
                     ),
                     now,
