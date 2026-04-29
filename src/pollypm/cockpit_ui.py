@@ -873,6 +873,7 @@ class PollyCockpitApp(App[None]):
             content_resolver=_CockpitRouteContentResolver(),
             window_manager=_CockpitRouteWindowApplier(self),
         )
+        self._route_status_hint: str | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -1523,6 +1524,10 @@ class PollyCockpitApp(App[None]):
         # wrapping. Anything beyond j/k/\u21b5/?/q is discoverable via the
         # ``?`` overlay (#790). Width budget is roughly 28 chars after
         # the leading pad applied by Textual.
+        route_status_hint = getattr(self, "_route_status_hint", None)
+        if route_status_hint:
+            self.hint.update(route_status_hint)
+            return
         if self._right_pane_has_live_session():
             hint_text = "Tab detail \u00b7 j/k \u00b7 ? help"
         else:
@@ -1676,7 +1681,8 @@ class PollyCockpitApp(App[None]):
         self._route_click_seq = seq
         try:
             display = label or key
-            self.hint.update(f"Connecting to {display}…"[:60])
+            self._route_status_hint = f"Connecting to {display}…"[:60]
+            self.hint.update(self._route_status_hint)
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -1778,6 +1784,7 @@ class PollyCockpitApp(App[None]):
             # ``project:x`` → ``project:x:dashboard``); re-sync.
             self.selected_key = resolved or key
             self._last_router_selected_key = resolved or key
+            self._route_status_hint = None
             try:
                 self.hint.update("")
             except Exception:  # noqa: BLE001
@@ -1806,8 +1813,9 @@ class PollyCockpitApp(App[None]):
         def _apply() -> None:
             if seq and seq != self._route_click_seq:
                 return
+            self._route_status_hint = message[:60]
             try:
-                self.hint.update(message[:60])
+                self.hint.update(self._route_status_hint)
             except Exception:  # noqa: BLE001
                 pass
             try:
