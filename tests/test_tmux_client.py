@@ -159,3 +159,162 @@ def test_run_check_true_still_raises_on_timeout(monkeypatch) -> None:
     except subprocess.TimeoutExpired:
         return
     raise AssertionError("expected TimeoutExpired to propagate when check=True")
+
+
+def test_create_window_two_phase_default_omits_command(monkeypatch) -> None:
+    """#963 — ``create_window`` opens an empty pane (no command) by default,
+    then sends the launch command via ``send-keys``. The user sees a
+    default shell prompt instantly and watches the command appear before
+    the agent CLI loads.
+    """
+    captured: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        captured.append(list(args))
+
+        class Result:
+            returncode = 0
+            stdout = "%42"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    client = TmuxClient()
+    # Bypass the has_session/list_windows pre-check so we exercise the
+    # creation path directly.
+    monkeypatch.setattr(client, "has_session", lambda name: False)
+
+    pane_id = client.create_window("storage", "task-foo-1", "claude --resume xyz")
+
+    assert pane_id == "%42"
+    # Two tmux invocations: new-window WITHOUT the command, then send-keys.
+    new_window = next(c for c in captured if "new-window" in c)
+    send_keys = next(c for c in captured if "send-keys" in c)
+    assert "claude --resume xyz" not in new_window, (
+        "new-window must not carry the launch command in two-phase mode"
+    )
+    assert "claude --resume xyz" in send_keys
+    assert "Enter" in send_keys
+
+
+def test_create_window_two_phase_false_inlines_command(monkeypatch) -> None:
+    """The legacy single-call form is preserved behind ``two_phase=False``
+    for callers that need it (none currently — but keeps the door open
+    for non-agent callers that want a pane scoped to a single command's
+    lifetime)."""
+    captured: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        captured.append(list(args))
+
+        class Result:
+            returncode = 0
+            stdout = "%7"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    client = TmuxClient()
+    monkeypatch.setattr(client, "has_session", lambda name: False)
+
+    client.create_window("storage", "win", "echo hi", two_phase=False)
+    new_window = next(c for c in captured if "new-window" in c)
+    assert "echo hi" in new_window
+    assert not any("send-keys" in c for c in captured)
+
+
+def test_create_session_two_phase_default_omits_command(monkeypatch) -> None:
+    """#963 — same two-phase guarantee on ``create_session``: new-session
+    opens an empty pane, then send-keys delivers the launch command."""
+    captured: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        captured.append(list(args))
+
+        class Result:
+            returncode = 0
+            stdout = "%9"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    client = TmuxClient()
+    monkeypatch.setattr(client, "has_session", lambda name: False)
+
+    pane_id = client.create_session("storage", "main", "codex --resume abc")
+
+    assert pane_id == "%9"
+    new_session = next(c for c in captured if "new-session" in c)
+    send_keys = next(c for c in captured if "send-keys" in c)
+    assert "codex --resume abc" not in new_session, (
+        "new-session must not carry the launch command in two-phase mode"
+    )
+    assert "codex --resume abc" in send_keys
+    assert "Enter" in send_keys
+    # send-keys should target the pane_id we just got back from new-session,
+    # not the session:window string — pane_ids are stable across renames.
+    assert "%9" in send_keys
+
+
+def test_create_session_two_phase_skips_send_when_session_exists(monkeypatch) -> None:
+    """The idempotency contract holds: if the session already exists,
+    ``create_session`` returns None and never sends keys."""
+    captured: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        captured.append(list(args))
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    client = TmuxClient()
+    monkeypatch.setattr(client, "has_session", lambda name: True)
+
+    result = client.create_session("storage", "main", "claude --resume xyz")
+    assert result is None
+    assert not any("send-keys" in c for c in captured)
+    assert not any("new-session" in c for c in captured)
+
+
+def test_create_window_two_phase_skips_send_when_window_exists(monkeypatch) -> None:
+    """If the window already exists, ``create_window`` is a no-op — no
+    new-window, no send-keys."""
+    from pollypm.tmux.client import TmuxWindow
+
+    captured: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        captured.append(list(args))
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    client = TmuxClient()
+    monkeypatch.setattr(client, "has_session", lambda name: True)
+    monkeypatch.setattr(
+        client,
+        "list_windows",
+        lambda name: [TmuxWindow(
+            session=name, index=0, name="task-foo-1", active=True,
+            pane_id="%5", pane_current_command="bash",
+            pane_current_path="/tmp", pane_dead=False,
+        )],
+    )
+
+    result = client.create_window("storage", "task-foo-1", "claude --resume xyz")
+    assert result is None
+    assert not any("send-keys" in c for c in captured)
+    assert not any("new-window" in c for c in captured)

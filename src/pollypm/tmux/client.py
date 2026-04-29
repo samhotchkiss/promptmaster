@@ -140,19 +140,55 @@ class TmuxClient:
             return None
         return result.stdout.strip() or None
 
-    def create_session(self, name: str, window_name: str, command: str, *, remain_on_exit: bool = True, history_limit: int | None = 500) -> str | None:
-        """Create a tmux session. Returns pane ID of the first window, or None if already exists."""
+    def create_session(
+        self,
+        name: str,
+        window_name: str,
+        command: str,
+        *,
+        remain_on_exit: bool = True,
+        history_limit: int | None = 500,
+        two_phase: bool = True,
+    ) -> str | None:
+        """Create a tmux session. Returns pane ID of the first window, or None if already exists.
+
+        When ``two_phase`` is True (default — issue #963), the session is
+        created with NO startup command — the pane materializes running the
+        user's default shell, returning ~instantly. The launch ``command``
+        is then sent via ``send-keys`` so the user sees the prompt → command
+        → command-running sequence. When False, the legacy single-call
+        ``new-session -d <command>`` form is used (kept for callers that
+        cannot tolerate a shell parent — currently none of the agent-session
+        paths).
+        """
         self._validate_name(name, "session name")
         self._validate_name(window_name, "window name")
         if self.has_session(name):
             logger.debug("Session %r already exists, skipping create", name)
             return None
-        result = self.run("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-n", window_name, command)
+        if two_phase:
+            # Phase 1: empty pane (default shell). Resolves immediately.
+            result = self.run(
+                "new-session", "-d", "-P", "-F", "#{pane_id}",
+                "-s", name, "-n", window_name,
+            )
+        else:
+            result = self.run(
+                "new-session", "-d", "-P", "-F", "#{pane_id}",
+                "-s", name, "-n", window_name, command,
+            )
         pane_id = result.stdout.strip()
         self.run("set-option", "-t", self._exact_target(f"{name}:"), "remain-on-exit", "on" if remain_on_exit else "off")
         if history_limit is not None:
             self.run("set-option", "-t", self._exact_target(f"{name}:"), "history-limit", str(history_limit))
-        return pane_id if pane_id.startswith("%") else None
+        resolved_pane = pane_id if pane_id.startswith("%") else None
+        if two_phase:
+            # Phase 2: send the launch command into the empty pane. Target
+            # by pane_id when available (stable across window moves); fall
+            # back to ``session:window`` otherwise.
+            target = resolved_pane or f"{name}:{window_name}"
+            self._send_launch_command(target, command)
+        return resolved_pane
 
     def new_session_attached(self, name: str, window_name: str, command: str) -> int:
         result = subprocess.run(
@@ -161,8 +197,21 @@ class TmuxClient:
         )
         return result.returncode
 
-    def create_window(self, name: str, window_name: str, command: str, *, detached: bool = False) -> str | None:
-        """Create a window in a session. Returns pane ID or None if already exists."""
+    def create_window(
+        self,
+        name: str,
+        window_name: str,
+        command: str,
+        *,
+        detached: bool = False,
+        two_phase: bool = True,
+    ) -> str | None:
+        """Create a window in a session. Returns pane ID or None if already exists.
+
+        When ``two_phase`` is True (default — issue #963), the window opens
+        empty (default shell) and the launch ``command`` is sent via
+        ``send-keys`` afterwards. See :meth:`create_session` for rationale.
+        """
         self._validate_name(window_name, "window name")
         # Check if window already exists in this session
         if self.has_session(name):
@@ -176,10 +225,37 @@ class TmuxClient:
         args = ["new-window", "-P", "-F", "#{pane_id}", "-t", self._exact_target(name), "-n", window_name]
         if detached:
             args.append("-d")
-        args.append(command)
+        if not two_phase:
+            args.append(command)
         result = self.run(*args)
         pane_id = result.stdout.strip()
-        return pane_id if pane_id.startswith("%") else None
+        resolved_pane = pane_id if pane_id.startswith("%") else None
+        if two_phase:
+            target = resolved_pane or f"{name}:{window_name}"
+            self._send_launch_command(target, command)
+        return resolved_pane
+
+    def _send_launch_command(self, target: str, command: str) -> None:
+        """Type a launch command into ``target`` and press Enter.
+
+        Used by the two-phase ``create_session`` / ``create_window`` flow
+        (#963) so newly created panes start as a default shell prompt and
+        only then receive the agent CLI command. Returns as soon as the
+        keys are queued — does NOT wait for the agent CLI to be ready.
+        """
+        if not command:
+            return
+        try:
+            resolved = self._exact_target(target)
+        except ValueError:
+            logger.warning("send_launch_command: invalid target %r", target)
+            return
+        # Use send-keys with the literal command followed by an explicit
+        # Enter. We avoid ``send_keys()`` here because that helper has a
+        # paste-buffer fast path for long text and a dead-pane probe; for
+        # a fresh empty pane we want the user to see the command typed in
+        # the input bar, then submitted.
+        self.run("send-keys", "-t", resolved, command, "Enter")
 
     def split_window(
         self,
