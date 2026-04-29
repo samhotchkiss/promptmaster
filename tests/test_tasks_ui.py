@@ -1311,6 +1311,25 @@ def test_task_app_leads_on_hold_feedback_with_paused_review_summary(
         node_id="code_review",
         title="Scraper infrastructure",
         status=WorkStatus.ON_HOLD,
+        executions=[
+            FlowNodeExecution(
+                task_id="demo/1",
+                node_id="code_review",
+                visit=1,
+                status=ExecutionStatus.COMPLETED,
+                decision=Decision.REJECTED,
+                decision_reason=(
+                    "Confidence: 6/10 — core is correct, but two gaps "
+                    "block approval:\n\n"
+                    "1. needs_real_browser not demonstrated via CLI. Fix: "
+                    "run python -m scraper.run --venue <id> through CDP and "
+                    "show scrape_runs status=ok.\n\n"
+                    "2. eventbrite_embed strategy not implemented. Fix: "
+                    "implement it or record explicit scope acknowledgment "
+                    "to defer it."
+                ),
+            ),
+        ],
     )
     feedback_task = _task(
         task_number=99,
@@ -1339,6 +1358,14 @@ def test_task_app_leads_on_hold_feedback_with_paused_review_summary(
 
             assert overview.index("In plain English") < overview.index("Status")
             assert "Review needed: this task is paused" in overview
+            assert (
+                'You are deciding whether to approve the latest submission '
+                'for "Scraper infrastructure".'
+            ) in overview
+            assert "Previously rejected for:" in overview
+            assert "needs_real_browser not demonstrated via CLI" in overview
+            assert "eventbrite_embed strategy not implemented" in overview
+            assert "What to approve: approve only if the latest submission fixes" in overview
             assert "Confidence: 6/10" in overview
 
     _run(body())

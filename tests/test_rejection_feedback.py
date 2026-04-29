@@ -74,6 +74,7 @@ def test_emit_rejection_feedback_creates_structured_inbox_item() -> None:
     assert "review_feedback" in spy.kwargs["labels"]
     assert "task:demo/7" in spy.kwargs["labels"]
     assert spy.kwargs["description"].splitlines()[0] == "Need better rollback coverage."
+    assert "And a guard for stale reads." in spy.kwargs["description"]
 
 
 def test_unread_rejection_feedback_returns_latest_unread_notice() -> None:
@@ -118,5 +119,6 @@ def test_unread_rejection_feedback_returns_latest_unread_notice() -> None:
     assert list(notices) == ["demo/7"]
     assert notices["demo/7"].inbox_task_id == "demo/81"
     assert notices["demo/7"].preview == "Newest reason"
+    assert notices["demo/7"].full_text == "Newest reason"
     assert is_rejection_feedback_task(newer) is True
     assert feedback_target_task_id(newer) == "demo/7"

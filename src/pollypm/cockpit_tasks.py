@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import re
 import subprocess
 import tomllib
 from dataclasses import dataclass
@@ -528,6 +529,46 @@ def _clip_plain_text(text: str, *, limit: int = 220) -> str:
     return clean[:cut].rstrip() + "…"
 
 
+def _decision_value(value: object) -> str:
+    return str(getattr(value, "value", value) or "").strip().lower()
+
+
+def _latest_rejection_reason(task) -> str:
+    for execution in reversed(list(getattr(task, "executions", None) or [])):
+        if _decision_value(getattr(execution, "decision", None)) != "rejected":
+            continue
+        reason = str(getattr(execution, "decision_reason", "") or "").strip()
+        if reason:
+            return reason
+    for transition in reversed(list(getattr(task, "transitions", None) or [])):
+        actor = str(getattr(transition, "actor", "") or "").strip().lower()
+        reason = str(getattr(transition, "reason", "") or "").strip()
+        if actor in {"reviewer", "russell"} and reason:
+            return reason
+    return ""
+
+
+def _rejection_reason_items(text: str, *, limit: int = 3) -> list[str]:
+    """Extract numbered rejection blockers from reviewer feedback."""
+    items: list[str] = []
+    current: list[str] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.match(r"^\d+[.)]\s+(.*)", line)
+        if match:
+            if current:
+                items.append(_clip_plain_text(" ".join(current), limit=260))
+            current = [match.group(1).strip()]
+            continue
+        if current:
+            current.append(line)
+    if current:
+        items.append(_clip_plain_text(" ".join(current), limit=260))
+    return items[:limit]
+
+
 def _review_plain_english_fallback(
     task,
     *,
@@ -544,23 +585,35 @@ def _review_plain_english_fallback(
     """
     if rejection_feedback is not None:
         preview = _clip_plain_text(rejection_feedback.preview, limit=220)
+        full_feedback = (
+            _latest_rejection_reason(task)
+            or getattr(rejection_feedback, "full_text", "")
+            or rejection_feedback.preview
+        )
+        blockers = _rejection_reason_items(full_feedback)
+        approving = (
+            f'You are deciding whether to approve the latest submission for "{task.title}".'
+        )
         reason = (
             "this task is paused because the last submission was rejected"
             if status_label == "on_hold"
             else "the last submission was rejected and needs your attention"
         )
-        if preview:
-            return (
-                f"Review needed: {reason}. Feedback: {preview}\n"
-                "What to do: approve only if those blockers are resolved; "
-                "otherwise reject with the specific remaining changes."
-            )
-        return (
-            f"Review needed: {reason}. Open the inbox feedback before "
-            "approving or sending it back.\n"
-            "What to do: approve only if the blockers are resolved; otherwise "
-            "reject with the specific remaining changes."
+        lines = [
+            f"Review needed: {reason}.",
+            approving,
+        ]
+        if blockers:
+            lines.append("Previously rejected for:")
+            lines.extend(f"- {item}" for item in blockers)
+        elif preview:
+            lines.append(f"Feedback: {preview}")
+        lines.append(
+            "What to approve: approve only if the latest submission fixes "
+            "the listed review blockers and still satisfies the task; "
+            "otherwise reject with the specific missing proof or change."
         )
+        return "\n".join(lines)
 
     if status_label == "user-review":
         if getattr(task, "flow_template_id", "") == "plan_project":

@@ -27,6 +27,7 @@ class RejectionFeedbackNotice:
     task_id: str
     inbox_task_id: str
     preview: str
+    full_text: str = ""
     created_at: object | None = None
 
 
@@ -35,9 +36,10 @@ def emit_rejection_feedback(work_service, *, task, reviewer: str, reason: str):
 
     reviewer_name = _reviewer_label(reviewer)
     preview = rejection_feedback_preview_from_reason(reason)
-    body = "\n".join(
+    full_reason = (reason or "").strip()
+    body_parts = [full_reason or preview]
+    body_parts.extend(
         [
-            preview,
             "",
             f"Task `{task.task_id}` was rejected by `{reviewer_name}` and returned to rework.",
             "",
@@ -47,6 +49,7 @@ def emit_rejection_feedback(work_service, *, task, reviewer: str, reason: str):
             "review the full rejection note before the worker continues.",
         ]
     )
+    body = "\n".join(body_parts)
     return work_service.create(
         title=f"Rejected {task.task_id} — {getattr(task, 'title', '') or 'Untitled task'}",
         description=body,
@@ -80,6 +83,7 @@ def unread_rejection_feedback(service, *, project: str | None = None) -> dict[st
             task_id=target_task_id,
             inbox_task_id=task.task_id,
             preview=rejection_feedback_preview(task),
+            full_text=rejection_feedback_text(task),
             created_at=getattr(task, "updated_at", None) or getattr(task, "created_at", None),
         )
         current = notices.get(target_task_id)
@@ -120,6 +124,18 @@ def rejection_feedback_preview(task) -> str:
     if " — " in title:
         return title.split(" — ", 1)[1].strip() or title
     return title or "Rejected — feedback in inbox"
+
+
+def rejection_feedback_text(task) -> str:
+    """Full best-effort rejection feedback text for detailed UI summaries."""
+
+    description = (getattr(task, "description", "") or "").strip()
+    if description:
+        return description
+    title = (getattr(task, "title", "") or "").strip()
+    if title:
+        return title
+    return "Rejected — feedback in inbox"
 
 
 def rejection_feedback_preview_from_reason(reason: str) -> str:
@@ -175,5 +191,6 @@ __all__ = [
     "is_rejection_feedback_task",
     "rejection_feedback_preview",
     "rejection_feedback_preview_from_reason",
+    "rejection_feedback_text",
     "unread_rejection_feedback",
 ]
