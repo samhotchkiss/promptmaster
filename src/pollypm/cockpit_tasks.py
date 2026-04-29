@@ -19,7 +19,6 @@ from textual.widgets import Button, DataTable, Input, Static, TabbedContent, Tab
 from pollypm.approval_notifications import notify_task_approved
 from pollypm.cockpit_interaction import (
     ActionKind,
-    BindingScope,
     CockpitBinding,
     FocusKind,
     REGISTRY as _COCKPIT_INTERACTION_REGISTRY,
@@ -512,6 +511,97 @@ def _plain_english_summary(task) -> str | None:
     return None
 
 
+def _plain_line(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return " ".join(part.strip() for part in text.splitlines() if part.strip())
+
+
+def _clip_plain_text(text: str, *, limit: int = 220) -> str:
+    clean = _plain_line(text)
+    if len(clean) <= limit:
+        return clean
+    cut = clean.rfind(" ", 0, limit)
+    if cut <= 0 or cut < limit - 40:
+        cut = limit - 1
+    return clean[:cut].rstrip() + "…"
+
+
+def _review_plain_english_fallback(
+    task,
+    *,
+    status_label: str,
+    owner: str | None,
+    rejection_feedback: RejectionFeedbackNotice | None,
+) -> str | None:
+    """Generate a short top-of-pane summary when no stored summary exists.
+
+    Review/on-hold tasks are exactly where the user needs a plain-language
+    first read. If the worker/reviewer did not persist a `plain_summary`
+    context entry, synthesize the minimum useful summary from current state
+    and any linked rejection-feedback artifact.
+    """
+    if rejection_feedback is not None:
+        preview = _clip_plain_text(rejection_feedback.preview, limit=220)
+        reason = (
+            "this task is paused because the last submission was rejected"
+            if status_label == "on_hold"
+            else "the last submission was rejected and needs your attention"
+        )
+        if preview:
+            return (
+                f"Review needed: {reason}. Feedback: {preview}\n"
+                "What to do: approve only if those blockers are resolved; "
+                "otherwise reject with the specific remaining changes."
+            )
+        return (
+            f"Review needed: {reason}. Open the inbox feedback before "
+            "approving or sending it back.\n"
+            "What to do: approve only if the blockers are resolved; otherwise "
+            "reject with the specific remaining changes."
+        )
+
+    if status_label == "user-review":
+        if getattr(task, "flow_template_id", "") == "plan_project":
+            return (
+                "Review needed: the project plan is waiting for your "
+                "approval. Read the Review tab, then approve it or reject "
+                "with the changes you need.\n"
+                "What to do: approve if the plan is ready to become work; "
+                "otherwise reject with the concrete changes needed."
+            )
+        return (
+            "Review needed: this task is waiting for your approval. Check "
+            "the Review tab or artifact, then approve it or reject with the "
+            "changes you need.\n"
+            "What to do: approve if the submitted work meets the task; "
+            "otherwise reject with the concrete changes needed."
+        )
+
+    if status_label == "review":
+        return (
+            "Review needed: this task is parked in review. Decide whether "
+            "the submitted work is acceptable or send it back with specific "
+            "changes."
+        )
+
+    if status_label == "on_hold":
+        return (
+            "Action needed: this task is on hold. Read the blocker below, "
+            "then decide whether to resume it, approve it, or send it back."
+        )
+
+    if status_label == "autoreview":
+        reviewer = owner or "the reviewer"
+        return (
+            f"Review in progress: {reviewer} is checking this task. You do "
+            "not need to act unless it is rejected or asks for approval."
+        )
+
+    return None
+
+
 def _status_label(
     task,
     owner: str | None,
@@ -585,7 +675,12 @@ def _render_overview(
     # Plain-English takeaway first — before any of the technical
     # metadata — so a human reviewer doesn't have to decode the
     # description to know what's actually happening.
-    summary = _plain_english_summary(task)
+    summary = _plain_english_summary(task) or _review_plain_english_fallback(
+        task,
+        status_label=status_label,
+        owner=owner,
+        rejection_feedback=rejection_feedback,
+    )
     if summary:
         lines.extend([
             "",

@@ -1253,9 +1253,93 @@ def test_task_app_surfaces_unread_rejection_feedback(env, monkeypatch) -> None:
             assert rows[0][4] == "synthesize"
             assert "in_progress" in header
             assert "Unread rejection feedback in inbox" in header
+            assert overview.index("In plain English") < overview.index("Status")
+            assert "Review needed: the last submission was rejected" in overview
+            assert "Feedback: Need better rollback coverage." in overview
             assert "Inbox Feedback" in overview
             assert "Artifact   Unread rejection feedback (demo/99)" in overview
             assert "Need better rollback coverage." in overview
+
+    _run(body())
+
+
+def test_task_app_leads_user_review_with_plain_language_summary(
+    env, monkeypatch,
+) -> None:
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    review_task = _task(
+        node_id="critic_panel",
+        title="Review Notesy plan",
+        status=WorkStatus.REVIEW,
+    )
+    fake_svc = _FakeSvc(
+        tasks_factory=lambda: [review_task],
+        flow=_flow(),
+        owner_by_id={"demo/1": "human"},
+    )
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            header = str(app.query_one("#task-header", Static).render())
+            overview = str(app.query_one("#task-detail", Static).render())
+
+            assert "user-review" in header
+            assert overview.index("In plain English") < overview.index("Status")
+            assert "Review needed: the project plan is waiting" in overview
+            assert "approve it or reject with the changes you need" in overview
+
+    _run(body())
+
+
+def test_task_app_leads_on_hold_feedback_with_paused_review_summary(
+    env, monkeypatch,
+) -> None:
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    work_task = _task(
+        node_id="code_review",
+        title="Scraper infrastructure",
+        status=WorkStatus.ON_HOLD,
+    )
+    feedback_task = _task(
+        task_number=99,
+        node_id="chat",
+        title="Rejected demo/1 — Scraper infrastructure",
+        flow_template_id="chat",
+        labels=["review_feedback", "task:demo/1", "project:demo"],
+        description=(
+            "Confidence: 6/10 — core is correct, but two gaps block approval."
+        ),
+    )
+    fake_svc = _FakeSvc(
+        tasks_factory=lambda: [work_task, feedback_task],
+        flow=_flow(),
+    )
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            overview = str(app.query_one("#task-detail", Static).render())
+
+            assert overview.index("In plain English") < overview.index("Status")
+            assert "Review needed: this task is paused" in overview
+            assert "Confidence: 6/10" in overview
 
     _run(body())
 

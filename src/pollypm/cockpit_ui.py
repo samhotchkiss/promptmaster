@@ -102,6 +102,9 @@ from pollypm.cockpit_palette import (  # noqa: F401  (re-exported)
 from pollypm.cockpit_project_settings import PollyProjectSettingsApp  # noqa: F401
 from pollypm.cockpit_sections.action_bar import render_project_action_bar
 from pollypm.cockpit_settings_accounts import SETTINGS_ACCOUNT_ACTIONS
+from pollypm.plugins_builtin.project_planning.plan_presence import (
+    CANONICAL_PLAN_RELATIVE_PATHS as _PLAN_FILE_CANDIDATES,
+)
 from pollypm.cockpit_settings_history import (
     UndoAction,
     consume_settings_history,
@@ -806,8 +809,10 @@ class PollyCockpitApp(App[None]):
         # Failures here are non-fatal — the TUI still works, just
         # without autonomous sweeps. See issue #268 Gap A.
         self._start_core_rail()
-        # Live alert toasts — non-intrusive bottom-right overlay.
-        _setup_alert_notifier(self, bind_a=True)
+        # Do not mount alert toasts in the 30-column rail. Even compact
+        # action alerts wrap into unreadable, cut-off cards there; the rail
+        # already shows alert badges and keeps `a` bound to the alert view.
+        # Wider detail panes still attach `_setup_alert_notifier`.
         self.call_after_refresh(self._show_palette_tip_once)
 
     def action_view_alerts(self) -> None:
@@ -7952,10 +7957,6 @@ def _escape_body(s: str) -> str:
 # via ``PollyCockpitPaneApp``.
 # ---------------------------------------------------------------------------
 
-
-from pollypm.plugins_builtin.project_planning.plan_presence import (
-    CANONICAL_PLAN_RELATIVE_PATHS as _PLAN_FILE_CANDIDATES,
-)
 
 # Candidate locations for the plan-review HTML explainer; first hit wins.
 _PLAN_EXPLAINER_CANDIDATES_FMT: tuple[str, ...] = (
