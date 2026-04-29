@@ -406,10 +406,16 @@ def _project_rows(ctx: RailContext) -> list[RailRow]:
                 label="  Dashboard",
                 state="sub",
             ))
-            persona = getattr(project, "persona_name", None) or "Polly"
+            persona_raw = getattr(project, "persona_name", None)
+            persona = (
+                persona_raw.strip()
+                if isinstance(persona_raw, str) and persona_raw.strip()
+                else None
+            )
+            label = f"  PM Chat ({persona})" if persona else "  PM Chat"
             rows.append(RailRow(
                 key=f"project:{project_key}:session",
-                label=f"  PM Chat ({persona})",
+                label=label,
                 state="sub",
             ))
             rows.append(RailRow(

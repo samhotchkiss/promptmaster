@@ -641,14 +641,13 @@ def _run(coro) -> None:
 
 
 def test_topbar_renders_name_and_default_pm(dashboard_env, dashboard_app) -> None:
-    """With no persona configured the top bar falls back to ``PM: Polly``."""
+    """With no persona configured the top bar uses a neutral PM label."""
     async def body() -> None:
         async with dashboard_app.run_test(size=(140, 50)) as pilot:
             await pilot.pause()
             topbar_text = str(dashboard_app.topbar.render())
             assert "Demo" in topbar_text
-            # Fallback persona because the fixture wrote no ``persona_name``.
-            assert "PM: Polly" in topbar_text
+            assert "PM: Project PM" in topbar_text
     _run(body())
 
 
@@ -3148,12 +3147,15 @@ def test_c_keybinding_dispatches_to_pm(dashboard_env, dashboard_app) -> None:
             # drive the worker body directly so the assertion is deterministic.
             if not calls:
                 dashboard_app._dispatch_to_pm_sync(
-                    "polly", 're: project/demo "dashboard discussion"', "Polly",
+                    "project:demo:session",
+                    're: project/demo "dashboard discussion"',
+                    "Project PM",
                 )
             assert calls, "expected _perform_pm_dispatch to be called"
             cockpit_key, context_line = calls[-1]
-            # No persona configured on the fixture → fall back to Polly.
-            assert cockpit_key == "polly"
+            # No persona configured on the fixture, but the project still has
+            # its own PM Chat route.
+            assert cockpit_key == "project:demo:session"
             assert "project/demo" in context_line
     _run(body())
 
