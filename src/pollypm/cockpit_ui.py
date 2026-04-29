@@ -5467,8 +5467,10 @@ def _resolve_pm_target(config_path: Path, project_key: str | None) -> tuple[str,
 
     * Project has a ``persona_name`` configured → dispatch to its PM Chat
       window (``project:<key>:session``) and surface the persona name.
-    * Otherwise (including ``project_key`` being empty or absent from
-      the config) → fall back to Polly (``polly`` → operator session).
+    * Project exists without a persona → dispatch to its PM Chat and
+      surface a neutral project-PM label.
+    * Empty or absent project keys still fall back to Polly's workspace
+      operator session.
     """
     fallback_key = "polly"
     fallback_name = "Polly"
@@ -5485,7 +5487,7 @@ def _resolve_pm_target(config_path: Path, project_key: str | None) -> tuple[str,
     persona = getattr(project, "persona_name", None)
     if isinstance(persona, str) and persona.strip():
         return f"project:{project_key}:session", persona.strip()
-    return fallback_key, fallback_name
+    return f"project:{project_key}:session", "Project PM"
 
 
 def _build_pm_context_line(
@@ -10411,7 +10413,11 @@ def _gather_project_dashboard(
         else (getattr(project, "name", None) or project_key)
     )
     persona = getattr(project, "persona_name", None)
-    pm_label = f"PM: {persona}" if (isinstance(persona, str) and persona.strip()) else "PM: Polly"
+    pm_label = (
+        f"PM: {persona.strip()}"
+        if isinstance(persona, str) and persona.strip()
+        else "PM: Project PM"
+    )
 
     exists_on_disk = bool(
         project_path is not None

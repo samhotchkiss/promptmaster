@@ -1454,6 +1454,92 @@ def test_create_worker_and_route_targets_pm_chat_session_when_worker_exists() ->
     assert routed == ["project:demo:session"], routed
 
 
+def test_create_worker_and_route_mounts_new_worker_before_stabilizing() -> None:
+    """Fresh PM Chat creation should stabilize the pane that gets mounted.
+
+    Stabilizing by ``storage:window-name`` after a join races with tmux
+    because the storage window disappears once its pane moves into the
+    cockpit. Pane ids survive the join and keep the bootstrap attached to
+    the visible right pane.
+    """
+    calls: list[tuple[str, object]] = []
+
+    class _FakeSession:
+        name = "worker_demo"
+        role = "worker"
+        project = "demo"
+
+    class _FakeLaunch:
+        session = _FakeSession()
+        window_name = "worker-demo"
+
+    class _FakeSupervisor:
+        class _Config:
+            class _Project:
+                tmux_session = "pollypm"
+
+            project = _Project()
+
+        config = _Config()
+
+        def __init__(self, launches) -> None:
+            self._launches = launches
+
+        def plan_launches(self):
+            return list(self._launches)
+
+        def storage_closet_session_name(self) -> str:
+            return "pollypm-storage-closet"
+
+        def stabilize_launch(self, launch, target, on_status=None):  # noqa: ARG002
+            calls.append(("stabilize", target))
+
+    class _FakeTmux:
+        def list_windows(self, target: str):  # noqa: ARG002
+            return [SimpleNamespace(name="worker-demo", index=7, pane_id="%worker")]
+
+    class _FakeService:
+        def suggest_worker_prompt(self, *, project_key: str) -> str:  # noqa: ARG002
+            return ""
+
+        def create_and_launch_worker(self, **kwargs) -> None:
+            calls.append(("create", kwargs["project_key"]))
+
+    empty_supervisor = _FakeSupervisor([])
+    fresh_supervisor = _FakeSupervisor([_FakeLaunch()])
+    router = CockpitRouter.__new__(CockpitRouter)
+    router.tmux = _FakeTmux()
+    router.service = _FakeService()
+    router._load_supervisor = (  # type: ignore[assignment]
+        lambda fresh=False: fresh_supervisor if fresh else empty_supervisor
+    )
+    router._begin_layout_mutation = lambda: "token"  # type: ignore[assignment]
+    router._end_layout_mutation = (  # type: ignore[assignment]
+        lambda token: calls.append(("end", token))
+    )
+    router.ensure_cockpit_layout = (  # type: ignore[assignment]
+        lambda: calls.append(("ensure", None))
+    )
+    router.set_selected_key = (  # type: ignore[assignment]
+        lambda key: calls.append(("selected", key))
+    )
+    router._show_live_session = (  # type: ignore[assignment]
+        lambda supervisor, session_name, target: calls.append(("mount", session_name))
+    )
+    router._right_pane_id = lambda target: "%worker"  # type: ignore[assignment]
+    router._maybe_prime_project_pm_session = (  # type: ignore[assignment]
+        lambda *args: calls.append(("prime", args[2]))
+    )
+
+    router.create_worker_and_route("demo")
+
+    assert ("create", "demo") in calls
+    assert ("selected", "project:demo:session") in calls
+    assert ("mount", "worker_demo") in calls
+    assert ("stabilize", "%worker") in calls
+    assert ("prime", "worker_demo") in calls
+
+
 def test_create_worker_and_route_falls_back_to_project_dashboard_without_session() -> None:
     """If worker creation truly produces no session (launch failure,
     config gap), fall back to the project Dashboard so the cockpit
@@ -1488,6 +1574,41 @@ def test_create_worker_and_route_falls_back_to_project_dashboard_without_session
     router.create_worker_and_route("ghost")
 
     assert routed == ["project:ghost"], routed
+
+
+def test_missing_worker_pm_chat_route_creates_worker_from_modular_plan() -> None:
+    from pollypm.cockpit_content import FallbackPane, TextualCommandPane
+
+    calls: list[tuple[str, str]] = []
+    fallback = TextualCommandPane(
+        route_key="project:demo:session",
+        selected_key="project:demo:dashboard",
+        pane_kind="project",
+        command_args=("cockpit-pane", "project", "demo"),
+        project_key="demo",
+    )
+    plan = FallbackPane(
+        route_key="project:demo:session",
+        selected_key="project:demo:dashboard",
+        reason="missing_worker",
+        message="missing",
+        fallback=fallback,
+    )
+    router = CockpitRouter.__new__(CockpitRouter)
+    router.set_selected_key = lambda key: calls.append(("selected", key))  # type: ignore[assignment]
+    router.create_worker_and_route = (  # type: ignore[assignment]
+        lambda project_key: calls.append(("create", project_key))
+    )
+    router._show_static_view = (  # type: ignore[assignment]
+        lambda *args, **kwargs: calls.append(("static", "called"))
+    )
+
+    router._route_content_plan(SimpleNamespace(), "pollypm:PollyPM", plan)
+
+    assert calls == [
+        ("selected", "project:demo:session"),
+        ("create", "demo"),
+    ]
 
 
 def test_rail_listview_swallows_value_error_for_orphan_clicks() -> None:

@@ -1321,12 +1321,16 @@ def test_d_key_dispatches_to_pm_with_context_line(inbox_env, inbox_app) -> None:
             # Fallback: drive the worker directly if the thread scheduler
             # didn't land inside the pilot pause budget.
             if not calls:
-                inbox_app._dispatch_to_pm_sync("polly", f're: inbox/{task_id} "stub"', "Polly")
+                inbox_app._dispatch_to_pm_sync(
+                    "project:demo:session",
+                    f're: inbox/{task_id} "stub"',
+                    "Project PM",
+                )
 
             assert calls, "expected _perform_pm_dispatch to be called"
             cockpit_key, context_line = calls[-1]
-            # Project has no persona → falls back to Polly.
-            assert cockpit_key == "polly"
+            # Project has no persona, but still routes to the project PM Chat.
+            assert cockpit_key == "project:demo:session"
             assert context_line.startswith(f're: inbox/{task_id} ')
             assert '"' in context_line
     _run(body())
@@ -1736,7 +1740,7 @@ def test_inbox_detail_includes_inline_review_artifact(tmp_path: Path) -> None:
                 f"expected review-artifact section; got {detail_text!r}"
             )
             assert "Ship the inbox review surface." in detail_text, (
-                f"plan body missing from rendered inbox detail"
+                "plan body missing from rendered inbox detail"
             )
 
     _run(body())

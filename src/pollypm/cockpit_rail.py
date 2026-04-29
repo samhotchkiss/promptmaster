@@ -420,7 +420,12 @@ def _build_project_pm_primer(supervisor, project_key: str) -> str | None:
     project = supervisor.config.projects.get(project_key)
     if project is None:
         return None
-    persona = getattr(project, "persona_name", None) or "Polly"
+    persona_raw = getattr(project, "persona_name", None)
+    persona = (
+        persona_raw.strip()
+        if isinstance(persona_raw, str) and persona_raw.strip()
+        else None
+    )
     project_name = project.name or project_key
     project_path = str(project.path)
 
@@ -478,10 +483,21 @@ def _build_project_pm_primer(supervisor, project_key: str) -> str | None:
     except Exception:  # noqa: BLE001 — primer is best-effort
         pass
 
+    if persona is not None:
+        identity_line = (
+            f"You are {persona}, the PM for project '{project_name}' "
+            f"(key: {project_key}). Re-anchor on this identity for the "
+            "rest of this session."
+        )
+    else:
+        identity_line = (
+            f"You are the PM for project '{project_name}' "
+            f"(key: {project_key}). Re-anchor on this project identity "
+            "for the rest of this session."
+        )
+
     lines = [
-        f"You are {persona}, the PM for project '{project_name}' "
-        f"(key: {project_key}). Re-anchor on this identity for the "
-        "rest of this session.",
+        identity_line,
         f"Project root: {project_path}",
         (
             f"Tasks: {queued} queued, {in_progress} in progress, "
@@ -2197,6 +2213,14 @@ class CockpitRouter:
         the still-existing tmux applicators keep live behavior stable.
         """
         if isinstance(plan, FallbackPane):
+            if (
+                plan.reason == "missing_worker"
+                and plan.fallback.project_key is not None
+                and plan.route_key == f"project:{plan.fallback.project_key}:session"
+            ):
+                self.set_selected_key(plan.route_key)
+                self.create_worker_and_route(plan.fallback.project_key)
+                return
             self.set_selected_key(plan.selected_key)
             self._route_content_plan(supervisor, window_target, plan.fallback)
             return
@@ -2425,6 +2449,8 @@ class CockpitRouter:
         storage_windows = {w.name for w in self.tmux.list_windows(storage_session)}
 
         target: str | None = None
+        launch = None
+        should_stabilize_visible = False
         if session_name is not None:
             launch = next(
                 item for item in launches
@@ -2432,6 +2458,8 @@ class CockpitRouter:
             )
             if launch.window_name not in storage_windows:
                 _launch, target = supervisor.create_session_window(session_name, on_status=on_status)
+                launch = _launch
+                should_stabilize_visible = target is not None
         else:
             prompt = self.service.suggest_worker_prompt(project_key=project_key)
             self.service.create_and_launch_worker(
@@ -2446,12 +2474,21 @@ class CockpitRouter:
                     item for item in launches
                     if item.session.name == session_name
                 )
-                tmux_session = supervisor.tmux_session_for_launch(launch)
-                window_map = supervisor.window_map()
-                if launch.window_name in window_map:
-                    target_key = f"{tmux_session}:{launch.window_name}"
-                    # Window exists but hasn't been stabilized yet
-                    target = target_key
+                target_window = next(
+                    (
+                        window for window in self.tmux.list_windows(storage_session)
+                        if window.name == launch.window_name
+                    ),
+                    None,
+                )
+                if target_window is not None:
+                    source_pane_id = getattr(target_window, "pane_id", None)
+                    target = (
+                        source_pane_id
+                        if isinstance(source_pane_id, str) and source_pane_id
+                        else f"{storage_session}:{target_window.index}.0"
+                    )
+                    should_stabilize_visible = True
 
         # #964 — route to the project's PM Chat session when a worker is
         # known to exist (either pre-existing or freshly spawned above).
@@ -2463,17 +2500,50 @@ class CockpitRouter:
         # diagnoses the launch failure rather than surfacing a blank
         # right pane.
         if session_name is not None:
+            if should_stabilize_visible and launch is not None:
+                self._mount_created_worker_and_stabilize(
+                    supervisor,
+                    project_key=project_key,
+                    session_name=session_name,
+                    launch=launch,
+                    target=target,
+                    on_status=on_status,
+                )
+                return
             self.route_selected(f"project:{project_key}:session")
         else:
             self.route_selected(f"project:{project_key}")
 
-        # Stabilize in the background (dismisses prompts, waits for ready)
-        if target is not None and session_name is not None:
-            launch = next(
-                item for item in supervisor.plan_launches()
-                if item.session.name == session_name
+    def _mount_created_worker_and_stabilize(
+        self,
+        supervisor,
+        *,
+        project_key: str,
+        session_name: str,
+        launch,
+        target: str | None,
+        on_status: Callable[[str], None] | None = None,
+    ) -> None:
+        token = self._begin_layout_mutation()
+        try:
+            tmux_session = supervisor.config.project.tmux_session
+            window_target = f"{tmux_session}:{self._COCKPIT_WINDOW}"
+            self.ensure_cockpit_layout()
+            self.set_selected_key(f"project:{project_key}:session")
+            self._show_live_session(supervisor, session_name, window_target)
+            right_pane_id = self._right_pane_id(window_target)
+            stabilize_target = (
+                target
+                if isinstance(target, str) and target.startswith("%")
+                else right_pane_id
             )
-            supervisor.stabilize_launch(launch, target, on_status=on_status)
+            if stabilize_target is not None:
+                supervisor.stabilize_launch(launch, stabilize_target, on_status=on_status)
+            self._maybe_prime_project_pm_session(
+                supervisor, project_key, session_name, window_target,
+            )
+        finally:
+            self._end_layout_mutation(token)
 
     def _maybe_prime_operator_session(
         self,
