@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from textual.app import App, ComposeResult
+from textual.widgets import ListView
 
 from pollypm.cockpit import build_cockpit_detail
 from pollypm.cockpit_project_state import ProjectRailState, ProjectStateRollup
@@ -665,6 +667,113 @@ def test_cockpit_ui_rail_item_indicator_combines_pulse_and_work_glyph(monkeypatc
     assert exited._indicator()[0] == "♡✕"
 
 
+def test_cockpit_ui_project_row_hides_activity_sparkline() -> None:
+    cockpit_item = CockpitItem(
+        "project:booktalk",
+        "booktalk ········█·",
+        "unread",
+    )
+
+    class _RailTestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            with ListView(id="nav"):
+                yield RailItem(cockpit_item, active_view=False)
+
+    async def exercise() -> None:
+        app = _RailTestApp()
+        async with app.run_test(size=(40, 10)) as pilot:
+            await pilot.pause()
+            item = app.query_one(RailItem)
+            rendered = item.body.render()
+            plain = getattr(rendered, "plain", str(rendered))
+
+            assert "booktalk" in plain
+            assert "█" not in plain
+            assert "··" not in plain
+            assert "●" not in plain
+            assert "•" in plain
+
+    asyncio.run(exercise())
+
+
+def test_cockpit_raw_rail_project_row_hides_activity_sparkline() -> None:
+    rail = PollyCockpitRail.__new__(PollyCockpitRail)
+    rail.selected_key = "polly"
+    rail.spinner_index = 0
+
+    row = rail._item_row(
+        CockpitItem(
+            "project:booktalk",
+            "booktalk ········█·",
+            "unread",
+        ),
+        width=30,
+        active_view="polly",
+    )
+
+    assert "booktalk" in row.text
+    assert "█" not in row.text
+    assert "··" not in row.text
+    assert "●" not in row.text
+    assert "•" in row.text
+
+
+def test_cockpit_raw_rail_project_rollup_status_uses_indicator_not_label() -> None:
+    rail = PollyCockpitRail.__new__(PollyCockpitRail)
+    rail.selected_key = "polly"
+    rail.spinner_index = 0
+
+    row = rail._item_row(
+        CockpitItem(
+            "project:booktalk",
+            "booktalk",
+            "project-yellow",
+            session_name="worker_booktalk",
+            work_state="idle",
+            heartbeat_at="2026-04-21T23:00:00+00:00",
+        ),
+        width=30,
+        active_view="polly",
+    )
+
+    assert "booktalk" in row.text
+    assert "🟡" not in row.text
+    assert "⚙" not in row.text
+    assert "•" in row.text
+    assert "♡" not in row.text
+
+
+def test_cockpit_ui_project_rollup_status_uses_indicator_not_label() -> None:
+    cockpit_item = CockpitItem(
+        "project:booktalk",
+        "booktalk",
+        "project-yellow",
+        session_name="worker_booktalk",
+        work_state="idle",
+        heartbeat_at="2026-04-21T23:00:00+00:00",
+    )
+
+    class _RailTestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            with ListView(id="nav"):
+                yield RailItem(cockpit_item, active_view=False)
+
+    async def exercise() -> None:
+        app = _RailTestApp()
+        async with app.run_test(size=(40, 10)) as pilot:
+            await pilot.pause()
+            item = app.query_one(RailItem)
+            rendered = item.body.render()
+            plain = getattr(rendered, "plain", str(rendered))
+
+            assert "booktalk" in plain
+            assert "🟡" not in plain
+            assert "⚙" not in plain
+            assert "•" in plain
+
+    asyncio.run(exercise())
+
+
 def test_cockpit_rail_session_indicator_combines_pulse_and_work_glyph(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "pollypm.toml"
     config_path.write_text(
@@ -955,8 +1064,8 @@ def test_cockpit_router_caches_hidden_collapsed_and_grouped_registrations(monkey
 
 def test_strip_trailing_spark_detects_decorated_project_row() -> None:
     """Project rows are decorated as ``<emoji>? <name> <10-char-spark>``.
-    The truncator uses ``_strip_trailing_spark`` to keep the spark
-    visible when the row is narrow.
+    Compact rail renderers use ``_strip_trailing_spark`` to show the
+    project name without the sparkline.
     """
     from pollypm.cockpit_rail import _strip_trailing_spark
 
@@ -980,6 +1089,16 @@ def test_strip_trailing_spark_detects_decorated_project_row() -> None:
     # Short label → no match.
     head, spark = _strip_trailing_spark("X")
     assert spark == ""
+
+
+def test_format_event_ticker_never_leaves_dangling_separator() -> None:
+    from pollypm.cockpit_rail import _format_event_ticker
+
+    ticker = _format_event_ticker(["deploy complete", "review", "commit"])
+
+    assert ticker == "events · deploy complete"
+    assert len(ticker) <= 28
+    assert not ticker.endswith(" ·")
 
 
 def test_project_activity_sparkline_uses_dots_for_inline_zero_buckets() -> None:
@@ -1102,7 +1221,7 @@ def test_cockpit_router_decorates_project_items_with_sparkline_and_pin() -> None
     assert decorated[-1].key == "system"
 
 
-def test_cockpit_router_decorates_and_sorts_project_rollup_badges() -> None:
+def test_cockpit_router_decorates_and_sorts_project_rollup_status() -> None:
     router = CockpitRouter.__new__(CockpitRouter)
     router.is_project_pinned = lambda key: key == "alpha"  # type: ignore[assignment]
     router.pinned_projects = lambda: ["alpha"]  # type: ignore[assignment]
@@ -1135,9 +1254,12 @@ def test_cockpit_router_decorates_and_sorts_project_rollup_badges() -> None:
         "project:gamma",
         "project:alpha",
     ]
-    assert decorated[0].label.startswith("🔴 Delta")
-    assert decorated[1].label.startswith("🟡 Beta")
-    assert decorated[2].label.startswith("⚙️ Gamma")
+    assert decorated[0].label == "Delta"
+    assert decorated[0].state == "project-red"
+    assert decorated[1].label == "Beta"
+    assert decorated[1].state == "project-yellow"
+    assert decorated[2].label == "Gamma"
+    assert decorated[2].state == "project-working"
     assert decorated[3].label.startswith("📌 Alpha")
 
 
@@ -3386,7 +3508,7 @@ def test_cockpit_app_tick_scheduler_is_noop(tmp_path: Path) -> None:
     app._tick_scheduler()  # should not raise or do anything
 
 
-def test_cockpit_app_shows_palette_tip_on_first_launch(monkeypatch, tmp_path: Path) -> None:
+def test_cockpit_app_marks_palette_tip_seen_without_rail_overlay(monkeypatch, tmp_path: Path) -> None:
     class FakeRouter:
         def __init__(self) -> None:
             self.calls: list[str] = []
@@ -3432,7 +3554,7 @@ def test_cockpit_app_shows_palette_tip_on_first_launch(monkeypatch, tmp_path: Pa
 
     asyncio.run(exercise())
 
-    assert notices == [("Tip: press `:` to open the command palette.", 10.0)]
+    assert notices == []
     assert app.router.marked == 1
 
 

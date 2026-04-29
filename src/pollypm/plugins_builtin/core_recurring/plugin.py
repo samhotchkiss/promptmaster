@@ -182,7 +182,7 @@ def events_retention_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
 
             if total > 0:
                 try:
-                    msg_store.append_event(
+                    msg_store.record_event(
                         scope="system",
                         sender="system",
                         subject="events.retention_sweep",

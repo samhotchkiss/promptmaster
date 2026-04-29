@@ -44,6 +44,7 @@ from pollypm.cockpit_rail_routes import (
     resolve_static_view_route,
 )
 from pollypm.cockpit_project_state import (
+    ProjectRailState,
     ProjectStateRollup,
     actionable_alert_task_ids,
     rollup_project_state,
@@ -94,20 +95,20 @@ ARC_SPINNER = ("◜", "◝", "◞", "◟")
 
 # Glyphs the activity-sparkline helper emits — the eight block heights
 # from ``_spark_bar`` plus the U+00B7 dot we substitute for in-line
-# zero buckets. Used by the rail row truncator to detect a trailing
-# spark line so it can prefer truncating the project name over
-# clobbering activity signal.
+# zero buckets. Used by rail renderers to detect and remove a trailing
+# sparkline from compact project rows.
 _SPARK_GLYPHS = frozenset("·▁▂▃▄▅▆▇█ ")
+_RAIL_TICKER_TEXT_WIDTH = 28
 
 
 def _strip_trailing_spark(label: str) -> tuple[str, str]:
     """Return ``(head, spark)`` if ``label`` ends with a 10-char activity
     sparkline preceded by a space; otherwise ``(label, "")``.
 
-    The rail decorates project rows with a fixed-width activity spark
-    (``_project_activity_sparkline``) at the tail of the label. This
-    helper lets the row truncator preserve that spark when the row is
-    too narrow, by trimming the project name instead.
+    Project rows may carry a fixed-width activity spark
+    (``_project_activity_sparkline``) at the tail of the label. Compact
+    rail renderers use this helper to render the project name without
+    the sparkline in the narrow navigation rail.
     """
     if len(label) < 11:
         return label, ""
@@ -117,6 +118,30 @@ def _strip_trailing_spark(label: str) -> tuple[str, str]:
     if not all(ch in _SPARK_GLYPHS for ch in tail):
         return label, ""
     return head, tail
+
+
+def _format_event_ticker(
+    labels: list[str],
+    *,
+    width: int = _RAIL_TICKER_TEXT_WIDTH,
+) -> str:
+    """Format event labels without leaving a clipped trailing separator."""
+    if not labels:
+        return ""
+    text = "events"
+    for label in labels:
+        candidate = f"{text} · {label}"
+        if len(candidate) <= width:
+            text = candidate
+            continue
+        if text != "events":
+            break
+        budget = width - len("events · ")
+        if budget <= 1:
+            return "events"
+        text = f"events · {label[: budget - 1]}…"
+        break
+    return "" if text == "events" else text
 
 ASCII_POLLY = (
     "█▀█ █▀█ █   █   █▄█",
@@ -278,9 +303,9 @@ def _stuck_alert_already_user_waiting(
     The session sat idle because the user hasn't responded — the
     rail's ⚠ glyph then tells the user "this is broken" when the
     system is doing exactly what it should: waiting on them. The
-    project rollup already encodes this state via the 🟡 dot
-    (cockpit_project_state, cycle 53); the per-session glyph that
-    duplicates it is just noise.
+    project rollup already encodes this state via the project status
+    marker (cockpit_project_state, cycle 53); the per-session glyph
+    that duplicates it is just noise.
     """
     prefix = "stuck_on_task:"
     if not alert_type or not alert_type.startswith(prefix):
@@ -1162,11 +1187,30 @@ class CockpitRouter:
         label = item.label
         if self.is_project_pinned(item.key.split(":", 1)[1]):
             label = f"📌 {label}"
-        if rollup is not None and rollup.badge:
-            label = f"{rollup.badge} {label}"
         if sparkline:
             label = f"{label} {sparkline}"
-        return replace(item, label=label)
+        return replace(
+            item,
+            label=label,
+            state=self._project_row_state(item.state, rollup),
+        )
+
+    def _project_row_state(
+        self,
+        fallback: str,
+        rollup: ProjectStateRollup | None,
+    ) -> str:
+        if rollup is None:
+            return fallback
+        if rollup.state is ProjectRailState.RED:
+            return "project-red"
+        if rollup.state is ProjectRailState.YELLOW:
+            return "project-yellow"
+        if rollup.state is ProjectRailState.GREEN:
+            return "project-green"
+        if rollup.state is ProjectRailState.WORKING:
+            return "project-working"
+        return fallback
 
     def _project_state_rollups(
         self,
@@ -2779,9 +2823,7 @@ class PollyCockpitRail:
             )
             if label not in labels:
                 labels.append(label)
-        if not labels:
-            return ""
-        return "events · " + " · ".join(labels)
+        return _format_event_ticker(labels)
 
     def _section_header(self, label: str, width: int) -> RenderRow:
         pad = " " * GUTTER
@@ -2798,25 +2840,12 @@ class PollyCockpitRail:
         # Build the text with gutter (2-char prefix for alignment)
         bar = "\u258c " if is_selected else "  "
         label = item.label
+        if item.key.startswith("project:"):
+            label = _strip_trailing_spark(label)[0]
         indicator_width = max(1, len(indicator))
         max_label = width - (5 + indicator_width)
         if len(label) > max_label and max_label > 3:
-            # If the label ends with a 10-char activity sparkline (project
-            # rows decorate this onto the label), truncate the project
-            # name instead of the spark so the activity signal stays
-            # visible. Without this, ``polly-e2e-proj`` rendered as
-            # ``polly-e2e-proj \u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u2026`` and lost the trailing spark
-            # buckets \u2014 the worst part to truncate.
-            head, spark = _strip_trailing_spark(label)
-            if spark:
-                reserved = len(spark) + 1  # spark + separator space
-                head_budget = max_label - reserved - 1  # one char for ellipsis
-                if head_budget > 3:
-                    label = head[:head_budget].rstrip() + "\u2026 " + spark
-                else:
-                    label = label[: max_label - 1] + "\u2026"
-            else:
-                label = label[: max_label - 1] + "\u2026"
+            label = label[: max_label - 1] + "\u2026"
         text = f" {bar}{indicator} {label}"
         text = text[:width]
 
@@ -2848,12 +2877,12 @@ class PollyCockpitRail:
             bar_sgr = ""
             if is_selected:
                 bar_sgr = f"\x1b[38;2;{PALETTE['sel_accent'][0]};{PALETTE['sel_accent'][1]};{PALETTE['sel_accent'][2]}m"
-            label_part = f" {item.label}"
+            label_part = f" {label}"
             ind_sgr = f"\x1b[38;2;{ind_color[0]};{ind_color[1]};{ind_color[2]}m"
             text_sgr = _sgr(row)
             row.text = f" {bar_sgr}{bar}\x1b[0m{text_sgr}{ind_sgr}{indicator} \x1b[0m{text_sgr}{label_part}"
             # Pad manually since we have inline escapes
-            visible_len = 1 + 1 + len(indicator) + 1 + len(item.label)
+            visible_len = 1 + 1 + len(indicator) + 1 + len(label)
             if visible_len < width:
                 row.text += " " * (width - visible_len)
             row.text = row.text  # already formatted
@@ -2863,6 +2892,15 @@ class PollyCockpitRail:
         return row
 
     def _indicator(self, item: CockpitItem) -> tuple[str, _C | None]:
+        if item.key.startswith("project:"):
+            if item.state == "project-red":
+                return "\u25b2", PALETTE["alert_indicator"]
+            if item.state == "project-yellow":
+                return "\u2022", PALETTE["inbox_has"]
+            if item.state == "project-green":
+                return "\u2022", PALETTE["live_indicator"]
+            if item.state == "project-working":
+                return "\u2022", PALETTE["live_indicator"]
         if item.session_name and item.work_state:
             pulse = self.presence.heartbeat_frame_for(
                 item.session_name,
@@ -2870,14 +2908,22 @@ class PollyCockpitRail:
             )
             work_glyph, color = self._session_work_glyph(item.work_state)
             return f"{pulse}{work_glyph}", color
-        # State-based indicators first (apply to any item type including projects)
+        if item.state.startswith("!"):
+            return "\u25b2", PALETTE["alert_indicator"]
+        if item.key.startswith("project:"):
+            if item.state == "unread":
+                return "\u2022", PALETTE["inbox_has"]
+            if item.state.endswith("working"):
+                return "\u2022", PALETTE["live_indicator"]
+            if item.state == "dead":
+                return "\u2715", PALETTE["dead"]
+            return "\u25cb", PALETTE["idle"]
+        # State-based indicators for global rows.
         if item.state.endswith("working"):
             char = self.presence.working_frame(self.spinner_index)
             return char, PALETTE["live_indicator"]
         if item.state.endswith("live"):
             return "\u25cf", PALETTE["live_indicator"]
-        if item.state.startswith("!"):
-            return "\u25b2", PALETTE["alert_indicator"]
         if item.state == "dead":
             return "\u2715", PALETTE["dead"]
         if item.state == "watch":

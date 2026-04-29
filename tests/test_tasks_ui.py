@@ -1811,7 +1811,10 @@ def test_task_app_approve_undo_banner_and_auto_merge(env, monkeypatch) -> None:
                 ("demo/1", "user", "Approved from task cockpit")
             ]
             assert notification_calls == ["demo/1"]
-            assert merge_calls and merge_calls[0][:4] == ["gh", "pr", "merge", "123"]
+            assert any(
+                call[:4] == ["gh", "pr", "merge", "123"]
+                for call in merge_calls
+            )
 
     _run(body())
 

@@ -195,8 +195,6 @@ ASCII_POLLY = "\n".join(
 
 POLLY_TAGLINE = "Plans first.\nChaos later."
 
-_PALETTE_TIP_MESSAGE = "Tip: press `:` to open the command palette."
-
 
 _FIRST_SHIPPED_FRAMES = (
     "  ✨   🎉   ✨\n🎊  First PR shipped  🎊\n  ✨   🎉   ✨",
@@ -403,28 +401,17 @@ class RailItem(ListItem):
         else:
             text.append("  ")
         label = self.item.label
+        if self.item.key.startswith("project:"):
+            # The router keeps a 10-column activity sparkline on project
+            # labels for sorting/data consumers. In the 30-column rail it
+            # reads like corruption and crowds the project name, so render
+            # the name/pin only here.
+            from pollypm.cockpit_rail import _strip_trailing_spark
+
+            label = _strip_trailing_spark(label)[0]
         max_label = 22  # 30 col pane - 2 prefix - 2 indicator - 2 padding
         if len(label) > max_label:
-            # Project rows decorate the label as "<emoji>? <name> <spark>".
-            # Truncating from the end clobbers the activity sparkline \u2014
-            # the highest-signal part. Detect the trailing 10-char spark
-            # and truncate the project name instead so the spark
-            # survives narrow rail widths.
-            from pollypm.cockpit_rail import _strip_trailing_spark
-            head, spark = _strip_trailing_spark(label)
-            if spark:
-                reserved = len(spark) + 1  # spark + separator space
-                head_budget = max_label - reserved - 1  # ellipsis
-                if head_budget > 3:
-                    label = (
-                        head[:head_budget].rstrip()
-                        + "\u2026 "
-                        + spark
-                    )
-                else:
-                    label = label[: max_label - 1] + "\u2026"
-            else:
-                label = label[: max_label - 1] + "\u2026"
+            label = label[: max_label - 1] + "\u2026"
         text.append(label)
         # Show alert reason as dim subtitle for items with alerts.
         # Wrap onto up to 3 lines (≈60 chars each, indented) instead of
@@ -444,6 +431,15 @@ class RailItem(ListItem):
 
     def _indicator(self) -> tuple[str, str]:
         presence = self.presence
+        if self.item.key.startswith("project:"):
+            if self.item.state == "project-red":
+                return "▲", "#ff5f6d"
+            if self.item.state == "project-yellow":
+                return "•", "#f0a030"
+            if self.item.state == "project-green":
+                return "•", "#3ddc84"
+            if self.item.state == "project-working":
+                return "•", "#f0c45a"
         if (
             presence is not None
             and self.item.session_name
@@ -482,16 +478,19 @@ class RailItem(ListItem):
         # Sub-items
         if self.item.state == "sub":
             return " ", "#4a5568"
+        # Projects keep their status marker quieter than global rows.
+        # A full orange unread dot or animated working spinner makes
+        # ordinary project rows compete with true alert/action rows in the
+        # narrow rail.
+        if self.item.key.startswith("project:"):
+            if self.item.state == "unread":
+                return "\u2022", "#f0a030"
+            if "working" in self.item.state:
+                return "\u2022", "#f0c45a"
+            return "\u25cb", "#4a5568"  # dim circle — idle
         # Unread
         if self.item.state == "unread":
             return "\u25cf", "#f0a030"  # orange dot
-        # Projects: yellow for active task, dim for idle
-        if self.item.key.startswith("project:"):
-            if "working" in self.item.state:
-                if presence is not None:
-                    return presence.working_frame(self.spinner_index), "#3ddc84"
-                return "\u25c6", "#f0c45a"  # yellow diamond — active task
-            return "\u25cb", "#4a5568"  # dim circle — idle
         # Generic "<glyph> working" state — top-level rail rows
         # (e.g. Workers when any worker is currently turning) used
         # to fall through to the idle circle below, so a
@@ -533,15 +532,15 @@ class PollyCockpitApp(App[None]):
         border-right: solid #1e2730;
     }
     #brand {
-        padding: 1 0 0 0;
+        padding: 0;
         margin-bottom: 0;
         text-align: center;
         color: #f5f7fa;
     }
     #tagline {
         color: #97a6b2;
-        padding: 0 0 1 0;
-        height: 4;
+        padding: 0;
+        height: 2;
         text-align: center;
     }
     #nav {
@@ -746,7 +745,7 @@ class PollyCockpitApp(App[None]):
             id="brand",
             markup=True,
         )
-        self.tagline = Static("\n" + POLLY_TAGLINE, id="tagline")
+        self.tagline = Static(POLLY_TAGLINE, id="tagline")
         self.nav = ListView(id="nav")
         self.settings_row = Static("  \u2699 Settings", id="settings-row")
         self.update_pill = Static("", id="update-pill", markup=True)
@@ -823,7 +822,9 @@ class PollyCockpitApp(App[None]):
             if not self.router.should_show_palette_tip():
                 return
             self.router.mark_palette_tip_seen()
-            self.notify(_PALETTE_TIP_MESSAGE, timeout=10.0)
+            # Do not render this as a Textual notification. The cockpit rail
+            # is intentionally only 30 columns wide; a notification card
+            # overlaps Settings/help text and cuts the tip into fragments.
         except Exception:  # noqa: BLE001
             pass
 
@@ -1217,9 +1218,9 @@ class PollyCockpitApp(App[None]):
             )
             if label not in labels:
                 labels.append(label)
-        if not labels:
-            return ""
-        return "events · " + " · ".join(labels)
+        from pollypm.cockpit_rail import _format_event_ticker
+
+        return _format_event_ticker(labels)
 
     def _update_ticker(self) -> None:
         ticker_text = self._event_ticker_text()

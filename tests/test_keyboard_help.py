@@ -276,11 +276,11 @@ def test_modal_includes_cockpit_rail_glyph_legend() -> None:
     keys = [key for key, _desc in glyph_rows]
     assert "♥ / ♡" in keys
     assert "⚠" in keys
+    assert "•" in keys
     assert "writing or working" in descriptions
     assert "current rail selection" in descriptions
-    # #872: the project sparkline glyphs need an on-screen legend.
-    assert any("sparkline" in desc.lower() for desc in
-               (d for _, d in glyph_rows))
+    assert "active or unread project" in descriptions
+    assert "sparkline" not in descriptions.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -535,10 +535,6 @@ def test_help_modal_binds_jk_for_scroll() -> None:
     """
     from pollypm.cockpit_ui import KeyboardHelpModal
 
-    keys = {
-        binding.key.split(",")[0]
-        for binding in KeyboardHelpModal.BINDINGS
-    }
     # Top-level keys, exact membership check.
     bound = {key for binding in KeyboardHelpModal.BINDINGS for key in binding.key.split(",")}
     for required in ("j", "k", "down", "up", "g", "G", "home", "end"):
