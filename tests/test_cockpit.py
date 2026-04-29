@@ -1384,6 +1384,180 @@ def test_cockpit_router_primes_per_project_pm_session_distinctly() -> None:
     assert len(sent) == 2  # unchanged
 
 
+def test_create_worker_and_route_targets_pm_chat_session_when_worker_exists() -> None:
+    """#964 regression: after :meth:`create_worker_and_route` spawns
+    the per-project worker (or finds a pre-existing one), it MUST route
+    to ``project:<key>:session`` so the PM Chat surface mounts in the
+    right pane. The previous implementation routed to ``project:<key>``
+    which resolves to the static project Dashboard, leaving every PM
+    Chat sub-item dead-ending on Dashboard.
+    """
+    routed: list[str] = []
+
+    class _FakeLaunchSession:
+        def __init__(self, name: str, role: str, project: str) -> None:
+            self.name = name
+            self.role = role
+            self.project = project
+
+    class _FakeLaunch:
+        def __init__(self, name: str, role: str, project: str, window_name: str) -> None:
+            self.session = _FakeLaunchSession(name, role, project)
+            self.window_name = window_name
+
+    class _FakeSupervisor:
+        def plan_launches(self):
+            return [_FakeLaunch("worker_demo", "worker", "demo", "worker-demo")]
+
+        def storage_closet_session_name(self) -> str:
+            return "pollypm-storage-closet"
+
+        def stabilize_launch(self, *args, **kwargs) -> None:
+            return None
+
+        def tmux_session_for_launch(self, launch):
+            return "pollypm-storage-closet"
+
+        def window_map(self):
+            return {"worker-demo": "0"}
+
+    class _FakeTmux:
+        def list_windows(self, target: str):
+            return [SimpleNamespace(name="worker-demo", index=0)]
+
+    router = CockpitRouter.__new__(CockpitRouter)
+    router.tmux = _FakeTmux()
+    router._load_supervisor = lambda fresh=False: _FakeSupervisor()  # type: ignore[assignment]
+    router.route_selected = lambda key: routed.append(key)  # type: ignore[assignment]
+
+    router.create_worker_and_route("demo")
+
+    assert routed == ["project:demo:session"], routed
+
+
+def test_create_worker_and_route_falls_back_to_project_dashboard_without_session() -> None:
+    """If worker creation truly produces no session (launch failure,
+    config gap), fall back to the project Dashboard so the cockpit
+    stays usable rather than routing into a non-existent session.
+    """
+    routed: list[str] = []
+
+    class _FakeSupervisor:
+        def plan_launches(self):
+            return []
+
+        def storage_closet_session_name(self) -> str:
+            return "pollypm-storage-closet"
+
+    class _FakeTmux:
+        def list_windows(self, target: str):
+            return []
+
+    class _FakeService:
+        def suggest_worker_prompt(self, *, project_key: str) -> str:
+            return "do work"
+
+        def create_and_launch_worker(self, **kwargs) -> None:
+            return None
+
+    router = CockpitRouter.__new__(CockpitRouter)
+    router.tmux = _FakeTmux()
+    router.service = _FakeService()
+    router._load_supervisor = lambda fresh=False: _FakeSupervisor()  # type: ignore[assignment]
+    router.route_selected = lambda key: routed.append(key)  # type: ignore[assignment]
+
+    router.create_worker_and_route("ghost")
+
+    assert routed == ["project:ghost"], routed
+
+
+def test_rail_listview_swallows_value_error_for_orphan_clicks() -> None:
+    """#964 regression: the rail's :class:`ListView` subclass guards
+    against the boot-time ``_on_list_item__child_clicked`` ValueError
+    that fires when a click event lands on a widget that has been
+    swapped out by an in-flight rail rebuild. Textual's stock handler
+    raises ``ValueError`` on ``self._nodes.index(event.item)`` which
+    surfaces as a traceback overlay in the rail. The override must
+    re-resolve via the live ``cockpit_key`` when possible and silently
+    drop the click otherwise — never let the ValueError propagate.
+    """
+    from pollypm.cockpit_ui import _RailListView
+
+    view = _RailListView.__new__(_RailListView)
+
+    class _Orphan:
+        cockpit_key = "ghost-key"
+
+    class _LiveRow:
+        cockpit_key = "live-key"
+
+    class _Nodes:
+        def __init__(self) -> None:
+            self._items: list = [_LiveRow()]
+
+        def index(self, item):
+            if item not in self._items:
+                raise ValueError(f"{item!r} not in list")
+            return self._items.index(item)
+
+        def __iter__(self):
+            return iter(self._items)
+
+    nodes = _Nodes()
+    view._nodes = nodes  # type: ignore[attr-defined]
+
+    posted: list = []
+    focused: list[bool] = []
+    view.focus = lambda: focused.append(True)  # type: ignore[assignment]
+    view.post_message = lambda msg: posted.append(msg)  # type: ignore[assignment]
+
+    # Track index assignments rather than letting Textual reactive
+    # machinery fire on a __new__-built instance.
+    index_value: list[int | None] = [None]
+
+    class _Descriptor:
+        def __set__(self, obj, value):
+            index_value[0] = value
+
+        def __get__(self, obj, objtype=None):
+            return index_value[0]
+
+    type(view).index = _Descriptor()  # type: ignore[assignment]
+
+    class _StopEvent:
+        def __init__(self, item) -> None:
+            self.item = item
+            self.stopped = False
+            self.default_prevented = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+        def prevent_default(self) -> None:
+            self.default_prevented = True
+
+    # Click on an orphan whose key has no match — must NOT raise.
+    orphan_event = _StopEvent(_Orphan())
+    view._on_list_item__child_clicked(orphan_event)
+    assert orphan_event.stopped
+    # ``prevent_default()`` is critical: it stops Textual's MRO walk
+    # from also invoking the unguarded parent ``ListView`` handler,
+    # which would otherwise still raise the ValueError we just caught.
+    assert orphan_event.default_prevented
+    assert posted == []  # nothing actionable, drop silently
+    assert index_value[0] is None  # index untouched
+
+    # Click on a fresh widget whose cockpit_key matches a live row —
+    # must re-resolve and post a Selected message for the live row.
+    class _Stale:
+        cockpit_key = "live-key"
+
+    stale_event = _StopEvent(_Stale())
+    view._on_list_item__child_clicked(stale_event)
+    assert index_value[0] == 0
+    assert len(posted) == 1
+
+
 def test_cockpit_router_primes_workspace_operator_on_attach() -> None:
     """Mounting ``Polly · chat`` re-anchors Polly's PollyPM operator
     identity with workspace context (#961). The primer is distinct

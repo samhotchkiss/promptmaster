@@ -2185,8 +2185,19 @@ class CockpitRouter:
                     # Window exists but hasn't been stabilized yet
                     target = target_key
 
-        # Route immediately so the user sees the session booting live
-        self.route_selected(f"project:{project_key}")
+        # #964 — route to the project's PM Chat session when a worker is
+        # known to exist (either pre-existing or freshly spawned above).
+        # The previous implementation routed to ``project:{key}`` which
+        # resolves to the static project Dashboard, leaving every PM
+        # Chat sub-item dead-ending on Dashboard. Only fall back to the
+        # project Dashboard when worker creation truly produced no
+        # session — that path keeps the cockpit usable while the user
+        # diagnoses the launch failure rather than surfacing a blank
+        # right pane.
+        if session_name is not None:
+            self.route_selected(f"project:{project_key}:session")
+        else:
+            self.route_selected(f"project:{project_key}")
 
         # Stabilize in the background (dismisses prompts, waits for ready)
         if target is not None and session_name is not None:
