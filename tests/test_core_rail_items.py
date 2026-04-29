@@ -34,7 +34,7 @@ def _write_config(tmp_path: Path) -> Path:
 
 
 class _FakeConfig:
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, *, sessions: dict | None = None) -> None:
         class Project:
             root_dir = tmp_path
             base_dir = tmp_path / ".pollypm"
@@ -50,6 +50,15 @@ class _FakeConfig:
                 key="demo", path=tmp_path / "demo", name="Demo",
                 persona_name="Dora", kind=ProjectKind.GIT,
             ),
+        }
+        # ``sessions`` is read by visibility predicates that gate rail
+        # entries on whether a backing ``[sessions.<name>]`` block
+        # exists (#962 — Russell · chat). Default to operator + reviewer
+        # configured so legacy tests that don't care about visibility
+        # keep their previous shape.
+        self.sessions = sessions if sessions is not None else {
+            "operator": object(),
+            "reviewer": object(),
         }
 
 
@@ -72,8 +81,8 @@ class _FakeWindow:
         self.pane_id = f"%{name}"
 
 
-def _fake_supervisor(tmp_path: Path):
-    config = _FakeConfig(tmp_path)
+def _fake_supervisor(tmp_path: Path, *, sessions: dict | None = None):
+    config = _FakeConfig(tmp_path, sessions=sessions)
 
     class FakeSupervisor:
         def __init__(self) -> None:
@@ -150,6 +159,68 @@ def test_build_items_identical_to_legacy_shape(monkeypatch, tmp_path: Path) -> N
     # _count_inbox_tasks_for_label monkey-patch reached the rail).
     inbox_item = next(item for item in items if item.key == "inbox")
     assert inbox_item.label == "Inbox (1)"
+
+
+def test_russell_rail_entry_hidden_when_reviewer_session_unconfigured(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#962 — clicking ``Russell · chat`` silently routed to the Dashboard
+    when no ``[sessions.reviewer]`` block existed: the live-session
+    lookup raised, ``_route_live_session`` caught the exception, and
+    fell through to the static fallback (``polly`` → Dashboard).
+
+    The fix hides the rail entry when no reviewer session is
+    configured so the rail-entry-to-route contract holds: every
+    visible entry must resolve to a non-default destination. This
+    test pins that contract — no ``reviewer`` config, no rail row.
+    """
+    monkeypatch.setattr(
+        "pollypm.cockpit._count_inbox_tasks_for_label", lambda config: 0,
+    )
+    _write_config(tmp_path)
+    router = CockpitRouter(tmp_path / "pollypm.toml")
+    # Operator alone — reviewer block is missing (matches the user
+    # config that surfaced the bug in #962).
+    monkeypatch.setattr(
+        router,
+        "_load_supervisor",
+        lambda: _fake_supervisor(tmp_path, sessions={"operator": object()}),
+    )
+
+    items = router.build_items(spinner_index=0)
+    keys = [item.key for item in items]
+
+    assert "polly" in keys, "operator session is configured, polly row must render"
+    assert "russell" not in keys, (
+        "reviewer session is unconfigured — Russell · chat must be hidden "
+        "instead of dead-ending on the Dashboard (#962)"
+    )
+
+
+def test_russell_rail_entry_visible_when_reviewer_session_configured(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """Sibling to the previous test — when a ``[sessions.reviewer]``
+    block does exist, the rail entry must surface so the user can jump
+    to Russell's chat pane (the originally-intended UX)."""
+    monkeypatch.setattr(
+        "pollypm.cockpit._count_inbox_tasks_for_label", lambda config: 0,
+    )
+    _write_config(tmp_path)
+    router = CockpitRouter(tmp_path / "pollypm.toml")
+    monkeypatch.setattr(
+        router,
+        "_load_supervisor",
+        lambda: _fake_supervisor(
+            tmp_path,
+            sessions={"operator": object(), "reviewer": object()},
+        ),
+    )
+
+    items = router.build_items(spinner_index=0)
+    keys = [item.key for item in items]
+
+    assert "russell" in keys
 
 
 def test_build_items_preserves_working_project_session_state(

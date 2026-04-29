@@ -47,6 +47,9 @@ def test_cockpit_router_build_items_includes_core_entries(monkeypatch, tmp_path:
             "pollypm": KnownProject(key="pollypm", path=tmp_path, name="PollyPM", persona_name="Pete", kind=ProjectKind.GIT),
             "demo": KnownProject(key="demo", path=tmp_path / "demo", name="Demo", persona_name="Dora", kind=ProjectKind.GIT),
         }
+        # #962 — Russell rail entry only shows when ``[sessions.reviewer]``
+        # exists; this test asserts it's present, so seed both blocks.
+        sessions = {"operator": object(), "reviewer": object()}
 
     class FakeLaunch:
         def __init__(self, name: str, role: str, project: str, window_name: str) -> None:

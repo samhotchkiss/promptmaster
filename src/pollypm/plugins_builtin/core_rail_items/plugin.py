@@ -169,6 +169,32 @@ def _russell_state(ctx: RailContext) -> str:
     return _session_state(ctx, "reviewer")
 
 
+def _session_configured(ctx: RailContext, session_name: str) -> bool:
+    """Return ``True`` when ``session_name`` has a config block.
+
+    The cockpit's live-session route for a rail entry calls
+    ``supervisor.plan_launches()`` and looks up a ``SessionLaunchSpec``
+    by name. When no ``[sessions.<name>]`` block exists the lookup
+    returns no match and ``_route_live_session`` falls through to the
+    static fallback (``"polly"`` → ``PollyDashboardApp``) — which is
+    why clicking ``Russell · chat`` silently lands the user on the
+    Dashboard (#962). Hide the rail entry when its backing session
+    is not configured so the rail-entry-to-route contract holds:
+    every visible entry has a working destination.
+    """
+    config = _config(ctx)
+    if config is None:
+        return False
+    sessions = getattr(config, "sessions", None)
+    if not sessions:
+        return False
+    return session_name in sessions
+
+
+def _russell_visible(ctx: RailContext) -> bool:
+    return _session_configured(ctx, "reviewer")
+
+
 # ---------------------------------------------------------------------------
 # Inbox label + state.
 # ---------------------------------------------------------------------------
@@ -494,6 +520,12 @@ def _initialize(api) -> None:  # noqa: ANN001
         handler=_route_handler("russell"),
         key="russell",
         state_provider=_russell_state,
+        # #962 — the rail entry only routes to a live pane when a
+        # ``[sessions.reviewer]`` block exists. Without it the live
+        # session lookup raises and the router falls through to the
+        # static dashboard fallback. Hide the entry instead of dead-
+        # ending the click on the Dashboard.
+        visibility=_russell_visible,
     )
     rail.register_item(
         section="top",
