@@ -10,7 +10,7 @@ from textual.widgets import ListView
 from pollypm.cockpit import build_cockpit_detail
 from pollypm.cockpit_project_state import ProjectRailState, ProjectStateRollup
 from pollypm.cockpit_rail import CockpitItem, CockpitPresence, CockpitRouter, PALETTE, PollyCockpitRail
-from pollypm.cockpit_rail_routes import ProjectRoute
+from pollypm.cockpit_rail_routes import LiveSessionRoute, ProjectRoute
 from pollypm.cockpit_ui import PollyCockpitApp, PollyDashboardApp, PollySettingsPaneApp, RailItem
 from pollypm.config import write_config
 from pollypm.dashboard_data import CompletedItem, DashboardData, SessionActivity
@@ -1379,6 +1379,110 @@ def test_cockpit_router_primes_per_project_pm_session_distinctly() -> None:
         ProjectRoute(project_key="alpha", sub_view="session"),
     )
     assert len(sent) == 2  # unchanged
+
+
+def test_cockpit_router_primes_workspace_operator_on_attach() -> None:
+    """Mounting ``Polly · chat`` re-anchors Polly's PollyPM operator
+    identity with workspace context (#961). The primer is distinct
+    from the per-project primer (#958): no project_key, never carries
+    ``_build_project_pm_primer`` text. Idempotent across re-mounts of
+    the same right pane; re-fires when the right pane changes (cockpit
+    restart or operator-session relaunch).
+    """
+    sent: list[tuple[str, str]] = []
+    primed_state: dict[str, object] = {}
+
+    class _FakeTmux:
+        def send_keys(self, target, text, press_enter=True):  # noqa: ARG002
+            sent.append((target, text))
+
+        def list_windows(self, *_args, **_kwargs):  # noqa: ARG002
+            return []
+
+    class _Project:
+        def __init__(self, key: str, name: str) -> None:
+            self.key = key
+            self.name = name
+            self.path = Path(f"/tmp/{key}-no-db")  # state.db absent → graceful
+            self.persona_name = None
+
+    class _FakeConfig:
+        projects = {
+            "alpha": _Project("alpha", "Alpha"),
+            "beta": _Project("beta", "Beta"),
+        }
+
+    class _FakeSupervisor:
+        config = _FakeConfig()
+
+        def plan_launches(self):
+            class _Sess:
+                def __init__(self, name, role, project):
+                    self.name = name
+                    self.role = role
+                    self.project = project
+            class _L:
+                def __init__(self, name, role, project):
+                    self.session = _Sess(name, role, project)
+                    self.window_name = f"pm-{name}"
+            return [_L("operator", "operator-pm", "pollypm")]
+
+        def storage_closet_session_name(self):
+            return "pollypm-storage-closet"
+
+    pane_id_holder = {"id": "%right1"}
+
+    router = CockpitRouter.__new__(CockpitRouter)
+    router.tmux = _FakeTmux()
+    router._right_pane_id = lambda window_target: pane_id_holder["id"]  # type: ignore[assignment]
+    router._load_state = lambda: dict(primed_state)  # type: ignore[assignment]
+    def _write(data):
+        primed_state.clear()
+        primed_state.update(data)
+    router._write_state = _write  # type: ignore[assignment]
+    router._show_static_view = lambda *a, **k: None  # type: ignore[assignment]
+    router._show_live_session = lambda *a, **k: None  # type: ignore[assignment]
+
+    supervisor = _FakeSupervisor()
+
+    router._route_live_session(
+        supervisor,
+        "pollypm:PollyPM",
+        LiveSessionRoute(session_name="operator"),
+    )
+
+    assert len(sent) == 1, sent
+    target, text = sent[0]
+    assert target == "%right1"
+    # Operator identity markers from the workspace primer.
+    assert "Polly" in text
+    assert "PollyPM operator" in text
+    # Workspace-scope (not project-scope) discriminators.
+    assert "Workspace:" in text
+    assert "Active inbox (workspace-wide):" in text
+    # Distinct from the per-project primer's signature.
+    assert "Re-anchor on this identity" in text
+    assert "Project root:" not in text  # per-project primer marker
+    assert "Plan: " not in text  # per-project primer marker
+    # State persisted so a re-mount of the same pane does NOT re-prime.
+    assert primed_state.get("operator_primed_pane") == "%right1"
+
+    router._route_live_session(
+        supervisor,
+        "pollypm:PollyPM",
+        LiveSessionRoute(session_name="operator"),
+    )
+    assert len(sent) == 1, "re-mount of same pane re-primed unexpectedly"
+
+    # Cockpit restart / operator relaunch → fresh right pane id → re-prime.
+    pane_id_holder["id"] = "%right2"
+    router._route_live_session(
+        supervisor,
+        "pollypm:PollyPM",
+        LiveSessionRoute(session_name="operator"),
+    )
+    assert len(sent) == 2, "fresh pane id should re-prime"
+    assert primed_state.get("operator_primed_pane") == "%right2"
 
 
 def test_cockpit_rail_render_includes_event_ticker(monkeypatch) -> None:

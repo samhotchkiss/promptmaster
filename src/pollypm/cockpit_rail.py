@@ -489,6 +489,82 @@ def _build_project_pm_primer(supervisor, project_key: str) -> str | None:
     return "\n".join(lines)
 
 
+def _build_operator_primer(supervisor) -> str | None:
+    """Return a workspace-level primer for the Polly operator session (#961).
+
+    The operator session ships with ``polly_prompt()`` baked into its
+    launch-time profile, but that prompt is only injected on a *fresh*
+    launch (see :meth:`Supervisor._send_initial_input_if_fresh`). When
+    the cockpit attaches to a long-running operator pane — or when the
+    pane was resumed without the marker — the agent has no identity
+    context and answers as a generic Claude/Codex assistant. This
+    helper renders a short re-anchoring brief the cockpit injects when
+    the user mounts ``Polly · chat`` so Polly recovers her PollyPM
+    operator identity without the user retyping it.
+
+    Distinct from :func:`_build_project_pm_primer` (#958): that primer
+    re-anchors a per-project PM on a single project. This one anchors
+    the workspace-level operator on the whole workspace — it
+    enumerates known projects, totals the inbox, and surfaces a short
+    list of recent inbox subjects so Polly can answer "how's the
+    workspace?" the moment she's mounted.
+    """
+    project_lines: list[str] = []
+    inbox_total = 0
+    inbox_titles: list[tuple[str, str]] = []
+    project_count = 0
+    try:
+        from pollypm.work.inbox_view import inbox_tasks
+        from pollypm.work.sqlite_service import SQLiteWorkService
+    except Exception:  # noqa: BLE001
+        inbox_tasks = None  # type: ignore[assignment]
+        SQLiteWorkService = None  # type: ignore[assignment]
+
+    projects = getattr(supervisor.config, "projects", {}) or {}
+    for project_key, project in projects.items():
+        project_count += 1
+        project_name = getattr(project, "name", None) or project_key
+        project_lines.append(f"  - {project_name} ({project_key})")
+        if inbox_tasks is None or SQLiteWorkService is None:
+            continue
+        db_path = project.path / ".pollypm" / "state.db"
+        if not db_path.exists():
+            continue
+        try:
+            with SQLiteWorkService(
+                db_path=db_path, project_path=project.path,
+            ) as svc:
+                items = list(inbox_tasks(svc, project=project_key))
+                inbox_total += len(items)
+                for task in items[:2]:
+                    title = (task.title or "").strip()
+                    if title:
+                        inbox_titles.append((project_key, f"{task.task_id}: {title}"))
+        except Exception:  # noqa: BLE001 — primer is best-effort
+            continue
+
+    lines = [
+        "You are Polly, the PollyPM operator. Re-anchor on this identity "
+        "for the rest of this session: you delegate implementation, "
+        "coordinate workers, and drive decisions across the workspace; "
+        "you do not write code or edit files yourself.",
+        f"Workspace: {project_count} project(s) under management.",
+    ]
+    if project_lines:
+        lines.append("Projects:")
+        lines.extend(project_lines[:10])
+    lines.append(f"Active inbox (workspace-wide): {inbox_total} item(s)")
+    if inbox_titles:
+        lines.append("Recent inbox:")
+        for project_key, title in inbox_titles[:5]:
+            lines.append(f"  - [{project_key}] {title}")
+    lines.append(
+        "Run `pm inbox` then `pm status` to refresh, then acknowledge "
+        "briefly and stand by for the next instruction."
+    )
+    return "\n".join(lines)
+
+
 def _rows_for_registration(reg, ctx) -> list:
     """Produce the list of :class:`RailRow` a registration renders to.
 
@@ -1851,6 +1927,17 @@ class CockpitRouter:
             self._show_live_session(supervisor, route.session_name, window_target)
         except Exception:  # noqa: BLE001
             self._show_static_view(supervisor, window_target, route.fallback_kind)
+            return
+        # #961 — re-anchor operator identity on attach. ``polly_prompt()``
+        # is baked into the launch-time profile but only injected on a
+        # *fresh* launch; mounting an existing operator pane (or a pane
+        # resumed without its bootstrap marker) leaves Polly answering as
+        # a generic agent. A one-shot per-cockpit-process primer brings
+        # her back to the PollyPM operator identity with workspace
+        # context. Distinct from #958's per-project primer — #958 anchors
+        # a project PM, this one anchors the workspace-level operator.
+        if route.session_name == "operator":
+            self._maybe_prime_operator_session(supervisor, window_target)
 
     def _route_static_view(
         self,
@@ -2108,6 +2195,50 @@ class CockpitRouter:
                 if item.session.name == session_name
             )
             supervisor.stabilize_launch(launch, target, on_status=on_status)
+
+    def _maybe_prime_operator_session(
+        self,
+        supervisor,
+        window_target: str,
+    ) -> None:
+        """Send a workspace-level identity primer the first time the
+        operator (Polly) session is mounted at a given pane (#961).
+
+        The operator session's launch-time prompt only fires on a fresh
+        launch; long-running panes or resumed sessions land in the
+        cockpit with no identity context. The primer is sent once per
+        cockpit right-pane id, tracked under
+        ``cockpit_state["operator_primed_pane"]``. Idempotent across
+        re-mounts of the same pane so clicking ``Polly · chat``
+        repeatedly does not spam the agent. When the cockpit restarts
+        or the operator session is killed and respawned the right
+        pane id changes, so the primer re-fires automatically — that
+        is the regression path #961 reported. Failures are best-effort.
+        Distinct from :meth:`_maybe_prime_project_pm_session` (#958)
+        which targets per-project PM sessions; the workspace operator
+        primer never carries a ``project_key``.
+        """
+        try:
+            right_pane_id = self._right_pane_id(window_target)
+            state = self._load_state()
+            if (
+                right_pane_id is not None
+                and state.get("operator_primed_pane") == right_pane_id
+            ):
+                return
+            primer = _build_operator_primer(supervisor)
+            if not primer:
+                return
+            target = right_pane_id if right_pane_id else window_target
+            try:
+                self.tmux.send_keys(target, primer, press_enter=True)
+            except Exception:  # noqa: BLE001
+                return
+            if right_pane_id is not None:
+                state["operator_primed_pane"] = right_pane_id
+                self._write_state(state)
+        except Exception:  # noqa: BLE001
+            return
 
     def _maybe_prime_project_pm_session(
         self,
