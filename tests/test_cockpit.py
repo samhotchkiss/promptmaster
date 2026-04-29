@@ -3333,7 +3333,12 @@ def test_cockpit_app_open_live_session_keeps_rail_focus_until_tab() -> None:
 
     app.action_open_selected()
 
-    assert calls == [("route", "russell"), "refresh"]
+    # Render-then-load (#959): the click handler refreshes once
+    # synchronously to paint the optimistic loading state, then the
+    # worker calls ``route_selected`` and refreshes again with the
+    # resolved key. Order: refresh, route, refresh.
+    assert ("route", "russell") in calls
+    assert calls.count("refresh") >= 2
 
     app.action_forward_tab_to_right()
 
@@ -4051,3 +4056,154 @@ def test_cockpit_app_binds_action_button_digits_at_priority() -> None:
         assert getattr(binding, "priority", False), (
             f"{key!r} must be a priority binding to round-trip from rail"
         )
+
+
+# ── #959: render-then-load click handlers ────────────────────────────────────
+
+def _make_async_click_app() -> "tuple[PollyCockpitApp, list]":
+    """Build a cockpit app harness wired to record route + UI events."""
+    app = PollyCockpitApp.__new__(PollyCockpitApp)
+    events: list = []
+
+    class _Router:
+        selected = "polly"
+
+        def route_selected(self, key: str) -> None:
+            events.append(("route", key))
+            self.selected = key
+
+        def selected_key(self) -> str:
+            return self.selected
+
+    class _Hint:
+        def update(self, msg: str) -> None:
+            events.append(("hint", msg))
+
+    app.router = _Router()  # type: ignore[assignment]
+    app.selected_key = "polly"
+    app._last_router_selected_key = "polly"
+    app.hint = _Hint()  # type: ignore[assignment]
+    app._unread_keys = set()
+    app._refresh_rows = lambda: events.append("refresh")  # type: ignore[method-assign]
+    app._selected_row_key = lambda: "project:demo"  # type: ignore[method-assign]
+    return app, events
+
+
+def test_async_click_paints_loading_hint_before_route_selected() -> None:
+    """#959 — render-then-load: the loading hint MUST be visible before
+    ``route_selected`` is invoked. If the hint update lands after the
+    route call the click was effectively still synchronous."""
+    app, events = _make_async_click_app()
+
+    app.action_open_inbox()
+
+    def _hints(evts):
+        return [
+            evt[1] for evt in evts
+            if isinstance(evt, tuple) and len(evt) == 2 and evt[0] == "hint"
+        ]
+
+    hints = _hints(events)
+    assert any("Connecting to" in h for h in hints), (
+        f"expected a 'Connecting to …' hint before route, got events={events}"
+    )
+    # First hint must arrive before the first ``route_selected`` call.
+    first_route_idx = next(
+        i for i, evt in enumerate(events) if evt == ("route", "inbox")
+    )
+    first_hint_idx = next(
+        i for i, evt in enumerate(events)
+        if isinstance(evt, tuple) and len(evt) == 2 and evt[0] == "hint"
+        and "Connecting" in evt[1]
+    )
+    assert first_hint_idx < first_route_idx
+
+
+def test_async_click_dispatches_via_run_worker_when_available() -> None:
+    """The action MUST hand the route work to ``run_worker`` so the UI
+    thread is free. Tests bypass the running app, so the dispatcher
+    falls back to inline execution — but we verify the dispatch hook
+    was called with the right key."""
+    app, events = _make_async_click_app()
+    dispatched: list[str] = []
+
+    def _spy_dispatch(key: str) -> None:
+        dispatched.append(key)
+
+    app._dispatch_route_in_worker = _spy_dispatch  # type: ignore[assignment]
+
+    app.action_open_settings()
+
+    assert dispatched == ["settings"]
+    # ``route_selected`` should NOT have run on the UI thread — the
+    # spy short-circuits the worker. This is the property that lets a
+    # slow route never block the next click.
+    assert ("route", "settings") not in events
+
+
+def test_async_click_surfaces_timeout_on_slow_route() -> None:
+    """A blocked route call MUST surface a timeout in the loading
+    pane within the deadline rather than hang the click forever."""
+    import threading
+    import time
+
+    app, events = _make_async_click_app()
+
+    class _SlowRouter:
+        selected = "polly"
+        block = threading.Event()
+
+        def route_selected(self, key: str) -> None:
+            events.append(("route_started", key))
+            # Wait until the timeout fires; the test never sets ``block``.
+            self.block.wait(timeout=5.0)
+            events.append(("route_finished", key))
+            self.selected = key
+
+        def selected_key(self) -> str:
+            return self.selected
+
+    app.router = _SlowRouter()  # type: ignore[assignment]
+    app._ROUTE_SELECT_TIMEOUT_SECONDS = 0.25  # type: ignore[attr-defined]
+
+    started = time.monotonic()
+    app._route_selected_worker("inbox")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, (
+        f"timeout deadline did not fire within budget (elapsed={elapsed:.2f}s)"
+    )
+    hints = [
+        evt[1] for evt in events
+        if isinstance(evt, tuple) and len(evt) == 2 and evt[0] == "hint"
+    ]
+    assert any("timed out" in h for h in hints), (
+        f"expected a timeout hint, got events={events}"
+    )
+    # Release the slow router so its thread terminates.
+    _SlowRouter.block.set()
+
+
+def test_async_click_resyncs_selected_key_from_router() -> None:
+    """The router rewrites ``project:x`` to ``project:x:dashboard`` —
+    after the worker completes, ``selected_key`` MUST reflect the
+    canonical key the router persisted, not the optimistic stamp."""
+    app, events = _make_async_click_app()
+
+    class _RewriteRouter:
+        selected = "polly"
+
+        def route_selected(self, key: str) -> None:
+            events.append(("route", key))
+            # Router canonicalizes the key.
+            self.selected = f"{key}:dashboard"
+
+        def selected_key(self) -> str:
+            return self.selected
+
+    app.router = _RewriteRouter()  # type: ignore[assignment]
+
+    app._schedule_route_selected("project:demo", label="demo")
+
+    assert app.selected_key == "project:demo:dashboard"
+    assert app._last_router_selected_key == "project:demo:dashboard"
