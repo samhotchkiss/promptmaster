@@ -842,16 +842,29 @@ class Supervisor:
         self.session_service.tmux.set_window_option(console_target, "aggressive-resize", "on")
         self.focus_console()
 
-        # Phase 3: Stabilize sessions and send initial input.
-        # Stabilization (dismissing prompts) runs in parallel threads.
-        # Initial input sending runs sequentially afterward to avoid
-        # tmux routing races that cause identity swaps.
+        # Phase 3: Finish the slow provider bootstrap in the background.
+        # First launch must hand the user to the cockpit as soon as the
+        # cockpit session exists; trust/theme prompts can take minutes.
+        coordinator = threading.Thread(
+            target=self._finish_bootstrap_sessions,
+            args=(targets,),
+            name="pollypm-bootstrap-finish",
+            daemon=True,
+        )
+        coordinator.start()
+        self._bootstrap_completion_thread = coordinator
+
+    def _finish_bootstrap_sessions(
+        self,
+        targets: list[tuple[SessionLaunchSpec, str]],
+    ) -> None:
+        """Stabilize new sessions and send initial prompts after attach."""
         stabilized: list[tuple[SessionLaunchSpec, str]] = []
         lock = threading.Lock()
 
         def _stabilize_one(launch: SessionLaunchSpec, tgt: str) -> None:
             try:
-                # Only stabilize (dismiss trust/theme prompts), don't send input
+                # Only stabilize (dismiss trust/theme prompts), don't send input.
                 if launch.session.provider is ProviderKind.CLAUDE:
                     self._stabilize_claude_launch(tgt)
                 elif launch.session.provider is ProviderKind.CODEX:
@@ -883,16 +896,15 @@ class Supervisor:
             t.start()
             threads.append(t)
 
-        # Wait for all stabilization to complete (with timeout)
         for t in threads:
             t.join(timeout=120)
 
-        # Phase 4: Send initial input SEQUENTIALLY to avoid tmux routing races
+        # Send initial input SEQUENTIALLY to avoid tmux routing races.
         for launch, tgt in stabilized:
             self._send_initial_input_if_fresh(launch, tgt)
             self._mark_session_resume_ready(launch)
 
-        # Phase 5: Dispatch SessionCreatedEvent so #246's task-assignment
+        # Dispatch SessionCreatedEvent so #246's task-assignment
         # listener can resume-ping any in-progress task owned by the new
         # session. The bootstrap path uses tmux.create_* directly (not
         # SessionService.create()), so the emitter baked into create()

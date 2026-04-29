@@ -1,6 +1,7 @@
 import base64
 import json
 import shlex
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -577,6 +578,9 @@ def test_heartbeat_uses_separate_tmux_session(monkeypatch, tmp_path: Path) -> No
 
     monkeypatch.setattr(supervisor, "_probe_controller_account", lambda account_name: None)
     monkeypatch.setattr(supervisor, "_stabilize_launch", lambda launch, target, on_status=None: None)
+    monkeypatch.setattr(supervisor, "_stabilize_claude_launch", lambda target: None)
+    monkeypatch.setattr(supervisor, "_stabilize_codex_launch", lambda target: None)
+    monkeypatch.setattr(supervisor, "_send_initial_input_if_fresh", lambda launch, target: None)
     monkeypatch.setattr(supervisor, "_record_launch", lambda launch: None)
     monkeypatch.setattr(supervisor.tmux, "has_session", lambda name: False)
     monkeypatch.setattr(
@@ -609,6 +613,81 @@ def test_heartbeat_uses_separate_tmux_session(monkeypatch, tmp_path: Path) -> No
     assert (f"{supervisor.storage_closet_session_name()}:pm-heartbeat", "focus-events", "on") in window_options
     assert (f"{supervisor.storage_closet_session_name()}:pm-operator", "focus-events", "on") in window_options
     assert (f"{config.project.tmux_session}:{supervisor.console_window_name()}", "focus-events", "on") in window_options
+
+
+def test_bootstrap_returns_before_provider_stabilization_finishes(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """First launch should attach to the cockpit without waiting on agents."""
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    created_sessions: list[tuple[str, str, str]] = []
+    created_windows: list[tuple[str, str, str, bool]] = []
+    release_stabilizer = threading.Event()
+    stabilizer_started = threading.Event()
+    bootstrap_done = threading.Event()
+    sent_initial: list[str] = []
+    result: dict[str, str] = {}
+
+    monkeypatch.setattr(supervisor, "_probe_controller_account", lambda account_name: None)
+    monkeypatch.setattr(supervisor, "_record_launch", lambda launch: None)
+    monkeypatch.setattr(supervisor.tmux, "has_session", lambda name: False)
+    monkeypatch.setattr(
+        supervisor.tmux,
+        "create_session",
+        lambda name, window_name, command, **kwargs: (
+            created_sessions.append((name, window_name, command)) or f"%{len(created_sessions)}"
+        ),
+    )
+    monkeypatch.setattr(
+        supervisor.tmux,
+        "create_window",
+        lambda name, window_name, command, detached=False: (
+            created_windows.append((name, window_name, command, detached))
+            or f"%w{len(created_windows)}"
+        ),
+    )
+    monkeypatch.setattr(supervisor.tmux, "set_window_option", lambda *args, **kwargs: None)
+    monkeypatch.setattr(supervisor.tmux, "pipe_pane", lambda *args, **kwargs: None)
+    monkeypatch.setattr(supervisor, "ensure_console_window", lambda: None)
+    monkeypatch.setattr(supervisor, "focus_console", lambda: None)
+    monkeypatch.setattr(
+        supervisor,
+        "_send_initial_input_if_fresh",
+        lambda launch, target: sent_initial.append(launch.session.name),
+    )
+
+    def _slow_stabilize(_target: str) -> None:
+        stabilizer_started.set()
+        release_stabilizer.wait(timeout=5)
+
+    monkeypatch.setattr(supervisor, "_stabilize_claude_launch", _slow_stabilize)
+    monkeypatch.setattr(supervisor, "_stabilize_codex_launch", _slow_stabilize)
+
+    def _run_bootstrap() -> None:
+        result["controller"] = supervisor.bootstrap_tmux()
+        bootstrap_done.set()
+
+    thread = threading.Thread(target=_run_bootstrap)
+    thread.start()
+    try:
+        assert bootstrap_done.wait(timeout=0.5), (
+            "bootstrap_tmux blocked on provider stabilization before cockpit attach"
+        )
+        assert stabilizer_started.wait(timeout=1)
+        assert sent_initial == []
+    finally:
+        release_stabilizer.set()
+        thread.join(timeout=2)
+        coordinator = getattr(supervisor, "_bootstrap_completion_thread", None)
+        if coordinator is not None:
+            coordinator.join(timeout=2)
+
+    assert result["controller"] == "claude_controller"
+    assert created_sessions[0][0] == supervisor.storage_closet_session_name()
+    assert created_sessions[1][0] == config.project.tmux_session
+    assert set(sent_initial) == {"heartbeat", "operator"}
 
 
 def test_launch_session_creates_worker_window_detached(monkeypatch, tmp_path: Path) -> None:
