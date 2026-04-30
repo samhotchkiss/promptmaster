@@ -781,3 +781,83 @@ def test_gather_worker_roster_skips_malformed_task_window(
     rows = _gather_worker_roster(_Config(project_path))
     sessions = {row.session_name for row in rows}
     assert sessions == {"task-demo-3"}
+
+
+def test_gather_worker_roster_synthetic_row_last_commit_uses_project_head(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Synthetic control-session rows backfill ``last_commit_label`` from project HEAD (#997).
+
+    Without this, every row of the Workers panel rendered an empty
+    ``Last commit`` cell because synthetic rows hardcoded ``""`` and the
+    only branch lookup happened against per-task workers (which most
+    rosters don't have).
+    """
+    import subprocess as _sp
+
+    import pollypm.cockpit_inbox as cockpit_inbox
+    import pollypm.session_services as session_services
+    from pollypm.cockpit import _gather_worker_roster
+
+    project_path = tmp_path / "demo"
+    project_path.mkdir()
+    # Initialise a real git repo with one commit so HEAD resolves.
+    _sp.run(["git", "init", "-q"], cwd=project_path, check=True)
+    _sp.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit",
+         "--allow-empty", "-q", "-m", "init"],
+        cwd=project_path, check=True,
+    )
+
+    class _Project:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.name = "Demo"
+            self.key = "demo"
+
+        def display_label(self) -> str:
+            return self.name
+
+    class _InnerProject:
+        tmux_session = "pollypm-test"
+
+    class _Config:
+        project = _InnerProject()
+
+        def __init__(self, project_path: Path) -> None:
+            self.projects = {"demo": _Project(project_path)}
+
+    class FakeWindow:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.pane_id = "%9"
+            self.pane_dead = False
+
+    class FakeTmux:
+        def list_windows(self, session_name: str):
+            assert session_name == "pollypm-test-storage-closet"
+            # An architect control session for the demo project AND a
+            # workspace-level pm session that has no matching project.
+            return [FakeWindow("architect-demo"), FakeWindow("pm-heartbeat")]
+
+        def capture_pane(self, pane_id: str, lines: int = 15) -> str:
+            return ""
+
+    monkeypatch.setattr(
+        cockpit_inbox, "_try_load_supervisor_for_config", lambda config: None,
+    )
+    monkeypatch.setattr(session_services, "create_tmux_client", lambda: FakeTmux())
+
+    rows = _gather_worker_roster(_Config(project_path))
+
+    by_session = {row.session_name: row for row in rows}
+    # The architect-demo synthetic row maps to the configured ``demo``
+    # project, so it backfills "Last commit" from HEAD — must NOT be
+    # empty and must NOT be the missing-project dash.
+    architect = by_session["architect-demo"]
+    assert architect.last_commit_label not in ("", "—"), (
+        f"expected HEAD-fallback age, got {architect.last_commit_label!r}"
+    )
+    # ``pm-heartbeat`` has no matching project entry; it keeps the dash.
+    assert by_session["pm-heartbeat"].last_commit_label == "—"

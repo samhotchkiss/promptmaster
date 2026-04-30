@@ -679,13 +679,17 @@ def _last_commit_age(project_path: Path, branch_name: str | None) -> str:
 
     Best-effort: we only run ``git log -1 --format=%ct`` so a missing
     branch / non-repo path falls through to the empty-age dash.
+
+    For control sessions (architect-/worker-/pm-) without a per-task
+    branch, fall back to the project's ``HEAD`` so the column reflects
+    "what just landed in this project" rather than rendering empty for
+    every row (#997).
     """
-    if not branch_name:
-        return "\u2014"
+    revision = branch_name or "HEAD"
     try:
         import subprocess as _sp
         result = _sp.run(
-            ["git", "-C", str(project_path), "log", "-1", "--format=%ct", branch_name],
+            ["git", "-C", str(project_path), "log", "-1", "--format=%ct", revision],
             capture_output=True, text=True, check=False, timeout=2,
         )
     except Exception:  # noqa: BLE001
@@ -1090,6 +1094,18 @@ def _gather_worker_roster(config) -> list[WorkerRosterRow]:
                 session_name=window_name,
                 current_node=None,
             )
+            # Synthetic control-session rows have no per-task branch.
+            # Fall back to the project's HEAD so the "Last commit" column
+            # surfaces real activity instead of being empty for every
+            # control session (#997). Rows whose label doesn't match a
+            # configured project (e.g. workspace-level ``pm-heartbeat``)
+            # keep the empty dash.
+            synthetic_project = projects.get(project_key)
+            synthetic_path = getattr(synthetic_project, "path", None)
+            if isinstance(synthetic_path, Path):
+                synthetic_last_commit = _last_commit_age(synthetic_path, None)
+            else:
+                synthetic_last_commit = "—"
             rows.append(
                 WorkerRosterRow(
                     project_key=project_key,
@@ -1103,7 +1119,7 @@ def _gather_worker_roster(config) -> list[WorkerRosterRow]:
                     task_title=f"{kind.title()} session",
                     current_node=None,
                     turn_label="",
-                    last_commit_label="",
+                    last_commit_label=synthetic_last_commit,
                     token_total=0,
                     tmux_window=window_name,
                     last_heartbeat=None,
