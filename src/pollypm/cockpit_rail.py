@@ -94,6 +94,14 @@ PALETTE: dict[str, _C] = {
     "alert_bg":        (53, 26, 29),
     "alert_text":      (242, 184, 188),
     "alert_indicator": (255, 95, 109),
+    # #989 — Warn-tier badges. Today the supervisor raises both ``warn``
+    # alerts (one click to recover, e.g. ``pane:permission_prompt``) and
+    # ``error`` alerts (account repair / restart needed) but the rail
+    # painted them the same red. Amber for warn keeps the user's eye on
+    # the genuinely-broken rows without burying the soft alerts.
+    "warn_bg":         (50, 40, 24),
+    "warn_text":       (240, 207, 158),
+    "warn_indicator":  (240, 192, 90),
     "inbox_has":       (240, 196, 90),
     "inbox_empty":     (74, 85, 104),
     "idle":            (74, 85, 104),
@@ -302,6 +310,21 @@ class CockpitItem:
     session_name: str | None = None
     work_state: str | None = None
     heartbeat_at: str | None = None
+    # #989 — Severity attached out-of-band so existing ``state``-based
+    # rendering keeps working unchanged. ``warn`` and ``error`` drive
+    # the rail's amber-vs-red badge differentiation; ``None`` means the
+    # row carries no actionable alert (or alerts are all operational).
+    alert_severity: str | None = None
+    # ``alert_message`` carries the most recent actionable alert's full
+    # message text so the rail can surface it in the alert-detail
+    # modal without re-querying the supervisor on Enter.
+    alert_message: str | None = None
+    # ``alert_type`` is the canonical alert family (``recovery_limit``,
+    # ``pane:permission_prompt``, …) — drives the recovery action map.
+    alert_type: str | None = None
+    # ``alert_id`` is the supervisor's row id, used by recovery
+    # handlers that need to clear/lookup the specific alert.
+    alert_id: int | None = None
 
 
 def _stuck_alert_already_user_waiting(
@@ -1175,6 +1198,7 @@ class CockpitRouter:
                         launches=launches,
                         supervisor=supervisor,
                         project_session_map=project_session_map,
+                        alerts=list(alerts),
                     )
                     grouped.setdefault(section, []).append(item)
 
@@ -1222,20 +1246,34 @@ class CockpitRouter:
         launches,
         supervisor,
         project_session_map: dict[str, str],
+        alerts: list[object] | None = None,
     ) -> None:
         session_name = self._session_name_for_item(item, project_session_map)
-        if session_name is None:
-            return
-        item.session_name = session_name
-        launch = next((entry for entry in launches if entry.session.name == session_name), None)
-        if launch is None:
-            return
-        item.work_state = self._work_state_for_item_state(item.state, launch.session.role)
-        try:
-            heartbeat = supervisor.store.latest_heartbeat(session_name)
-        except Exception:  # noqa: BLE001
-            heartbeat = None
-        item.heartbeat_at = getattr(heartbeat, "created_at", None)
+        if session_name is not None:
+            item.session_name = session_name
+            launch = next(
+                (entry for entry in launches if entry.session.name == session_name),
+                None,
+            )
+            if launch is not None:
+                item.work_state = self._work_state_for_item_state(
+                    item.state, launch.session.role,
+                )
+                try:
+                    heartbeat = supervisor.store.latest_heartbeat(session_name)
+                except Exception:  # noqa: BLE001
+                    heartbeat = None
+                item.heartbeat_at = getattr(heartbeat, "created_at", None)
+        # #989 — Surface the top actionable alert's severity + message
+        # on the item so the renderer can pick the right palette
+        # (``warn`` amber vs ``error`` red) and the alert-detail modal
+        # can read the message without re-querying the supervisor.
+        # Project rows aggregate alerts across both ``worker_<key>``
+        # and ``architect_<key>`` / ``plan_gate-<key>`` sessions, so
+        # the lookup walks every alert keyed off the project rather
+        # than restricting to the rail row's own ``session_name``.
+        if alerts:
+            self._attach_alert_metadata(item, alerts=alerts)
 
     def _session_name_for_item(
         self,
@@ -1250,6 +1288,82 @@ class CockpitRouter:
             return None
         project_key = item.key.split(":", 1)[1]
         return project_session_map.get(project_key)
+
+    # ── #989 — alert metadata attachment ────────────────────────────────
+    #
+    # Decoupled from ``_attach_session_metadata`` because project rows
+    # aggregate alerts across multiple sessions (``worker_<key>``,
+    # ``architect_<key>``, ``plan_gate-<key>``) and the rail's project
+    # rollup already handles the project case via
+    # ``cockpit_project_state``. Top-level rows (Polly, Russell, etc.)
+    # use their own session name directly.
+    def _attach_alert_metadata(
+        self,
+        item: CockpitItem,
+        *,
+        alerts: list[object],
+    ) -> None:
+        candidate_sessions = self._alert_session_candidates(item)
+        if not candidate_sessions:
+            return
+        actionable: list[object] = []
+        for alert in alerts:
+            session_name = getattr(alert, "session_name", "") or ""
+            if session_name not in candidate_sessions:
+                continue
+            alert_type = getattr(alert, "alert_type", "") or ""
+            if alert_type in self._SILENT_ALERT_TYPES:
+                continue
+            actionable.append(alert)
+        if not actionable:
+            return
+        # Prefer ``error`` over ``warn`` so the badge palette reflects
+        # the most severe open alert. Within a tier, take the first
+        # match (the alerts list is already newest-first from
+        # ``supervisor.status()``).
+        actionable.sort(
+            key=lambda a: 0 if str(getattr(a, "severity", "")).lower() == "error" else 1,
+        )
+        top = actionable[0]
+        severity = str(getattr(top, "severity", "") or "").lower()
+        if severity in {"error", "critical"}:
+            item.alert_severity = "error"
+        else:
+            # Treat ``warn`` / ``warning`` / unknown as warn — the
+            # supervisor uses both literal spellings (``warn`` /
+            # ``warning``) for the same intent.
+            item.alert_severity = "warn"
+        item.alert_message = getattr(top, "message", None) or None
+        item.alert_type = getattr(top, "alert_type", None) or None
+        item.alert_id = getattr(top, "alert_id", None)
+
+    def _alert_session_candidates(self, item: CockpitItem) -> frozenset[str]:
+        """Return the supervisor session names whose alerts attach to ``item``."""
+        if item.key == "polly":
+            return frozenset({"operator"})
+        if item.key == "russell":
+            return frozenset({"reviewer"})
+        if item.key.startswith("project:") and item.key.count(":") == 1:
+            project_key = item.key.split(":", 1)[1]
+            # Mirrors the project-rollup aggregation in
+            # ``cockpit_project_state.rollup_project_state``: any session
+            # owned by the project rolls up into the project row. Some
+            # session names are sanitized to underscores (e.g.
+            # ``worker_blackjack_trainer`` for project key
+            # ``blackjack-trainer``), so include both the literal
+            # project_key and its underscored alias.
+            alias = project_key.replace("-", "_")
+            return frozenset({
+                f"worker_{project_key}",
+                f"architect_{project_key}",
+                f"plan_gate-{project_key}",
+                f"reviewer_{project_key}",
+                f"worker_{alias}",
+                f"architect_{alias}",
+                f"plan_gate-{alias}",
+                f"reviewer_{alias}",
+            })
+        return frozenset()
 
     def _work_state_for_item_state(self, state: str, role: str) -> str | None:
         if state == "dead":
@@ -3682,8 +3796,14 @@ class PollyCockpitRail:
         bold = False
 
         if item.state.startswith("!"):
-            fg = PALETTE["alert_text"]
-            bg = PALETTE["alert_bg"]
+            # #989 — Pick the amber palette for warn-tier alerts so
+            # they read as "needs a click" rather than "account repair".
+            if item.alert_severity == "warn":
+                fg = PALETTE["warn_text"]
+                bg = PALETTE["warn_bg"]
+            else:
+                fg = PALETTE["alert_text"]
+                bg = PALETTE["alert_bg"]
         elif (item.state.endswith("live") or item.state.endswith("working") or item.state == "watch") and not is_selected:
             fg = PALETTE["live_text"]
             bg = PALETTE["live_bg"]
@@ -3721,7 +3841,16 @@ class PollyCockpitRail:
     def _indicator(self, item: CockpitItem) -> tuple[str, _C | None]:
         if item.key.startswith("project:"):
             if item.state == "project-red":
-                return "\u25b2", PALETTE["alert_indicator"]
+                # #989 \u2014 The project rollup paints ``project-red`` for
+                # both warn and error alerts; pick the amber indicator
+                # when the open alerts are warn-tier so the project
+                # badge matches the row palette.
+                color = (
+                    PALETTE["warn_indicator"]
+                    if item.alert_severity == "warn"
+                    else PALETTE["alert_indicator"]
+                )
+                return "\u25b2", color
             if item.state == "project-yellow":
                 return "\u2022", PALETTE["inbox_has"]
             if item.state == "project-green":
@@ -3733,10 +3862,17 @@ class PollyCockpitRail:
                 item.session_name,
                 item.heartbeat_at,
             )
-            work_glyph, color = self._session_work_glyph(item.work_state)
+            work_glyph, color = self._session_work_glyph(
+                item.work_state, alert_severity=item.alert_severity,
+            )
             return f"{pulse}{work_glyph}", color
         if item.state.startswith("!"):
-            return "\u25b2", PALETTE["alert_indicator"]
+            color = (
+                PALETTE["warn_indicator"]
+                if item.alert_severity == "warn"
+                else PALETTE["alert_indicator"]
+            )
+            return "\u25b2", color
         if item.key.startswith("project:"):
             if item.state == "unread":
                 return "\u2022", PALETTE["inbox_has"]
@@ -3773,7 +3909,12 @@ class PollyCockpitRail:
             return " ", None
         return "\u25cb", PALETTE["idle"]
 
-    def _session_work_glyph(self, work_state: str) -> tuple[str, _C | None]:
+    def _session_work_glyph(
+        self,
+        work_state: str,
+        *,
+        alert_severity: str | None = None,
+    ) -> tuple[str, _C | None]:
         if work_state == "writing":
             if not self.presence.should_animate():
                 return "…", PALETTE["live_indicator"]
@@ -3781,7 +3922,15 @@ class PollyCockpitRail:
         if work_state == "reviewing":
             return "✎", PALETTE["live_indicator"]
         if work_state == "stuck":
-            return "⚠", PALETTE["alert_indicator"]
+            # #989 — Warn-tier stuck rows (e.g. pane:permission_prompt)
+            # render in amber so the user knows it's a one-keystroke
+            # fix, not an account-repair situation.
+            color = (
+                PALETTE["warn_indicator"]
+                if alert_severity == "warn"
+                else PALETTE["alert_indicator"]
+            )
+            return "⚠", color
         if work_state == "exited":
             return "✕", PALETTE["dead"]
         return "·", PALETTE["idle"]

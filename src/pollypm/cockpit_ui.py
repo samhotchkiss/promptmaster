@@ -308,6 +308,204 @@ def _celebrate_first_shipped(app) -> None:
         pass
 
 
+class _AlertDetailModal(ModalScreen[str | None]):
+    """Read + recover surface for the rail's ``♡⚠`` badge (#989).
+
+    Inputs: a title / meta / message string plus a list of
+    :class:`~pollypm.cockpit_alert_actions.AlertActionPlan` describing
+    the recovery actions for the alert under the rail cursor. Outputs:
+    the action ``kind`` string the user picked (or ``None`` on dismiss).
+    The host ``App`` runs the action — this modal only renders + collects.
+
+    Why a dedicated modal and not the existing Metrics drill-down: the
+    drill-down is a generic table-of-rows surface. The follow-up comment
+    on #989 wanted a one-keystroke recovery path scoped to the alert
+    that is actually under the cursor. Routing through Metrics works
+    for "see the alert list" but loses the rail-row context the moment
+    the user lands there.
+    """
+
+    DEFAULT_CSS = """
+    _AlertDetailModal {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.45);
+    }
+    #alert-detail-dialog {
+        width: 76;
+        max-width: 95%;
+        height: auto;
+        max-height: 22;
+        padding: 1 2;
+        background: #141a20;
+        border: round #ff5f6d;
+    }
+    #alert-detail-dialog.warn {
+        border: round #f0c45a;
+    }
+    #alert-detail-title {
+        text-style: bold;
+        color: #ff5f6d;
+    }
+    #alert-detail-title.warn {
+        color: #f0c45a;
+    }
+    #alert-detail-meta {
+        color: #97a6b2;
+        margin-bottom: 1;
+    }
+    #alert-detail-message {
+        color: #d6dee5;
+        margin-bottom: 1;
+        height: auto;
+        max-height: 8;
+        scrollbar-size: 1 1;
+    }
+    #alert-detail-actions {
+        height: auto;
+        margin-top: 1;
+    }
+    #alert-detail-actions ListItem {
+        padding: 0 1;
+    }
+    #alert-detail-actions ListItem.-highlight {
+        background: #1f4d7a;
+        color: #eef6ff;
+    }
+    #alert-detail-hint {
+        color: #6b7a88;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss_modal", "Close"),
+        Binding("q", "dismiss_modal", "Close", show=False),
+        Binding("enter", "select_action", "Run"),
+        Binding("j,down", "cursor_down", "Down", show=False),
+        Binding("k,up", "cursor_up", "Up", show=False),
+        Binding("1", "pick_index('0')", "1", show=False),
+        Binding("2", "pick_index('1')", "2", show=False),
+        Binding("3", "pick_index('2')", "3", show=False),
+    ]
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        severity: str | None,
+        meta: str,
+        message: str,
+        action_plans: list,
+    ) -> None:
+        super().__init__()
+        self._title = title
+        self._severity = severity or "error"
+        self._meta = meta
+        self._message = message
+        self._action_plans = list(action_plans)
+
+    def compose(self) -> ComposeResult:  # pragma: no cover - Textual harness
+        warn_class = "warn" if self._severity == "warn" else ""
+        with Vertical(id="alert-detail-dialog", classes=warn_class):
+            yield Static(
+                self._title,
+                id="alert-detail-title",
+                classes=warn_class,
+                markup=False,
+            )
+            yield Static(self._meta, id="alert-detail-meta", markup=False)
+            yield VerticalScroll(
+                Static(self._message, markup=False),
+                id="alert-detail-message",
+            )
+            yield ListView(id="alert-detail-actions")
+            yield Static(
+                "1/2/3 quick-pick · ↵ run · esc close",
+                id="alert-detail-hint",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:  # pragma: no cover - Textual harness
+        try:
+            list_view = self.query_one("#alert-detail-actions", ListView)
+        except Exception:  # noqa: BLE001
+            return
+        for index, plan in enumerate(self._action_plans):
+            label = plan.label
+            if index < 9:
+                label = f"[{index + 1}] {label}"
+            if plan.hint:
+                label = f"{label} — {plan.hint}"
+            try:
+                list_view.append(ListItem(Static(label, markup=False)))
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            list_view.focus()
+            if self._action_plans:
+                list_view.index = 0
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss(None)
+
+    def action_select_action(self) -> None:
+        try:
+            list_view = self.query_one("#alert-detail-actions", ListView)
+        except Exception:  # noqa: BLE001
+            self.dismiss(None)
+            return
+        index = list_view.index or 0
+        if 0 <= index < len(self._action_plans):
+            self.dismiss(self._action_plans[index].kind)
+        else:
+            self.dismiss(None)
+
+    def action_cursor_down(self) -> None:
+        try:
+            list_view = self.query_one("#alert-detail-actions", ListView)
+        except Exception:  # noqa: BLE001
+            return
+        if list_view.index is None:
+            list_view.index = 0
+        elif list_view.index < len(self._action_plans) - 1:
+            list_view.index += 1
+
+    def action_cursor_up(self) -> None:
+        try:
+            list_view = self.query_one("#alert-detail-actions", ListView)
+        except Exception:  # noqa: BLE001
+            return
+        if list_view.index is None:
+            list_view.index = 0
+        elif list_view.index > 0:
+            list_view.index -= 1
+
+    def action_pick_index(self, raw: str) -> None:
+        try:
+            index = int(raw)
+        except (TypeError, ValueError):
+            return
+        if 0 <= index < len(self._action_plans):
+            self.dismiss(self._action_plans[index].kind)
+
+
+def _strip_alert_marker(label: str) -> str:
+    """Remove the trailing rail-sparkline glyphs from a project label (#989).
+
+    The alert-detail modal shows the row label as context. Project rows
+    carry a 10-char activity sparkline at the tail
+    (:func:`pollypm.cockpit_rail._strip_trailing_spark`); stripping it
+    keeps the modal header readable.
+    """
+    if not label:
+        return ""
+    from pollypm.cockpit_rail import _strip_trailing_spark
+
+    return _strip_trailing_spark(label)[0].strip()
+
+
 def _wrap_alert_reason(reason: str, *, width: int = 28, max_lines: int = 4) -> list[str]:
     """Break ``reason`` into ≤``max_lines`` display lines of ≤``width`` chars.
 
@@ -464,6 +662,7 @@ class RailItem(ListItem):
             "project-start",
             "project-row",
             "needs-user",
+            "needs-user-warn",
             "live",
             "active-view",
         ]:
@@ -475,7 +674,13 @@ class RailItem(ListItem):
         if item.key.startswith("project:"):
             self.add_class("project-row")
         if item.state.startswith("!"):
+            # #989 — Differentiate warn (amber, one click to fix) from
+            # error (red, account repair / restart). The base
+            # ``needs-user`` class still applies for downstream
+            # consumers that don't care about severity.
             self.add_class("needs-user")
+            if item.alert_severity == "warn":
+                self.add_class("needs-user-warn")
         if (item.state.endswith("live") or item.state.endswith("working")) and item.key in ("polly", "russell"):
             self.add_class("live")
         if active_view:
@@ -514,19 +719,32 @@ class RailItem(ListItem):
         if self.item.state.startswith("!"):
             reason = self.item.state[2:].strip()  # strip "! " prefix
             if reason:
+                # #989 — Dim subtitle picks up severity tint so the
+                # subtitle reads as the same alert as the row badge.
+                subtitle_style = (
+                    "#f0c45a dim"
+                    if self.item.alert_severity == "warn"
+                    else "#ff5f6d dim"
+                )
                 for chunk in _wrap_alert_reason(
                     reason,
                     width=_rail_alert_subtitle_width(),
                     max_lines=4,
                 ):
-                    text.append(f"\n    {chunk}", style="#ff5f6d dim")
+                    text.append(f"\n    {chunk}", style=subtitle_style)
         self.body.update(text)
 
     def _indicator(self) -> tuple[str, str]:
         presence = self.presence
+        # #989 — Severity drives the badge color so warn (amber) and
+        # error (red) read as different states even when the row label
+        # / state string are identical.
+        alert_color = (
+            "#f0c45a" if self.item.alert_severity == "warn" else "#ff5f6d"
+        )
         if self.item.key.startswith("project:"):
             if self.item.state == "project-red":
-                return "▲", "#ff5f6d"
+                return "▲", alert_color
             if self.item.state == "project-yellow":
                 return "•", "#f0a030"
             if self.item.state == "project-green":
@@ -546,9 +764,9 @@ class RailItem(ListItem):
             return f"{pulse}{work_glyph}", color
         if presence is not None and self.item.state in {"heartbeat", "watch"}:
             return presence.heartbeat_frame(self.spinner_index), "#3ddc84"
-        # Alerts (red triangle)
+        # Alerts (red triangle / amber for warn-tier \u2014 #989)
         if self.item.state.startswith("!"):
-            return "\u25b2", "#ff5f6d"
+            return "\u25b2", alert_color
         # Separator
         if self.item.state == "separator":
             return "", "#4a5568"
@@ -607,7 +825,10 @@ class RailItem(ListItem):
         if work_state == "reviewing":
             return "\u270e", "#3ddc84"
         if work_state == "stuck":
-            return "\u26a0", "#ff5f6d"
+            # #989 \u2014 Pick amber for warn-tier alerts so the user can
+            # distinguish "answer the prompt" from "account repair".
+            color = "#f0c45a" if self.item.alert_severity == "warn" else "#ff5f6d"
+            return "\u26a0", color
         if work_state == "exited":
             return "\u2715", "#4a5568"
         return "\u00b7", "#4a5568"
@@ -676,6 +897,13 @@ class PollyCockpitApp(App[None]):
     #nav > .rail-row.needs-user {
         background: #34191c;
         color: #f2d7da;
+    }
+    /* #989 — Warn-tier alerts (one click to fix) get an amber row tint
+       instead of the red ``needs-user`` palette so the user can triage
+       at a glance: red = account repair, amber = answer the prompt. */
+    #nav > .rail-row.needs-user-warn {
+        background: #322818;
+        color: #f0cf9e;
     }
     #nav > .rail-row.live {
         background: #152a1f;
@@ -756,6 +984,11 @@ class PollyCockpitApp(App[None]):
         Binding("u", "trigger_upgrade", "Upgrade", show=False),
         Binding("x", "dismiss_update_pill", "Dismiss Update", show=False),
         Binding("a", "view_alerts", "Alerts", show=False),
+        # #989 — ``!`` opens the alert-detail modal scoped to the
+        # currently-highlighted rail row. Mnemonic: the rail badge is
+        # ``⚠``; ``!`` is its ASCII cousin and otherwise unbound on the
+        # rail. Priority so a rail rebuild in flight can't swallow it.
+        Binding("exclamation_mark", "view_alert_detail", "Alert", priority=True),
         Binding("ctrl+k,colon", "open_command_palette", "Palette", priority=True),
         Binding(
             "question_mark",
@@ -805,6 +1038,7 @@ class PollyCockpitApp(App[None]):
         "forward_project_chat",  # c
         "forward_project_log",   # l
         "forward_workers_auto_refresh",  # A
+        "view_alert_detail",     # !  (#989 — let the alert modal own ! when up)
     })
 
     # Same gating story for :class:`CommandPaletteModal` (#984). The
@@ -831,6 +1065,23 @@ class PollyCockpitApp(App[None]):
         "forward_project_chat",  # c
         "forward_project_log",   # l
         "forward_workers_auto_refresh",  # A
+        "view_alert_detail",     # !  (#989)
+    })
+
+    # #989 — Yield the rail's priority bindings to the alert-detail
+    # modal while it owns the screen stack so the user can navigate
+    # actions / dismiss without the rail eating the keystroke first.
+    _ALERT_DETAIL_MODAL_GATED_ACTIONS = frozenset({
+        "request_quit",          # q  (modal binds it to dismiss)
+        "back_to_home",          # escape
+        "view_alert_detail",     # !  (no double-stack)
+        "cursor_down",           # j, down
+        "cursor_up",             # k, up
+        "cursor_first",          # g, home
+        "cursor_last",           # G, end
+        "forward_action_button_1",
+        "forward_action_button_2",
+        "forward_action_button_3",
     })
 
     def check_action(
@@ -853,6 +1104,14 @@ class PollyCockpitApp(App[None]):
         if action in self._PALETTE_MODAL_GATED_ACTIONS:
             for screen in self.screen_stack:
                 if isinstance(screen, CommandPaletteModal):
+                    return False
+        # #989 — Same gating story for the alert-detail modal: while
+        # it is up, the App's priority ``j/k/escape/q/!/1-3`` must
+        # yield to the modal so the user can navigate / dismiss it
+        # without the rail's bindings preempting.
+        if action in self._ALERT_DETAIL_MODAL_GATED_ACTIONS:
+            for screen in self.screen_stack:
+                if isinstance(screen, _AlertDetailModal):
                     return False
         return super().check_action(action, parameters)
 
@@ -945,6 +1204,293 @@ class PollyCockpitApp(App[None]):
 
     def action_view_alerts(self) -> None:
         _action_view_alerts(self)
+
+    def action_view_alert_detail(self) -> None:
+        """Open the alert-detail modal for the currently-highlighted row (#989).
+
+        Falls through to the existing ``view_alerts`` (jump to Metrics)
+        when the cursor isn't on an alerted row, so the keystroke always
+        does something useful — it's better than the user pressing ``!``
+        and getting silence.
+        """
+        item = self._selected_item()
+        if item is None or item.alert_severity is None:
+            self.action_view_alerts()
+            return
+        plans = self._build_alert_action_plans(item)
+        if not plans:
+            self.action_view_alerts()
+            return
+        title = f"⚠ {item.alert_type or 'Alert'}"
+        meta_bits = [f"row: {_strip_alert_marker(item.label)}"]
+        if item.session_name:
+            meta_bits.append(f"session: {item.session_name}")
+        if item.alert_severity:
+            meta_bits.append(f"severity: {item.alert_severity}")
+        meta = " · ".join(meta_bits)
+        message = item.alert_message or "(no message recorded)"
+        try:
+            modal = _AlertDetailModal(
+                title=title,
+                severity=item.alert_severity,
+                meta=meta,
+                message=message,
+                action_plans=plans,
+            )
+            self.push_screen(
+                modal,
+                lambda kind: self._handle_alert_action(item, plans, kind),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.notify(
+                f"Could not open alert detail: {exc}",
+                severity="error",
+                timeout=3.0,
+            )
+
+    def _selected_item(self) -> CockpitItem | None:
+        key = self._selected_row_key()
+        if key is None:
+            return None
+        for item in self._items:
+            if item.key == key:
+                return item
+        return None
+
+    def _build_alert_action_plans(self, item: CockpitItem) -> list:
+        from pollypm.cockpit_alert_actions import (
+            recovery_actions_for,
+            task_id_from_alert_type,
+        )
+
+        project_key: str | None = None
+        if item.key.startswith("project:") and item.key.count(":") >= 1:
+            project_key = item.key.split(":", 2)[1] or None
+        elif item.session_name and item.session_name.startswith("worker_"):
+            project_key = item.session_name[len("worker_"):] or None
+        elif item.session_name and item.session_name.startswith("plan_gate-"):
+            project_key = item.session_name[len("plan_gate-"):] or None
+
+        task_id = task_id_from_alert_type(item.alert_type or "")
+        return recovery_actions_for(
+            item.alert_type or "",
+            session_name=item.session_name,
+            project_key=project_key,
+            task_id=task_id,
+            severity=item.alert_severity,
+        )
+
+    def _handle_alert_action(
+        self,
+        item: CockpitItem,
+        plans: list,
+        kind: str | None,
+    ) -> None:
+        if kind is None:
+            return
+        plan = next((p for p in plans if p.kind == kind), None)
+        if plan is None:
+            return
+        try:
+            self._run_alert_action(item, plan)
+        except Exception as exc:  # noqa: BLE001
+            self.notify(
+                f"Recovery action failed: {exc}",
+                severity="error",
+                timeout=4.0,
+            )
+            return
+        # Refresh the rail so the cleared/transitioned alert disappears
+        # immediately rather than waiting for the next periodic tick.
+        try:
+            self._refresh_rows()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _run_alert_action(self, item: CockpitItem, plan) -> None:
+        """Execute a single :class:`AlertActionPlan`.
+
+        Side effects: depending on ``plan.kind``, may clear an alert in
+        ``state.db``, restart a tmux session, or route the cockpit
+        right pane. Notifies the user on success / failure so silent
+        no-ops never leave the user wondering what happened.
+        """
+        kind = plan.kind
+        if kind == "acknowledge":
+            self._alert_action_acknowledge(item)
+            return
+        if kind == "view_pane":
+            self._alert_action_view_pane(plan, item)
+            return
+        if kind == "route_inbox":
+            self._alert_action_route(plan, route="inbox")
+            return
+        if kind == "route_chat_pm":
+            self._alert_action_route_chat_pm(plan)
+            return
+        if kind == "route_settings_accounts":
+            self._alert_action_route(plan, route="settings")
+            return
+        if kind == "resume_recovery":
+            self._alert_action_resume_recovery(plan, item)
+            return
+        if kind == "restart_session":
+            self._alert_action_restart(plan, item)
+            return
+        self.notify(f"Unhandled action: {kind}", severity="warning", timeout=2.5)
+
+    def _alert_action_acknowledge(self, item: CockpitItem) -> None:
+        if not item.session_name or not item.alert_type:
+            self.notify("Nothing to clear.", severity="warning", timeout=2.0)
+            return
+        supervisor = self._load_supervisor_for_alert_action()
+        if supervisor is None:
+            return
+        try:
+            supervisor.msg_store.clear_alert(item.session_name, item.alert_type)
+        finally:
+            self._close_alert_supervisor(supervisor)
+        self.notify(
+            f"Cleared {item.alert_type} on {item.session_name}.",
+            severity="information",
+            timeout=2.0,
+        )
+
+    def _alert_action_view_pane(self, plan, item: CockpitItem) -> None:
+        # Route the rail to the live session so the user sees the pane.
+        # Project rows already have a ``:session`` route; top-level
+        # operator/reviewer rows route by their rail key.
+        if item.key.startswith("project:"):
+            project_key = item.key.split(":", 2)[1]
+            target = f"project:{project_key}:session"
+        elif item.key in ("polly", "russell"):
+            target = item.key
+        else:
+            target = "workers"
+        self._schedule_route_selected(target, label=target)
+
+    def _alert_action_route(self, plan, *, route: str) -> None:
+        target = route
+        if route == "inbox" and plan.project_key:
+            target = f"inbox:{plan.project_key}"
+        self._schedule_route_selected(target, label=target)
+
+    def _alert_action_route_chat_pm(self, plan) -> None:
+        if not plan.project_key:
+            self.notify("No project to chat with.", severity="warning", timeout=2.0)
+            return
+        # Route to the project dashboard and prompt the user to press
+        # ``c`` — the project dashboard's Plan card already advertises
+        # that key (#863). The right pane needs a tick to mount and
+        # the rail's existing ``forward_project_chat`` binding already
+        # handles the keystroke cleanly. Notifying the user is
+        # consistent with the rest of the rail's "route + hint"
+        # pattern (see #985 hand-off).
+        self._schedule_route_selected(
+            f"project:{plan.project_key}:dashboard",
+            label=plan.project_key,
+        )
+        self.notify(
+            f"Press c to ask the PM to plan {plan.project_key}.",
+            severity="information",
+            timeout=3.5,
+        )
+
+    def _alert_action_resume_recovery(self, plan, item: CockpitItem) -> None:
+        session_name = plan.session_name or item.session_name
+        if not session_name:
+            self.notify("No session to resume.", severity="warning", timeout=2.0)
+            return
+        supervisor = self._load_supervisor_for_alert_action()
+        if supervisor is None:
+            return
+        try:
+            supervisor.msg_store.clear_alert(session_name, "recovery_limit")
+            # Reset the recovery-attempt counter so the next failure
+            # gets ``_RECOVERY_LIMIT`` retries again instead of slamming
+            # straight back into ``recovery_limit``.
+            supervisor.store.upsert_session_runtime(
+                session_name=session_name,
+                status="idle",
+                recovery_attempts=0,
+                recovery_window_started_at=None,
+            )
+        finally:
+            self._close_alert_supervisor(supervisor)
+        self.notify(
+            f"Auto-recovery resumed for {session_name}.",
+            severity="information",
+            timeout=2.5,
+        )
+
+    def _alert_action_restart(self, plan, item: CockpitItem) -> None:
+        session_name = plan.session_name or item.session_name
+        if not session_name:
+            self.notify("No session to restart.", severity="warning", timeout=2.0)
+            return
+        supervisor = self._load_supervisor_for_alert_action()
+        if supervisor is None:
+            return
+        try:
+            launch = next(
+                (
+                    spec for spec in supervisor.plan_launches()
+                    if spec.session.name == session_name
+                ),
+                None,
+            )
+            if launch is None:
+                self.notify(
+                    f"Session {session_name} is not configured.",
+                    severity="warning",
+                    timeout=2.5,
+                )
+                return
+            account_name = launch.account.name
+            # Clear the pause flag first so the supervisor's recovery
+            # loop won't immediately re-raise it on the next failure.
+            supervisor.msg_store.clear_alert(session_name, "recovery_limit")
+            supervisor.store.upsert_session_runtime(
+                session_name=session_name,
+                status="recovering",
+                recovery_attempts=0,
+                recovery_window_started_at=None,
+            )
+            supervisor.restart_session(
+                session_name,
+                account_name,
+                failure_type="manual_recovery",
+            )
+        finally:
+            self._close_alert_supervisor(supervisor)
+        self.notify(
+            f"Restarted {session_name}.",
+            severity="information",
+            timeout=2.5,
+        )
+
+    def _load_supervisor_for_alert_action(self):
+        try:
+            from pollypm.service_api import PollyPMService
+
+            return PollyPMService(self.config_path).load_supervisor()
+        except Exception as exc:  # noqa: BLE001
+            self.notify(
+                f"Could not load supervisor: {exc}",
+                severity="error",
+                timeout=3.0,
+            )
+            return None
+
+    @staticmethod
+    def _close_alert_supervisor(supervisor) -> None:
+        store = getattr(supervisor, "store", None)
+        close = getattr(store, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _show_palette_tip_once(self) -> None:
         try:
