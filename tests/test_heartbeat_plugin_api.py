@@ -352,6 +352,60 @@ def test_supervisor_heartbeat_api_lists_unmanaged_windows(tmp_path: Path, monkey
     ]
 
 
+def test_supervisor_heartbeat_api_skips_pm_upgrade_window(tmp_path: Path, monkeypatch) -> None:
+    """#1000 — the rail one-click upgrade opens a ``pm-upgrade`` window
+    so the user can read upgrade output and the changelog. It's
+    intentional and short-lived; the supervisor must not flag it as
+    ``unmanaged_window:pollypm:pm-upgrade``.
+    """
+    supervisor = Supervisor(_config(tmp_path))
+    supervisor.ensure_layout()
+    launch = supervisor.plan_launches()[0]
+    managed_window = TmuxWindow(
+        session=supervisor.storage_closet_session_name(),
+        index=1,
+        name=launch.window_name,
+        active=True,
+        pane_id="%1",
+        pane_current_command="claude",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+    )
+    console_window = TmuxWindow(
+        session=supervisor.config.project.tmux_session,
+        index=0,
+        name=supervisor.console_window_name(),
+        active=True,
+        pane_id="%2",
+        pane_current_command="python3",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+    )
+    pm_upgrade_window = TmuxWindow(
+        session=supervisor.config.project.tmux_session,
+        index=3,
+        name="pm-upgrade",
+        active=False,
+        pane_id="%4",
+        pane_current_command="bash",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "window_map",
+        lambda: {
+            managed_window.name: managed_window,
+            console_window.name: console_window,
+            pm_upgrade_window.name: pm_upgrade_window,
+        },
+    )
+
+    api = SupervisorHeartbeatAPI(supervisor)
+
+    assert api.list_unmanaged_windows() == []
+
+
 def test_supervisor_heartbeat_api_records_snapshot_learnings_into_memory(tmp_path: Path, monkeypatch) -> None:
     supervisor = Supervisor(_config(tmp_path))
     supervisor.ensure_layout()

@@ -24,6 +24,12 @@ class SupervisorHeartbeatAPI:
     def list_sessions(self) -> list[HeartbeatSessionContext]:
         return list(self._contexts)
 
+    # Transient windows opened by the cockpit/CLI for short-lived utility
+    # work (e.g. the rail one-click upgrade). They aren't part of the
+    # supervisor's launch plan but are intentional and self-dismissing
+    # — see #1000 for the ``pm-upgrade`` orphan-alert context.
+    _TRANSIENT_UTILITY_WINDOW_NAMES = frozenset({"pm-upgrade"})
+
     def list_unmanaged_windows(self) -> list[HeartbeatUnmanagedWindow]:
         expected_window_names = {launch.window_name for launch in self.supervisor.plan_launches()}
         expected_window_names.add(self.supervisor.console_window_name())
@@ -34,6 +40,13 @@ class SupervisorHeartbeatAPI:
             # Per-task worker sessions (task-<project>-<number>) are managed
             # by the SessionManager, not the supervisor's launch plan.
             if window.name.startswith("task-"):
+                continue
+            # Transient utility windows (#1000) — the rail one-click
+            # upgrade opens ``pm-upgrade`` so the user can read upgrade
+            # output and the changelog. It's intentional, short-lived,
+            # and dismissed by the user pressing enter; the supervisor
+            # shouldn't alert on it.
+            if window.name in self._TRANSIENT_UTILITY_WINDOW_NAMES:
                 continue
             unmanaged.append(
                 HeartbeatUnmanagedWindow(
