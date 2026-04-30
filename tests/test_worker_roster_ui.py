@@ -133,7 +133,13 @@ def test_roster_renders_all_configured_workers(roster_env, roster_app) -> None:
 
 
 def test_status_dots_for_each_category(roster_env, roster_app) -> None:
-    """Health states map to the expected glyph set."""
+    """Health states map to the expected glyph set.
+
+    Per-row dots use *health* iconography (colored circles); the header
+    counters use *workload state* iconography (shape glyphs). The two
+    palettes are deliberately disjoint — see #998 and
+    ``test_header_counters_use_state_glyphs_not_health_palette`` below.
+    """
     async def body() -> None:
         rows = [
             _make_row(status="stuck", health="unresponsive", session_name="s"),
@@ -148,16 +154,78 @@ def test_status_dots_for_each_category(roster_env, roster_app) -> None:
             assert dots["alive"][0] == "🟢"
             assert dots["idle_warn"][0] == "🟡"
             assert dots["unresponsive"][0] == "🔴"
-            # Counters line reflects the group tallies.
+            # Counters line reflects the group tallies using *state*
+            # glyphs (shapes), not the per-row health palette.
+            states = roster_app._STATE_GLYPHS
             counter_text = str(roster_app.counters.render())
-            assert "🟢" in counter_text
+            assert states["working"][0] in counter_text
             assert "working" in counter_text
-            assert "🟡" in counter_text
+            assert states["idle"][0] in counter_text
             assert "idle" in counter_text
-            assert "🔴" in counter_text
+            assert states["stuck"][0] in counter_text
             assert "stuck" in counter_text
-            assert "⚪" in counter_text
+            assert states["offline"][0] in counter_text
             assert "offline" in counter_text
+    _run(body())
+
+
+def test_header_counters_use_state_glyphs_not_health_palette(
+    roster_env, roster_app
+) -> None:
+    """Regression for #998 — header counters and per-row dots are different palettes.
+
+    Workload state (working/idle/stuck/offline) and worker health
+    (alive/idle_warn/unresponsive/handed_off) are orthogonal signals: a
+    worker with ``status="idle"`` and ``health="alive"`` is fine — no
+    active turn, but heartbeat fresh. Before #998 the panel rendered
+    both dimensions with the same colored-circle palette
+    (🟢 🟡 🔴 ⚪), so the header read ``🟡 12 idle`` while every row
+    painted 🟢, and a cold reader could not tell which color was
+    authoritative.
+
+    The fix paints header counters with shape glyphs (▶ ⏸ ⚠ ⏻) and
+    keeps per-row dots as colored circles; the two palettes must not
+    overlap.
+    """
+    async def body() -> None:
+        # 12 idle-but-alive workers — the exact shape of the bug report.
+        rows = [
+            _make_row(
+                status="idle",
+                health="alive",
+                session_name=f"w_{i}",
+                task_number=i,
+            )
+            for i in range(12)
+        ]
+        roster_app._gather = lambda: rows  # type: ignore[method-assign]
+        async with roster_app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            counter_text = str(roster_app.counters.render())
+            # Header counter uses the state glyph for "idle"...
+            assert "⏸" in counter_text
+            assert "12" in counter_text
+            assert "idle" in counter_text
+            # ...and is free of every health-palette circle. Same
+            # palette for two dimensions is exactly the #998 confusion.
+            for circle in ("🟢", "🟡", "🔴", "⚪"):
+                assert circle not in counter_text, (
+                    f"#998: header counters must not reuse health glyph {circle!r}; "
+                    f"got: {counter_text!r}"
+                )
+            # Per-row dots stay on the health palette (every row alive).
+            first_row = [str(c) for c in roster_app.table.get_row_at(0)]
+            assert first_row[2] == "🟢"
+            # And the state-glyph palette must not bleed into the row.
+            for shape in ("▶", "⏸", "⚠", "⏻"):
+                assert shape not in first_row[2]
+            # The two glyph dicts must not share any glyph.
+            health_chars = {g for g, _c in roster_app._HEALTH_GLYPHS.values()}
+            state_chars = {g for g, _c in roster_app._STATE_GLYPHS.values()}
+            assert health_chars.isdisjoint(state_chars), (
+                f"state and health palettes must not overlap: "
+                f"health={health_chars} state={state_chars}"
+            )
     _run(body())
 
 

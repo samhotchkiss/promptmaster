@@ -118,6 +118,21 @@ class PollyWorkerRosterApp(App[None]):
         "unresponsive": ("\U0001f534", "#ff5f6d"),
     }
 
+    # Header counter glyphs — workload *state*, deliberately NOT the same
+    # palette as ``_HEALTH_GLYPHS``. A worker can be ``state=idle`` while
+    # still ``health=alive`` (heartbeat fresh, no active turn); painting
+    # the header with the same colored-circle palette as the per-row dot
+    # made the two dimensions read as one, so the header would say
+    # ``🟡 12 idle`` while every row painted ``🟢`` (#998). State uses
+    # *shape* glyphs (▶ ⏸ ⚠ ⏻); health uses colored circles. Keep them
+    # visually orthogonal.
+    _STATE_GLYPHS: dict[str, tuple[str, str]] = {
+        "working": ("▶", "#3ddc84"),   # ▶ running
+        "idle": ("⏸", "#f0c45a"),      # ⏸ paused
+        "stuck": ("⚠", "#ff5f6d"),     # ⚠ stuck
+        "offline": ("⏻", "#97a6b2"),   # ⏻ powered down
+    }
+
     _DEFAULT_HINT = (
         "R refresh \u00b7 A auto-refresh \u00b7 \u21b5 open project "
         "\u00b7 d discuss \u00b7 q back"
@@ -204,11 +219,23 @@ class PollyWorkerRosterApp(App[None]):
             "[#3ddc84]auto on[/#3ddc84]" if self._auto_refresh
             else "[dim]auto off[/dim]"
         )
+        # Header counters use *state* glyphs (▶ ⏸ ⚠ ⏻), deliberately
+        # different from the per-row *health* circles (🟢 🟡 🔴 ⚪).
+        # Same palette for both dimensions made #998 ambiguous: a worker
+        # at ``status="idle"`` with ``health="alive"`` produced a header
+        # of ``🟡 N idle`` while every row painted ``🟢``, two color
+        # codings claiming authority. Workload state and health are
+        # orthogonal signals; keep their iconography orthogonal too.
+        g_work = self._STATE_GLYPHS["working"]
+        g_idle = self._STATE_GLYPHS["idle"]
+        g_stuck = self._STATE_GLYPHS["stuck"]
+        g_off = self._STATE_GLYPHS["offline"]
         self.counters.update(
-            f"\U0001f7e2 [b]{n_working}[/b] [dim]working[/dim]  "
-            f"\U0001f7e1 [b]{n_idle}[/b] [dim]idle[/dim]  "
-            f"\U0001f534 [#ff5f6d]{n_stuck}[/#ff5f6d] [dim]stuck[/dim]  "
-            f"⚪ [b]{n_offline}[/b] [dim]offline[/dim]  \u00b7  {auto_tag}"
+            f"[{g_work[1]}]{g_work[0]}[/{g_work[1]}] [b]{n_working}[/b] [dim]working[/dim]  "
+            f"[{g_idle[1]}]{g_idle[0]}[/{g_idle[1]}] [b]{n_idle}[/b] [dim]idle[/dim]  "
+            f"[{g_stuck[1]}]{g_stuck[0]}[/{g_stuck[1]}] [#ff5f6d]{n_stuck}[/#ff5f6d] [dim]stuck[/dim]  "
+            f"[{g_off[1]}]{g_off[0]}[/{g_off[1]}] [b]{n_offline}[/b] [dim]offline[/dim]"
+            f"  \u00b7  {auto_tag}"
         )
         self.topbar.update(
             "   ".join(
