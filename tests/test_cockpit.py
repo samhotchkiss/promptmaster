@@ -4872,3 +4872,65 @@ def test_rail_click_is_stable_across_multiple_targets() -> None:
         assert app.selected_key == target, (
             f"click on {target!r} did not stick (got {app.selected_key!r})"
         )
+
+
+def test_route_selected_persists_intent_before_layout_work(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#967 follow-up — clicking a rail item must persist the new
+    ``selected`` key to ``cockpit_state.json`` BEFORE any
+    potentially-failing layout/mount work runs.
+
+    Pre-fix behaviour: ``CockpitRouter.route_selected`` called
+    ``ensure_cockpit_layout`` first and ``set_selected_key`` only after,
+    inside the same try-block. When ``ensure_cockpit_layout`` (or any
+    intermediate step) raised, ``state["selected"]`` stayed pinned at
+    the previous click's key — typically ``inbox`` because that's where
+    users sit between actions. The cockpit's layout-recovery tick fires
+    every ~30s; on its next ``_refresh_rows`` it adopts the persisted
+    selection back into the rail's in-memory cursor, bouncing the user
+    from the freshly-clicked Polly · chat row to Inbox row 10. The
+    operator window spawned by ``supervisor.launch_session`` is then
+    torn down by the same recovery sweep.
+
+    Post-fix: ``set_selected_key`` runs first, so the user's intent is
+    persisted regardless of whether downstream layout work succeeds.
+    """
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f"[project]\nname = \"PollyPM\"\n"
+        f"tmux_session = \"pollypm\"\n"
+        f"base_dir = \"{tmp_path / '.pollypm'}\"\n"
+    )
+
+    router = CockpitRouter(config_path)
+
+    # Seed disk state with a stale prior selection so we can prove the
+    # bounce destination is whatever was persisted, not whatever the
+    # router defaults to. ``inbox`` matches the live failure mode in
+    # #967's 2026-04-29 17:24 PT comment.
+    router._write_state({"selected": "inbox"})
+
+    # Simulate the live failure mode: ``ensure_cockpit_layout`` blows
+    # up part-way through (e.g. tmux not running, supervisor refusing to
+    # load, fifth-layer guard rejecting a persona swap). Pre-fix this
+    # raises BEFORE ``set_selected_key`` is reached, so disk state stays
+    # at ``inbox``.
+    monkeypatch.setattr(
+        router,
+        "ensure_cockpit_layout",
+        lambda: (_ for _ in ()).throw(RuntimeError("simulated layout failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated layout failure"):
+        router.route_selected("polly")
+
+    # The user's most-recent intent must be on disk so the next
+    # layout-recovery refresh adopts ``polly`` — not the stale
+    # ``inbox`` — into the rail cursor.
+    state = router._load_state()
+    assert state.get("selected") == "polly", (
+        "route_selected raised before persisting the new selection — the "
+        "next periodic _refresh_rows will bounce the cursor back to the "
+        f"stale state[\"selected\"]={state.get('selected')!r} (#967)."
+    )

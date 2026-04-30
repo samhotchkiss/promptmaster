@@ -2351,6 +2351,20 @@ class CockpitRouter:
         self._write_state(state)
 
     def route_selected(self, key: str) -> None:
+        # #967 follow-up — persist the user's intent BEFORE any
+        # potentially-failing layout/mount work. The previous order
+        # (ensure_cockpit_layout → set_selected_key) meant that any
+        # exception in ensure_cockpit_layout / _right_pane_id / the
+        # supervisor load left ``state["selected"]`` pinned at the
+        # PREVIOUS click's key (typically ``inbox`` because that's where
+        # users sit). When the cockpit's layout-recovery tick fires at
+        # ~30s (``_LAYOUT_CHECK_INTERVAL`` in cockpit_ui), it triggers a
+        # ``_refresh_rows`` that reads ``state["selected"]`` back into
+        # the in-memory ``self.selected_key`` — bouncing the cursor +
+        # right pane to the stale prior selection. Writing the new key
+        # to disk first keeps the rail aligned with the user's intent
+        # even when downstream work raises.
+        self.set_selected_key(key)
         token = self._begin_layout_mutation()
         try:
             supervisor = self._load_supervisor()
@@ -2360,7 +2374,6 @@ class CockpitRouter:
             if right_pane is None:
                 raise RuntimeError("Cockpit right pane is not available.")
 
-            self.set_selected_key(key)
             plan = resolve_cockpit_content(key, self._content_context(supervisor))
             self._route_content_plan(supervisor, window_target, plan)
         finally:
