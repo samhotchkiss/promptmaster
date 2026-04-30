@@ -605,6 +605,95 @@ class TestNew:
         assert not (tmp_path / ".pollypm" / "state.db").exists()
         assert "Auto-created plan_project task" not in result.stdout
 
+    # -----------------------------------------------------------------
+    # Issue #993: auto-fired plan_project task must move past draft so
+    # the architect's assignment sweep actually has work to push.
+    # -----------------------------------------------------------------
+
+    def test_new_auto_fired_plan_task_is_queued(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The auto-fired plan_project task must NOT linger in draft.
+
+        Regression for #993: previously the observer created the task in
+        ``draft`` and the architect spawn would sit idle forever because
+        the task-assignment sweep only pushes ``queued``/``in_progress``
+        tasks. After the fix the task should be at least ``queued`` (the
+        sweep may transition it onward to ``in_progress`` synchronously
+        if a worker session is wired, but ``queued`` is the contract).
+        """
+        from pollypm.work.models import WorkStatus
+        from pollypm.work.sqlite_service import SQLiteWorkService
+
+        repo = _make_project_repo(tmp_path, name="fresh")
+        config_path = _write_minimal_config(tmp_path)
+
+        monkeypatch.setattr(
+            project_cli, "_prompt_run_planner",
+            lambda default_yes=True: (_ for _ in ()).throw(
+                AssertionError("prompt should not fire")
+            ),
+        )
+
+        result = runner.invoke(
+            project_app,
+            ["new", str(repo), "--yes", "--config", str(config_path)],
+        )
+        assert result.exit_code == 0, result.stdout + result.stderr
+
+        with SQLiteWorkService(
+            db_path=tmp_path / ".pollypm" / "state.db",
+            project_path=tmp_path,
+        ) as svc:
+            tasks = [
+                t for t in svc.list_tasks(project="fresh")
+                if t.flow_template_id == "plan_project"
+            ]
+        assert len(tasks) == 1, f"expected 1 plan_project task, got {tasks}"
+        task = tasks[0]
+        assert task.work_status != WorkStatus.DRAFT, (
+            "auto-fired plan_project task must be moved past draft so the "
+            "architect assignment sweep has something to push (#993). "
+            f"Got status={task.work_status.value!r}."
+        )
+        # Either queued (no live architect session yet) or in_progress
+        # (sweep already promoted it). Both are acceptable post-fix; the
+        # bug was the task sitting in draft indefinitely.
+        assert task.work_status in (
+            WorkStatus.QUEUED, WorkStatus.IN_PROGRESS,
+        ), (
+            f"expected queued or in_progress, got {task.work_status.value!r}"
+        )
+
+    def test_new_skip_plan_creates_no_task_at_all(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """``--skip-plan`` must keep the auto-fire suppressed entirely.
+
+        The #993 fix added an auto-queue step — verify it doesn't kick in
+        when the user explicitly opted out. ``--skip-plan`` should still
+        leave no work-service DB and no plan_project task.
+        """
+        repo = _make_project_repo(tmp_path, name="fresh")
+        config_path = _write_minimal_config(tmp_path)
+
+        monkeypatch.setattr(
+            project_cli, "_prompt_run_planner",
+            lambda default_yes=True: (_ for _ in ()).throw(
+                AssertionError("prompt should not fire when --skip-plan passed")
+            ),
+        )
+
+        result = runner.invoke(
+            project_app,
+            ["new", str(repo), "--skip-plan", "--yes",
+             "--config", str(config_path)],
+        )
+        assert result.exit_code == 0, result.stdout + result.stderr
+        # Observer short-circuits before create() so no DB, no task, and
+        # certainly no draft-in-disguise.
+        assert not (tmp_path / ".pollypm" / "state.db").exists()
+
 
 # ---------------------------------------------------------------------------
 # Issue #255 — pm add-project auto-fire

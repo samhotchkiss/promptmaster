@@ -211,11 +211,32 @@ def _on_project_created(context) -> None:
                 roles={"architect": "architect"},
                 priority="high",
             )
+            # Issue #993: the architect spawn relies on the assignment
+            # sweep finding a *queued* (or in_progress) task. Leaving the
+            # auto-fired task in ``draft`` makes the architect bootstrap,
+            # say "ready", and sit idle forever. Move it forward to
+            # ``queued`` here so the same project.created chain that
+            # spawns the session also hands it real work. Best-effort:
+            # if the queue gate ever fails (missing description, custom
+            # gate plugin, etc.) we keep the draft so the user can fix
+            # it manually rather than crashing the registration flow.
+            try:
+                task = svc.queue(task.task_id, actor="planner")
+                queued = True
+            except Exception as queue_exc:  # noqa: BLE001
+                log.warning(
+                    "project_planning: auto-queue of %s failed (%s); "
+                    "task left in draft. Run `pm task queue %s` manually.",
+                    task.task_id, queue_exc, task.task_id,
+                )
+                queued = False
         log.info(
-            "project_planning: auto-fired %s task %s for '%s' (mode=%s).",
+            "project_planning: auto-fired %s task %s for '%s' "
+            "(mode=%s, status=%s).",
             "replan" if is_replan else "plan_project",
             task.task_id, project_key,
             "existing" if is_replan else "greenfield",
+            "queued" if queued else "draft",
         )
     except Exception as exc:  # noqa: BLE001
         # Observers are best-effort.
