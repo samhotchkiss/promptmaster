@@ -139,11 +139,17 @@ class CommandPaletteModal(ModalScreen[str | None]):
     }
     """
 
+    # Priority bindings so the modal traps input — without ``priority``
+    # the cockpit App underneath has its own priority ``escape``
+    # (back_to_home), ``j``/``k``/``g``/``G`` (cursor_*) and ``q``
+    # (request_quit) bindings that fire App-down before the modal sees
+    # the keystroke, leaving the user unable to dismiss the palette
+    # (#984; mirrors the KeyboardHelpModal fix in #861/#917).
     BINDINGS = [
-        Binding("escape", "cancel", "Close"),
-        Binding("down", "cursor_down", "Down", show=False),
-        Binding("up", "cursor_up", "Up", show=False),
-        Binding("enter", "run_selected", "Run", show=False),
+        Binding("escape", "cancel", "Close", priority=True),
+        Binding("down", "cursor_down", "Down", show=False, priority=True),
+        Binding("up", "cursor_up", "Up", show=False, priority=True),
+        Binding("enter", "run_selected", "Run", show=False, priority=True),
     ]
 
     def __init__(

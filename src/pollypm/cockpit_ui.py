@@ -807,21 +807,52 @@ class PollyCockpitApp(App[None]):
         "forward_workers_auto_refresh",  # A
     })
 
+    # Same gating story for :class:`CommandPaletteModal` (#984). The
+    # palette autofocuses an Input widget, but App-level priority
+    # bindings preempt focus, so without yielding these the user cannot
+    # press Esc to close the palette, and arrow keys never reach the
+    # palette's ListView. ``open_command_palette`` is gated too so a
+    # second ``:`` / ``Ctrl-K`` does not stack a second palette on top
+    # — instead the existing one stays up and Esc still works.
+    _PALETTE_MODAL_GATED_ACTIONS = frozenset({
+        "request_quit",          # q, Q, ctrl+q
+        "back_to_home",          # escape
+        "open_command_palette",  # : / ctrl+k (no double-stack)
+        "show_keyboard_help",    # ? (don't open help on top of palette)
+        "cursor_down",           # j, down
+        "cursor_up",             # k, up
+        "cursor_first",          # g, home
+        "cursor_last",           # G, end
+        "open_inbox",            # i
+        "forward_tab_to_right",  # tab
+        "forward_action_button_1",
+        "forward_action_button_2",
+        "forward_action_button_3",
+        "forward_project_chat",  # c
+        "forward_project_log",   # l
+        "forward_workers_auto_refresh",  # A
+    })
+
     def check_action(
         self, action: str, parameters: tuple[object, ...],
     ) -> bool | None:
-        """Suppress App-level priority bindings while help modal is up.
+        """Suppress App-level priority bindings while a modal is up.
 
         Textual checks priority bindings App-down, so without this gate
         the App's ``q`` / ``escape`` / ``j`` / ``k`` bindings fire before
-        :class:`KeyboardHelpModal` ever sees the keystroke (#917). When
-        the modal is on the screen stack, return ``False`` for the gated
-        actions so :meth:`textual.app.App.run_action` skips the App
-        binding and the chain falls through to the modal's own binding.
+        :class:`KeyboardHelpModal` or :class:`CommandPaletteModal` ever
+        see the keystroke (#917, #984). When either modal is on the
+        screen stack, return ``False`` for the gated actions so
+        :meth:`textual.app.App.run_action` skips the App binding and the
+        chain falls through to the modal's own binding.
         """
         if action in self._HELP_MODAL_GATED_ACTIONS:
             for screen in self.screen_stack:
                 if isinstance(screen, KeyboardHelpModal):
+                    return False
+        if action in self._PALETTE_MODAL_GATED_ACTIONS:
+            for screen in self.screen_stack:
+                if isinstance(screen, CommandPaletteModal):
                     return False
         return super().check_action(action, parameters)
 

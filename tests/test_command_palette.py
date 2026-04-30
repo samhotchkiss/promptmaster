@@ -450,6 +450,94 @@ def test_palette_binding_present_on_inbox_and_dashboard_and_rail(
     assert _has_palette_keys(PollyWorkerRosterApp)
 
 
+@pytest.fixture
+def cockpit_app(single_project_config):
+    if not _load_config_compatible(single_project_config):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_ui import PollyCockpitApp
+    return PollyCockpitApp(single_project_config)
+
+
+@pytest.mark.parametrize("dismiss_key", ["escape"])
+def test_cockpit_rail_dismiss_keys_close_palette_modal(
+    cockpit_app, dismiss_key,
+) -> None:
+    """``Esc`` closes the palette modal on PollyCockpitApp (#984).
+
+    PollyCockpitApp's BINDINGS make ``escape`` (back_to_home), ``q``
+    (request_quit), and the cursor keys all priority. Textual walks
+    priority bindings App-down, so without an explicit gate the App-
+    level priority binding fires before ``CommandPaletteModal`` sees
+    the keystroke and the modal becomes a non-dismissible overlay
+    (the user-visible symptom in #984).
+    """
+    async def body() -> None:
+        async with cockpit_app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("colon")
+            await pilot.pause()
+            assert _find_palette_modal(cockpit_app) is not None, (
+                "expected CommandPaletteModal after `:` on PollyCockpitApp"
+            )
+            await pilot.press(dismiss_key)
+            await pilot.pause()
+            assert _find_palette_modal(cockpit_app) is None, (
+                f"expected modal dismissed by {dismiss_key!r} on PollyCockpitApp; "
+                "App-level priority bindings (escape -> back_to_home) preempt the "
+                "modal's escape binding without the #984 gate."
+            )
+    _run(body())
+
+
+def test_palette_modal_bindings_are_priority_to_trap_rail_keys() -> None:
+    """Modal bindings must run with priority so the rail underneath does
+    not eat Escape / arrow keys before the modal sees them (#984).
+
+    Mirrors :func:`test_help_modal_bindings_are_priority_to_trap_rail_keys`
+    for the help overlay — same root cause, same defensive assertion.
+    """
+    from pollypm.cockpit_ui import CommandPaletteModal
+
+    for binding in CommandPaletteModal.BINDINGS:
+        assert getattr(binding, "priority", False), (
+            f"{binding.key!r} must be priority to trap rail bindings"
+        )
+
+
+def test_palette_input_starts_empty_on_each_open(cockpit_app) -> None:
+    """The palette's Input field must not pre-populate with stale text (#984).
+
+    Reopening the palette after a previous dismiss must surface a clean
+    Input — otherwise leaked keystrokes from a sibling pane (the user
+    in #984 saw "then acknowledge b" appear) survive across opens.
+    """
+    async def body() -> None:
+        async with cockpit_app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("colon")
+            await pilot.pause()
+            modal = _find_palette_modal(cockpit_app)
+            assert modal is not None
+            assert modal.input.value == "", (
+                f"palette input must start empty; got {modal.input.value!r}"
+            )
+            # Type a query then dismiss; the next open should not retain it.
+            modal.input.value = "stale-text"
+            modal._filter("stale-text")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert _find_palette_modal(cockpit_app) is None
+            await pilot.press("colon")
+            await pilot.pause()
+            modal2 = _find_palette_modal(cockpit_app)
+            assert modal2 is not None
+            assert modal2.input.value == "", (
+                f"palette input must reset on reopen; got {modal2.input.value!r}"
+            )
+    _run(body())
+
+
 def test_keyboard_help_keeps_rail_movement_labels_together(
     single_project_config: Path,
 ) -> None:
