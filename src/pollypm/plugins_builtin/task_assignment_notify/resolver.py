@@ -201,7 +201,7 @@ def notify(
     )
 
     if handle is None:
-        _escalate_no_session(event, msg_store or store)
+        _escalate_no_session(event, msg_store or store, services=services)
         return {
             "outcome": "no_session",
             "task_id": event.task_id,
@@ -463,6 +463,42 @@ def _alert_type_for(event: TaskAssignmentEvent) -> str:
     return f"no_session_for_assignment:{event.task_id}"
 
 
+def _known_project_keys(services: Any | None) -> frozenset[str]:
+    """Return the set of registered project keys, or an empty set.
+
+    #1001: callers use this to short-circuit alert emission for a
+    project that isn't (or no longer is) registered in the operator
+    config. An empty set is intentionally ambiguous between "no
+    config / test mode" and "explicit empty registry"; the sentinel
+    ``None`` services object also collapses to empty so the legacy
+    unrestricted behaviour is preserved when there's no registry to
+    match against. Callers should only filter when the result is
+    non-empty.
+    """
+    if services is None:
+        return frozenset()
+    keys: set[str] = set()
+    for entry in getattr(services, "known_projects", ()) or ():
+        key = getattr(entry, "key", None)
+        if isinstance(key, str) and key:
+            keys.add(key)
+    return frozenset(keys)
+
+
+def _project_is_registered(project: str, services: Any | None) -> bool:
+    """Return True when ``project`` should still receive new alerts.
+
+    Returns True when the registry is empty (no signal — preserve the
+    legacy behaviour) or when ``project`` appears in the registry.
+    Returns False only when there's an explicit non-empty registry and
+    ``project`` is missing — that's the ghost-project case (#1001).
+    """
+    keys = _known_project_keys(services)
+    if not keys:
+        return True
+    return project in keys
+
+
 def clear_alerts_for_cancelled_task(
     *,
     task_id: str,
@@ -624,9 +660,24 @@ def clear_no_session_alert_for_task(
     return {"cleared_per_task": cleared_per_task}
 
 
-def _escalate_no_session(event: TaskAssignmentEvent, store: Any | None) -> None:
-    """Raise (or refresh) a user-inbox alert when no session matches."""
+def _escalate_no_session(
+    event: TaskAssignmentEvent,
+    store: Any | None,
+    *,
+    services: Any | None = None,
+) -> None:
+    """Raise (or refresh) a user-inbox alert when no session matches.
+
+    #1001: when ``services`` is supplied and its ``known_projects``
+    registry is non-empty, drop the escalation if ``event.project``
+    isn't a registered project — the project was deregistered (or
+    never existed) and the alert would be a ghost. Keeping the
+    behaviour gated on a non-empty registry preserves legacy callers
+    that pass no services (test doubles) or run without config.
+    """
     if store is None:
+        return
+    if not _project_is_registered(event.project, services):
         return
     # #760 — action-forward single-line UI hint. Names the actor in plain
     # English and points at the cockpit recovery surface.

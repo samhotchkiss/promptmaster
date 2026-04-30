@@ -60,6 +60,7 @@ from pollypm.plugins_builtin.project_planning.plan_presence import (
 )
 from pollypm.plugins_builtin.task_assignment_notify.resolver import (
     SWEEPER_COOLDOWN_SECONDS,
+    _known_project_keys,
     _mark_kickoff_delivered,
     load_runtime_services,
     notify,
@@ -323,6 +324,13 @@ def _emit_no_session_alert(
     store = services.msg_store or services.state_store
     if store is None:
         return
+    # #1001: project-existence guard. When the registry is non-empty and
+    # ``project`` isn't in it, the project is a ghost — drop the alert.
+    # An empty registry preserves the legacy unrestricted behaviour for
+    # tests and config-less runs.
+    known_keys = _known_project_keys(services)
+    if known_keys and project not in known_keys:
+        return
     # Candidate session name we would *expect* if the worker were running —
     # keeps the alert's session_name column aligned with the missing
     # session's identity, which is what the cockpit's "alerts for session X"
@@ -418,6 +426,108 @@ def _clear_plan_missing_alert(services: Any, *, project: str) -> None:
             "task_assignment sweep: clear_alert(plan_missing) failed for %s",
             session_name, exc_info=True,
         )
+
+
+def _sweep_ghost_project_alerts(services: Any) -> int:
+    """Clear ``no_session*`` alerts whose project is no longer registered.
+
+    #1001 lifecycle bug: ``pm alerts`` kept surfacing
+    ``no_session_for_assignment:<proj>/<n>`` and project-level
+    ``worker-<proj>/no_session`` alerts for projects that were
+    deregistered (or never existed). Each heartbeat tick re-fired
+    them because the alert-fire path didn't validate the project
+    against the live registry.
+
+    The fire-path guard added alongside this helper stops *new* ghost
+    alerts; this sweep pass clears the ones that have accumulated
+    while the bug was live (and any that slip through future
+    register/deregister races).
+
+    No-op when the registry is empty — without a registry there's no
+    signal for "project doesn't exist", and clearing in that case
+    would prune real alerts in test / config-less runs.
+
+    Returns the count of alerts cleared (mostly observability — the
+    sweep handler folds this into its by_outcome tally).
+    """
+    store = services.msg_store or services.state_store
+    if store is None:
+        return 0
+    known_keys = _known_project_keys(services)
+    if not known_keys:
+        return 0
+    # Read open alerts. The unified messages Store exposes
+    # ``query_messages``; the legacy ``StateStore`` (and several test
+    # doubles) expose ``open_alerts`` which returns ``AlertRecord``s.
+    # Fall back across both shapes so the sweep works regardless of
+    # which backend the operator's config wired up.
+    pairs: list[tuple[str, str]] = []
+    query = getattr(store, "query_messages", None)
+    if callable(query):
+        try:
+            for row in query(type="alert", state="open"):
+                pairs.append(
+                    (str(row.get("scope") or ""), str(row.get("sender") or "")),
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_assignment sweep: ghost-project query_messages failed",
+                exc_info=True,
+            )
+            pairs = []
+    if not pairs:
+        list_open = getattr(store, "open_alerts", None)
+        if callable(list_open):
+            try:
+                for alert in list_open():
+                    pairs.append(
+                        (
+                            str(getattr(alert, "session_name", "") or ""),
+                            str(getattr(alert, "alert_type", "") or ""),
+                        ),
+                    )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "task_assignment sweep: ghost-project open_alerts failed",
+                    exc_info=True,
+                )
+                return 0
+    cleared = 0
+    for scope, alert_type in pairs:
+        ghost_project: str | None = None
+        if alert_type.startswith("no_session_for_assignment:"):
+            # ``no_session_for_assignment:<project>/<task_number>``.
+            tail = alert_type[len("no_session_for_assignment:"):]
+            if "/" in tail:
+                ghost_project = tail.rsplit("/", 1)[0]
+        elif alert_type == "no_session":
+            # Project-level alert — keyed by the candidate session name
+            # we *would* have matched (``<role>-<project>`` /
+            # ``<role>_<project>``). Strip the leading role prefix to
+            # recover the project key.
+            for sep in ("-", "_"):
+                head, _, tail_part = scope.partition(sep)
+                if tail_part and head in {"worker", "architect"}:
+                    ghost_project = tail_part
+                    break
+        if ghost_project is None:
+            continue
+        if ghost_project in known_keys:
+            continue
+        try:
+            store.clear_alert(scope, alert_type)
+            cleared += 1
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_assignment sweep: ghost-project clear_alert(%s, %s) failed",
+                scope, alert_type, exc_info=True,
+            )
+    if cleared:
+        logger.info(
+            "task_assignment sweep: cleared %d ghost-project no_session alerts",
+            cleared,
+        )
+    return cleared
 
 
 def _record_sweeper_ping(
@@ -1076,6 +1186,16 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
     plan_decisions: dict[str, bool] = {}
     projects_scanned = 0
     projects_skipped = 0
+
+    # #1001: clear stale ``no_session*`` alerts whose project key isn't
+    # in the live registry. Run before the per-project sweeps so any
+    # row left over from a deregistered project doesn't survive the
+    # tick. The fire-path guard in ``_emit_no_session_alert`` /
+    # ``_escalate_no_session`` keeps new ghost alerts from being raised
+    # in the same pass.
+    ghost_cleared = _sweep_ghost_project_alerts(services)
+    if ghost_cleared:
+        totals["by_outcome"]["ghost_project_alerts_cleared"] = ghost_cleared
 
     # Pass 1: workspace-root DB (workspace-level tasks the pollypm repo
     # itself uses, or tests that point services.work_service at a
