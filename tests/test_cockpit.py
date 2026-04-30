@@ -5312,3 +5312,620 @@ def test_cockpit_pane_subprocess_dies_with_shell_wrapper(tmp_path: Path) -> None
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             pass
+
+
+# ── #995 — Polly · chat click must never collapse the cockpit ─────────────────
+#
+# Repro from the issue body: launch cockpit at 210x65, ``gg`` to top of rail,
+# Enter on Home, ``j`` down to ``Polly · chat``, Enter. Pane 1 disappears,
+# rail TUI in pane 0 doubles its render across the now-too-wide pane,
+# subsequent rail clicks process but the layout never recovers because every
+# downstream code path assumes the rail has a sibling right pane.
+#
+# The fix is a layout heal in ``CockpitRouter.route_selected``'s ``finally``:
+# when the route work leaves the cockpit window with <2 live panes, re-run
+# ``ensure_cockpit_layout`` so #991's context-aware ``_default_repair_command``
+# splits a fresh content pane before the layout-mutation lock is released.
+
+
+def _polly_chat_995_make_router(
+    tmp_path: Path,
+    *,
+    selected: str,
+    storage_has_operator: bool = True,
+    join_pane_raises: bool = False,
+):
+    """Build a CockpitRouter wired to a stateful FakeTmux.
+
+    The simulator tracks panes through ``join_pane`` / ``kill_pane`` /
+    ``split_window`` / ``respawn_pane`` / ``break_pane`` so the test can
+    inspect the post-route layout exactly the way real tmux would
+    report it.
+    """
+
+    class FakePane:
+        def __init__(
+            self,
+            pane_id: str,
+            pane_left: int,
+            command: str,
+            width: int = 80,
+        ) -> None:
+            self.pane_id = pane_id
+            self.pane_left = pane_left
+            self.pane_current_command = command
+            self.pane_width = width
+            self.pane_dead = False
+            self.active = pane_left == 0
+
+    class FakeWindow:
+        def __init__(self, name: str, index: int, pane_id: str = "") -> None:
+            self.name = name
+            self.index = index
+            self.pane_id = pane_id
+            self.pane_current_command = "node"
+            self.pane_current_path = "/tmp"
+            self.active = False
+            self.pane_dead = False
+
+    class FakeTmux:
+        def __init__(self) -> None:
+            self.panes = [
+                FakePane("%1", 0, "uv", width=30),
+                FakePane("%2", 31, "python", width=170),  # project static
+            ]
+            self.storage_panes: dict[str, FakeWindow] = {}
+            if storage_has_operator:
+                self.storage_panes["pm-operator"] = FakeWindow(
+                    "pm-operator", index=1, pane_id="%5",
+                )
+            self.actions: list[str] = []
+            self._next_id = 100
+
+        def list_panes(self, target: str):
+            return list(self.panes)
+
+        def list_windows(self, name: str):
+            if "storage" in name or name.endswith("-storage-closet"):
+                return list(self.storage_panes.values())
+            return [FakeWindow("PollyPM", 1, pane_id="%1")]
+
+        def has_session(self, name: str) -> bool:
+            return True
+
+        def kill_pane(self, target: str) -> None:
+            self.actions.append(f"kill_pane({target})")
+            self.panes = [p for p in self.panes if p.pane_id != target]
+
+        def join_pane(
+            self, source: str, target: str, *, horizontal: bool = True,
+        ) -> None:
+            self.actions.append(f"join_pane({source!r}, {target!r})")
+            if join_pane_raises:
+                raise RuntimeError("simulated tmux join-pane failure")
+            source_pane_id: str | None = None
+            if source.startswith("%"):
+                source_pane_id = source
+            else:
+                # Resolve session:idx.pane storage references to the actual
+                # pane id so the join can find the source pane.
+                for window in self.storage_panes.values():
+                    if source.startswith("pollypm-storage-closet"):
+                        source_pane_id = window.pane_id or None
+                        break
+            for window_name, window in list(self.storage_panes.items()):
+                if window.pane_id == source_pane_id:
+                    del self.storage_panes[window_name]
+                    break
+            target_pane = next(
+                (p for p in self.panes if p.pane_id == target), None,
+            )
+            if target_pane is None:
+                raise RuntimeError(f"can't find target pane: {target}")
+            idx = self.panes.index(target_pane)
+            old_width = target_pane.pane_width
+            target_pane.pane_width = max(old_width // 2, 1)
+            new_left = target_pane.pane_left + target_pane.pane_width + 1
+            new_pane = FakePane(
+                source_pane_id or f"%storage{self._next_id}",
+                new_left,
+                "node",
+                width=max(old_width - target_pane.pane_width - 1, 1),
+            )
+            self._next_id += 1
+            self.panes.insert(idx + 1, new_pane)
+            for pane in self.panes[idx + 2 :]:
+                pane.pane_left += new_pane.pane_width + 1
+
+        def respawn_pane(self, target: str, command: str) -> None:
+            self.actions.append(f"respawn_pane({target!r})")
+            for pane in self.panes:
+                if pane.pane_id == target:
+                    pane.pane_current_command = "python"
+                    return
+            raise RuntimeError(f"can't find pane: {target}")
+
+        def split_window(
+            self,
+            target: str,
+            command: str,
+            *,
+            horizontal: bool = True,
+            detached: bool = True,
+            percent: int | None = None,
+            size: int | None = None,
+        ) -> str:
+            new_id = f"%split{self._next_id}"
+            self._next_id += 1
+            self.actions.append(f"split_window -> {new_id}")
+            anchor_left = (
+                max(p.pane_left for p in self.panes) if self.panes else 0
+            )
+            anchor_width = (
+                max(p.pane_width for p in self.panes) if self.panes else 200
+            )
+            new_pane = FakePane(
+                new_id,
+                anchor_left + 1,
+                "python",
+                width=size or anchor_width // 2,
+            )
+            self.panes.append(new_pane)
+            return new_id
+
+        def resize_pane_width(self, target: str, width: int) -> None:
+            for pane in self.panes:
+                if pane.pane_id == target:
+                    pane.pane_width = width
+                    return
+
+        def set_pane_history_limit(self, target: str, limit: int) -> None:
+            pass
+
+        def select_pane(self, target: str) -> None:
+            pass
+
+        def break_pane(
+            self, source: str, target_session: str, window_name: str,
+        ) -> None:
+            self.actions.append(f"break_pane({source!r})")
+            for pane in list(self.panes):
+                if pane.pane_id == source:
+                    self.panes.remove(pane)
+                    self.storage_panes[window_name] = FakeWindow(
+                        window_name, index=99, pane_id=source,
+                    )
+                    return
+
+        def rename_window(self, target: str, name: str) -> None:
+            pass
+
+        def swap_pane(self, source: str, target: str) -> None:
+            pass
+
+        def run(self, *args, **kwargs):
+            from subprocess import CompletedProcess
+            return CompletedProcess(
+                args=args, returncode=0, stdout="", stderr="",
+            )
+
+        def capture_pane(self, target: str, lines: int = 100) -> str:
+            return ""
+
+        def kill_window(self, target: str) -> None:
+            pass
+
+    class FakeLaunch:
+        def __init__(self) -> None:
+            self.window_name = "pm-operator"
+            self.session = type(
+                "Session",
+                (),
+                {
+                    "name": "operator",
+                    "role": "operator-pm",
+                    "project": "pollypm",
+                    "provider": type("P", (), {"value": "claude"})(),
+                },
+            )()
+
+    class FakeSupervisor:
+        def __init__(self) -> None:
+            class Project:
+                tmux_session = "pollypm"
+                base_dir = tmp_path / ".pollypm"
+                root_dir = tmp_path
+
+            class Config:
+                project = Project()
+                projects = {
+                    "pollypm": KnownProject(
+                        key="pollypm",
+                        path=tmp_path,
+                        name="PollyPM",
+                        kind=ProjectKind.GIT,
+                    ),
+                    "demo": KnownProject(
+                        key="demo",
+                        path=tmp_path / "demo",
+                        name="Demo",
+                        kind=ProjectKind.GIT,
+                    ),
+                }
+                sessions = {}
+
+            self.config = Config()
+
+        def plan_launches(self):
+            return [FakeLaunch()]
+
+        def storage_closet_session_name(self) -> str:
+            return "pollypm-storage-closet"
+
+        def claim_lease(self, *args, **kwargs) -> None:
+            pass
+
+        def release_lease(self, *args, **kwargs) -> None:
+            pass
+
+        def launch_session(self, session_name: str) -> None:
+            return None
+
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f'[project]\nname = "PollyPM"\n'
+        f'tmux_session = "pollypm"\n'
+        f'base_dir = "{tmp_path / ".pollypm"}"\n'
+    )
+    router = CockpitRouter(config_path)
+    tmux = FakeTmux()
+    router.tmux = tmux  # type: ignore[assignment]
+    sup = FakeSupervisor()
+    router._load_supervisor = lambda fresh=False: sup  # type: ignore[assignment]
+    router._write_state(
+        {"selected": selected, "right_pane_id": "%2"}
+    )
+    return router, tmux, sup
+
+
+def test_995_polly_click_from_project_subitem_keeps_two_panes(
+    tmp_path: Path,
+) -> None:
+    """#995 regression — clicking ``Polly · chat`` while the prior rail
+    selection is on a project sub-item must mount the operator pane in
+    the right cockpit pane WITHOUT collapsing the cockpit to a single
+    rail-only pane.
+
+    Pre-fix symptom (issue body): pane 1 disappears, rail TUI in pane 0
+    renders doubled across the now-too-wide pane, and ``tmux capture-pane
+    -t pollypm:0.1 -p`` returns "can't find pane: 1". Subsequent rail
+    clicks process keystrokes but the layout never recovers because every
+    downstream code path assumes the rail has a sibling right pane.
+
+    The contract this test locks in: after ``route_selected("polly")``
+    returns from a project-scoped prior selection, the cockpit window has
+    exactly two live panes — rail + content — regardless of which fallback
+    path the live-mount logic takes internally.
+    """
+    router, tmux, _sup = _polly_chat_995_make_router(
+        tmp_path,
+        selected="project:demo:dashboard",
+    )
+
+    router.route_selected("polly")
+
+    pane_ids = [p.pane_id for p in tmux.panes]
+    assert len(tmux.panes) == 2, (
+        f"#995 — clicking Polly · chat from a project sub-item left "
+        f"{len(tmux.panes)} pane(s) in the cockpit window: {pane_ids!r}. "
+        "The rail then renders doubled across the now-too-wide pane."
+    )
+    # Rail (uv) must still be present on the left.
+    left_pane = min(tmux.panes, key=lambda p: p.pane_left)
+    assert left_pane.pane_id == "%1", (
+        f"left rail pane {left_pane.pane_id!r} is not %1 (expected the "
+        "uv-wrapped rail pane to remain leftmost)"
+    )
+
+
+def test_995_polly_click_recovers_when_join_pane_fails(
+    tmp_path: Path,
+) -> None:
+    """#995 regression — even if the live-mount path raises mid-flight
+    (e.g. ``tmux join-pane`` fails because the storage source pane was
+    killed in a race), the cockpit must still end with two panes.
+
+    Pre-fix: the original right pane could be killed before the join
+    attempt, leaving only the rail. The post-route layout heal in
+    ``route_selected`` re-runs ``ensure_cockpit_layout`` so #991's
+    context-aware ``_default_repair_command`` splits a fresh content
+    pane on the user's intended surface.
+    """
+    router, tmux, _sup = _polly_chat_995_make_router(
+        tmp_path,
+        selected="project:demo:dashboard",
+        join_pane_raises=True,
+    )
+
+    # The route work may itself fall back to the static polly view;
+    # we don't care which path runs as long as we end with two panes.
+    router.route_selected("polly")
+
+    assert len(tmux.panes) == 2, (
+        f"#995 — Polly · chat click with a join_pane failure left "
+        f"{len(tmux.panes)} pane(s); the rail-only collapse breaks "
+        "the cockpit until the user kills the tmux session."
+    )
+
+
+def test_995_polly_click_heals_when_static_fallback_split_also_fails(
+    tmp_path: Path,
+) -> None:
+    """#995 regression — when BOTH the live mount and the static-view
+    fallback raise (e.g. tmux is briefly unresponsive during the
+    cascade), the post-route layout heal in ``route_selected`` must
+    still recover a two-pane cockpit on the next pass.
+
+    Pre-fix this scenario was the hard collapse: ``_show_live_session``
+    raised after killing pane 2, ``_show_static_view`` raised inside
+    ``_route_live_session``'s except handler before splitting a
+    replacement, and the unhandled exception escaped to the worker
+    thread with the cockpit window left at 1 pane. Subsequent rail
+    clicks then processed keypresses but the layout never recovered.
+    """
+
+    class FakePane:
+        def __init__(self, pane_id, pane_left, command, width=80):
+            self.pane_id = pane_id
+            self.pane_left = pane_left
+            self.pane_current_command = command
+            self.pane_width = width
+            self.pane_dead = False
+            self.active = pane_left == 0
+
+    class FakeWindow:
+        def __init__(self, name, index, pane_id="%5"):
+            self.name = name
+            self.index = index
+            self.pane_id = pane_id
+            self.pane_current_command = "node"
+            self.pane_current_path = "/tmp"
+            self.active = False
+            self.pane_dead = False
+
+    class CascadingFailureTmux:
+        """``join_pane`` collateral-kills %2 then raises;
+        ``respawn_pane`` always raises;
+        first ``split_window`` raises, second succeeds.
+
+        This mirrors the live cascade observed in the issue: the
+        collateral kill leaves only the rail, and the static-view
+        fallback's first split flakes before the heal repairs.
+        """
+
+        def __init__(self):
+            self.panes = [
+                FakePane("%1", 0, "uv", 30),
+                FakePane("%2", 31, "python", 170),
+            ]
+            self.storage = {"pm-operator": FakeWindow("pm-operator", 1, "%5")}
+            self.split_failures = 0
+
+        def list_panes(self, target):
+            return list(self.panes)
+
+        def list_windows(self, name):
+            if "storage" in name:
+                return list(self.storage.values())
+            return [FakeWindow("PollyPM", 1)]
+
+        def has_session(self, name):
+            return True
+
+        def kill_pane(self, target):
+            self.panes = [p for p in self.panes if p.pane_id != target]
+
+        def join_pane(self, source, target, *, horizontal=True):
+            # Collateral: tmux kills pane 2 before reporting the join failure.
+            self.panes = [p for p in self.panes if p.pane_id != "%2"]
+            raise RuntimeError("simulated tmux join-pane failure")
+
+        def respawn_pane(self, target, command):
+            raise RuntimeError(f"can't find pane: {target}")
+
+        def split_window(
+            self,
+            target,
+            command,
+            *,
+            horizontal=True,
+            detached=True,
+            percent=None,
+            size=None,
+        ):
+            self.split_failures += 1
+            if self.split_failures == 1:
+                raise RuntimeError("simulated transient split-window failure")
+            new_id = f"%new{len(self.panes) + 100}"
+            max_left = max((p.pane_left for p in self.panes), default=0)
+            self.panes.append(
+                FakePane(new_id, max_left + 31, "python", size or 80)
+            )
+            return new_id
+
+        def resize_pane_width(self, target, width):
+            for p in self.panes:
+                if p.pane_id == target:
+                    p.pane_width = width
+
+        def set_pane_history_limit(self, target, limit):
+            pass
+
+        def select_pane(self, target):
+            pass
+
+        def break_pane(self, source, target_session, window_name):
+            for pane in list(self.panes):
+                if pane.pane_id == source:
+                    self.panes.remove(pane)
+                    self.storage[window_name] = FakeWindow(
+                        window_name, 99, source,
+                    )
+                    return
+
+        def rename_window(self, target, name):
+            pass
+
+        def swap_pane(self, source, target):
+            pass
+
+        def run(self, *args, **kwargs):
+            from subprocess import CompletedProcess
+            return CompletedProcess(
+                args=args, returncode=0, stdout="", stderr="",
+            )
+
+        def capture_pane(self, target, lines=100):
+            return ""
+
+        def kill_window(self, target):
+            pass
+
+    class FakeLaunch:
+        def __init__(self):
+            self.window_name = "pm-operator"
+            self.session = type(
+                "Session",
+                (),
+                {
+                    "name": "operator",
+                    "role": "operator-pm",
+                    "project": "pollypm",
+                    "provider": type("P", (), {"value": "claude"})(),
+                },
+            )()
+
+    class FakeSupervisor:
+        def __init__(self):
+            class Project:
+                tmux_session = "pollypm"
+                base_dir = tmp_path / ".pollypm"
+                root_dir = tmp_path
+
+            class Config:
+                project = Project()
+                projects = {
+                    "pollypm": KnownProject(
+                        key="pollypm",
+                        path=tmp_path,
+                        name="PollyPM",
+                        kind=ProjectKind.GIT,
+                    ),
+                    "demo": KnownProject(
+                        key="demo",
+                        path=tmp_path / "demo",
+                        name="Demo",
+                        kind=ProjectKind.GIT,
+                    ),
+                }
+                sessions = {}
+
+            self.config = Config()
+
+        def plan_launches(self):
+            return [FakeLaunch()]
+
+        def storage_closet_session_name(self):
+            return "pollypm-storage-closet"
+
+        def claim_lease(self, *a, **k):
+            pass
+
+        def release_lease(self, *a, **k):
+            pass
+
+        def launch_session(self, n):
+            pass
+
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f'[project]\nname = "PollyPM"\n'
+        f'tmux_session = "pollypm"\n'
+        f'base_dir = "{tmp_path / ".pollypm"}"\n'
+    )
+    router = CockpitRouter(config_path)
+    tmux = CascadingFailureTmux()
+    router.tmux = tmux  # type: ignore[assignment]
+    sup = FakeSupervisor()
+    router._load_supervisor = lambda fresh=False: sup  # type: ignore[assignment]
+    router._write_state(
+        {"selected": "project:demo:dashboard", "right_pane_id": "%2"}
+    )
+
+    # The cascade may surface as a RuntimeError to the worker thread —
+    # that is fine and expected; what matters for #995 is the layout.
+    try:
+        router.route_selected("polly")
+    except RuntimeError:
+        pass
+
+    assert len(tmux.panes) == 2, (
+        f"#995 — even with both live-mount AND static-view fallback "
+        f"failing transiently, the post-route heal must restore a "
+        f"two-pane cockpit, but ended with {len(tmux.panes)} pane(s)."
+    )
+
+
+def test_995_layout_heal_skips_when_layout_is_already_healthy(
+    tmp_path: Path,
+) -> None:
+    """The post-route layout heal must NOT bounce a healthy two-pane
+    cockpit. Re-running ``ensure_cockpit_layout`` when the layout is
+    already correct would race with the live-mount that just succeeded
+    and re-trigger the very split-then-respawn churn the fix is meant
+    to avoid.
+
+    Locked-in contract: ``_heal_layout_after_route`` short-circuits
+    when ``list_panes`` reports two live panes.
+    """
+
+    class FakePane:
+        def __init__(self, pane_id: str) -> None:
+            self.pane_id = pane_id
+            self.pane_dead = False
+            self.pane_left = 0 if pane_id == "%1" else 31
+            self.pane_current_command = "uv" if pane_id == "%1" else "node"
+            self.pane_width = 30 if pane_id == "%1" else 80
+
+    class CountingTmux:
+        def __init__(self) -> None:
+            self.list_calls = 0
+            self.ensure_calls = 0
+
+        def list_panes(self, target: str):
+            self.list_calls += 1
+            return [FakePane("%1"), FakePane("%2")]
+
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f'[project]\nname = "PollyPM"\n'
+        f'tmux_session = "pollypm"\n'
+        f'base_dir = "{tmp_path / ".pollypm"}"\n'
+    )
+    router = CockpitRouter(config_path)
+    router.tmux = CountingTmux()  # type: ignore[assignment]
+
+    seen_ensure = []
+
+    def fake_ensure() -> None:
+        seen_ensure.append(True)
+
+    router.ensure_cockpit_layout = fake_ensure  # type: ignore[assignment]
+
+    router._heal_layout_after_route()
+
+    assert seen_ensure == [], (
+        "_heal_layout_after_route called ensure_cockpit_layout despite "
+        "the layout already being healthy; this would re-split the "
+        "right pane every click and undo a successful live mount."
+    )

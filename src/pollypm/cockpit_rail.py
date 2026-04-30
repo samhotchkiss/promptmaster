@@ -2519,7 +2519,64 @@ class CockpitRouter:
             plan = resolve_cockpit_content(key, self._content_context(supervisor))
             self._route_content_plan(supervisor, window_target, plan)
         finally:
+            # #995 — guarantee a two-pane cockpit on every rail click.
+            # The route work may park, kill, and re-mount panes via
+            # ``_show_live_session`` / ``_show_command_view``. If any
+            # intermediate step bails (tmux failure, race with the
+            # heartbeat, exception in a fallback path), the cockpit
+            # window can be left with a single pane: tmux's auto-resize
+            # then expands the rail to full window width and the rail
+            # TUI renders doubled because it never received a resize
+            # signal sized for the new column count. Subsequent rail
+            # clicks process keystrokes but the layout never recovers
+            # because every code path assumes the rail has a sibling
+            # right pane already. Re-running ``ensure_cockpit_layout``
+            # here splits a fresh content pane (using
+            # ``_default_repair_command`` so the surface matches the
+            # user's intent) before releasing the layout-mutation lock.
+            try:
+                self._heal_layout_after_route()
+            except Exception:  # noqa: BLE001
+                pass
             self._end_layout_mutation(token)
+
+    def _heal_layout_after_route(self) -> None:
+        """Repair a degraded cockpit layout left over from a failed route.
+
+        Inputs: none (reads tmux + cockpit state directly).
+        Outputs: ``None``.
+        Side effects: when the cockpit window has fewer than two live
+        panes, calls ``ensure_cockpit_layout`` to split a fresh content
+        pane via ``_default_repair_command``. When two panes are
+        present, no-op.
+        Invariants: never raises (callers wrap in best-effort try). Only
+        triggers when the layout is observably bad — never bounces a
+        healthy mount.
+        """
+        try:
+            config = self._load_config()
+        except Exception:  # noqa: BLE001
+            return
+        target = f"{config.project.tmux_session}:{self._COCKPIT_WINDOW}"
+        try:
+            panes = self.tmux.list_panes(target)
+        except Exception:  # noqa: BLE001
+            return
+        live_panes = [
+            pane for pane in panes if not getattr(pane, "pane_dead", False)
+        ]
+        if len(live_panes) >= 2:
+            return  # healthy — leave alone
+        # Layout is degraded. ``ensure_cockpit_layout`` will detect
+        # ``len(panes) < 2`` and split a fresh content pane via the
+        # context-aware ``_default_repair_command`` from #991. The
+        # caller still holds the layout-mutation token, so this
+        # recursive call sees ``_layout_mutation_active_elsewhere() ==
+        # False`` and proceeds.
+        try:
+            self.ensure_cockpit_layout()
+        except Exception:  # noqa: BLE001
+            pass
 
     def focus_right_pane(self) -> None:
         config = self._load_config()
