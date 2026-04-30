@@ -948,14 +948,20 @@ def test_send_initial_input_routes_operator_kickoff_to_operator_md(
     )
 
 
-def test_send_initial_input_routes_heartbeat_kickoff_to_heartbeat_md(
+def test_send_initial_input_skips_heartbeat_kickoff(
     monkeypatch, tmp_path: Path,
 ) -> None:
-    """#934 — heartbeat pane receives heartbeat.md, never operator.md.
+    """#1007 — heartbeat-supervisor pane no longer receives a kickoff.
 
-    Symmetric companion to the operator test: the heartbeat session's
-    kickoff lands on its own pm-heartbeat pane and references
-    ``heartbeat.md``. This is the contractual default the bug breaks.
+    The historic invariant (heartbeat pane receives heartbeat.md, not
+    operator.md — #934) was protecting against a kickoff being sent
+    into the wrong pane. With Direction 2 (#1007) the heartbeat pane
+    receives no kickoff at all: the heartbeat tick loop runs as Python
+    in :class:`pollypm.heartbeat.boot.HeartbeatRail`, the agent pane
+    is observability-only, and bootstrapping it tripped Claude's
+    prompt-injection defense. So the right shape of the test is now:
+    no send. (The crossed-pane guard for the *other* roles is still
+    covered by ``test_send_initial_input_routes_operator_kickoff…``.)
     """
     config = _config(tmp_path)
     supervisor = Supervisor(config)
@@ -992,11 +998,9 @@ def test_send_initial_input_routes_heartbeat_kickoff_to_heartbeat_md(
 
     supervisor._send_initial_input_if_fresh(heartbeat_launch, "%hb")
 
-    assert len(sent) == 1, "heartbeat kickoff must deliver"
-    text = sent[0][1]
-    assert "heartbeat.md" in text
-    assert "operator.md" not in text, (
-        "heartbeat pane must NEVER receive operator.md kickoff"
+    assert sent == [], (
+        "Direction 2 (#1007): heartbeat-supervisor pane is observability-"
+        "only and must not receive a bootstrap kickoff."
     )
 
 

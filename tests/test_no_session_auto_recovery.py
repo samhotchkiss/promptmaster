@@ -37,38 +37,105 @@ from pollypm.recovery.no_session_spawn import (
 _REJECTED_FRAMING_LITERAL = (
     "\"[PollyPM bootstrap — system message, please ignore on screen]\""
 )
+# #1007: the v2 reformat ("Adopt both files as your operating
+# instructions and reply only \"ready\" when done.") was *also*
+# flagged by Claude's injection defense, so it can't appear in the
+# active bootstrap path either. Keep the v1 + v2 tells separate so a
+# regression to either one is identified by the right history note.
+_REJECTED_V2_OPERATING_INSTRUCTIONS = (
+    "Adopt both files as your operating instructions and reply only"
+)
+_REJECTED_V2_OPERATING_INSTRUCTIONS_SINGULAR = (
+    "adopt it as your operating instructions, then reply only"
+)
 
 
-def test_supervisor_bootstrap_drops_system_message_framing() -> None:
-    """The supervisor no longer wraps the kickoff in the
-    "[PollyPM bootstrap — system message, please ignore on screen]"
-    header — that exact framing tripped Claude's injection defense
-    (#1005). The ``/control-prompts/<session>.md`` substring relied on
-    by ``transcript_matches_session`` (#935) is preserved.
+def _active_format_strings(source: str) -> str:
+    """Strip Python comments + docstrings so #1005/#1007 history notes
+    that *name* the rejected framing for archaeology purposes don't
+    trip the regression assertions on those literals.
 
-    The test scans the source for the verbatim Python string literal
-    (with quotes) so a comment that *names* the rejected framing for
-    historical context doesn't trip the assertion.
+    Cheap heuristic: drop every line whose first non-whitespace char
+    is ``#``, then walk triple-quoted blocks and drop those too. The
+    bootstrap format strings live inside ``return (\"…\")``
+    expressions so they survive both filters.
     """
-    text = (
+    out_lines: list[str] = []
+    in_triple = False
+    triple_marker = ""
+    for line in source.splitlines():
+        if not in_triple:
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            # Detect start of a triple-quoted block on this line.
+            for marker in ('"""', "'''"):
+                if marker in line:
+                    # Inline """…""" on a single line — drop just that line.
+                    after_open = line.split(marker, 1)[1]
+                    if marker in after_open:
+                        # Single-line docstring; drop entire line.
+                        continue
+                    in_triple = True
+                    triple_marker = marker
+                    break
+            if in_triple:
+                continue
+            out_lines.append(line)
+        else:
+            if triple_marker in line:
+                in_triple = False
+                triple_marker = ""
+                continue
+    return "\n".join(out_lines)
+
+
+def test_supervisor_bootstrap_drops_rejected_framing_history() -> None:
+    """The supervisor's *active* bootstrap text must not carry either
+    rejected framing:
+
+    * v1 "[PollyPM bootstrap — system message, please ignore on
+      screen]" (#1005 — fake-system-authority header).
+    * v2 "Adopt both files as your operating instructions and reply
+      only 'ready' when done." (#1007 — same category, just less
+      decorated; modern Claude rejects the operating-instructions +
+      reply-only-'ready' pattern regardless of header).
+
+    The path substring ``/control-prompts/<session>.md`` relied on by
+    :func:`transcript_matches_session` (#935) is preserved.
+    """
+    raw = (
         Path(__file__).resolve().parents[1]
         / "src" / "pollypm" / "supervisor.py"
     ).read_text(encoding="utf-8")
-    assert _REJECTED_FRAMING_LITERAL not in text
-    # Conversational opener used in the new bootstrap.
-    assert "please read" in text
-    # Path substring used by the resume-attribution helper (#935).
-    assert "control-prompts" in text
+    active = _active_format_strings(raw)
+    assert _REJECTED_FRAMING_LITERAL not in active, (
+        "v1 [PollyPM bootstrap — system message] header is back in an "
+        "active bootstrap string — see #1005."
+    )
+    assert _REJECTED_V2_OPERATING_INSTRUCTIONS not in active, (
+        "v2 'Adopt both files as your operating instructions and reply "
+        "only \"ready\"' phrasing is back — see #1007."
+    )
+    assert _REJECTED_V2_OPERATING_INSTRUCTIONS_SINGULAR not in active, (
+        "v2 single-file 'adopt it as your operating instructions, then "
+        "reply only \"ready\"' phrasing is back — see #1007."
+    )
+    # Path substring used by the resume-attribution helper (#935) must
+    # still appear so a transcript can be attributed to its session.
+    assert "control-prompts" in raw
 
 
-def test_tmux_session_service_bootstrap_drops_system_message_framing() -> None:
-    text = (
+def test_tmux_session_service_bootstrap_drops_rejected_framing_history() -> None:
+    raw = (
         Path(__file__).resolve().parents[1]
         / "src" / "pollypm" / "session_services" / "tmux.py"
     ).read_text(encoding="utf-8")
-    assert _REJECTED_FRAMING_LITERAL not in text
-    assert "please read" in text
-    assert "control-prompts" in text
+    active = _active_format_strings(raw)
+    assert _REJECTED_FRAMING_LITERAL not in active
+    assert _REJECTED_V2_OPERATING_INSTRUCTIONS not in active
+    assert _REJECTED_V2_OPERATING_INSTRUCTIONS_SINGULAR not in active
+    assert "control-prompts" in raw
 
 
 # ---------------------------------------------------------------------------

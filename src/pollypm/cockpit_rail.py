@@ -506,17 +506,26 @@ def _build_project_pm_primer(supervisor, project_key: str) -> str | None:
     except Exception:  # noqa: BLE001 — primer is best-effort
         pass
 
+    # #1007: previous wording ("You are <persona>, the PM … Re-anchor
+    # on this identity for the rest of this session." +
+    # "Acknowledge briefly and stand by for the next instruction.")
+    # parsed as a fake-system-authority directive to Claude's
+    # injection defense — the model rejected it as an injection
+    # attempt and refused to engage. New wording is conversational:
+    # the user is mounting the PM chat, so frame it as a "hey, here's
+    # the snapshot you'd want for this project" briefing rather than a
+    # role-imposition.
     if persona is not None:
         identity_line = (
-            f"You are {persona}, the PM for project '{project_name}' "
-            f"(key: {project_key}). Re-anchor on this identity for the "
-            "rest of this session."
+            f"Hey {persona} — the user just opened the PM chat for "
+            f"project '{project_name}' (key: {project_key}). Quick "
+            f"snapshot below so you have the context they're seeing."
         )
     else:
         identity_line = (
-            f"You are the PM for project '{project_name}' "
-            f"(key: {project_key}). Re-anchor on this project identity "
-            "for the rest of this session."
+            f"Hey — the user just opened the PM chat for project "
+            f"'{project_name}' (key: {project_key}). Quick snapshot "
+            f"below so you have the context they're seeing."
         )
 
     lines = [
@@ -533,7 +542,7 @@ def _build_project_pm_primer(supervisor, project_key: str) -> str | None:
         lines.append("Recent inbox:")
         lines.extend(f"  - {title}" for title in inbox_titles)
     lines.append(
-        "Acknowledge briefly and stand by for the next instruction."
+        "Glance at it and pick up wherever the user takes the conversation."
     )
     return "\n".join(lines)
 
@@ -592,11 +601,18 @@ def _build_operator_primer(supervisor) -> str | None:
         except Exception:  # noqa: BLE001 — primer is best-effort
             continue
 
+    # #1007: previous wording ("You are Polly, the PollyPM operator.
+    # Re-anchor on this identity for the rest of this session: …" +
+    # "acknowledge briefly and stand by for the next instruction.")
+    # tripped Claude's prompt-injection defense — the model treated
+    # the primer as a fake-authority directive and refused to engage.
+    # New wording is conversational: the user just mounted Polly chat,
+    # so frame the primer as a workspace briefing she'd want before
+    # the user starts talking, rather than a role-imposition.
     lines = [
-        "You are Polly, the PollyPM operator. Re-anchor on this identity "
-        "for the rest of this session: you delegate implementation, "
-        "coordinate workers, and drive decisions across the workspace; "
-        "you do not write code or edit files yourself.",
+        "Hey Polly — the user just opened the operator chat. Quick "
+        "workspace briefing so you have the context they're seeing "
+        "before they say anything.",
         f"Workspace: {project_count} project(s) under management.",
     ]
     if project_lines:
@@ -608,8 +624,8 @@ def _build_operator_primer(supervisor) -> str | None:
         for project_key, title in inbox_titles[:5]:
             lines.append(f"  - [{project_key}] {title}")
     lines.append(
-        "Run `pm inbox` then `pm status` to refresh, then acknowledge "
-        "briefly and stand by for the next instruction."
+        "Glance at the inbox/status (`pm inbox`, `pm status`) and "
+        "pick up wherever the user takes the conversation."
     )
     return "\n".join(lines)
 

@@ -1942,12 +1942,18 @@ def test_cockpit_router_primes_workspace_operator_on_attach() -> None:
     assert target == "%right1"
     # Operator identity markers from the workspace primer.
     assert "Polly" in text
-    assert "PollyPM operator" in text
+    # #1007: primer no longer asserts pseudo-system authority via
+    # "Re-anchor on this identity" + "PollyPM operator" — that
+    # phrasing tripped Claude's injection defense and the operator
+    # rejected the primer outright. The reframed conversational opener
+    # ("Hey Polly — the user just opened the operator chat …") and
+    # the workspace-scope discriminators below still uniquely identify
+    # the workspace primer.
+    assert "operator chat" in text
     # Workspace-scope (not project-scope) discriminators.
     assert "Workspace:" in text
     assert "Active inbox (workspace-wide):" in text
     # Distinct from the per-project primer's signature.
-    assert "Re-anchor on this identity" in text
     assert "Project root:" not in text  # per-project primer marker
     assert "Plan: " not in text  # per-project primer marker
     # State persisted so a re-mount of the same pane does NOT re-prime.

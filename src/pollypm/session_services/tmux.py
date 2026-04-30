@@ -1180,22 +1180,28 @@ class TmuxSessionService:
         # See issue #263.
         display_path = prompt_path
         instruct_path = self._config.project.root_dir / ".pollypm" / "docs" / "SYSTEM.md"
-        # #1005: plain conversational phrasing — the "[PollyPM bootstrap
-        # — system message, please ignore on screen]" header tripped
-        # Claude's prompt-injection defense (the model refused to adopt
-        # its own bootstrap as instructions). A normal "please read X"
-        # request routes through instruction-following instead. The
+        # #1007: bootstrap framing — see the matching block in
+        # :meth:`pollypm.supervisor.Supervisor._prepare_initial_input`
+        # for the iteration history. tl;dr "Adopt … as operating
+        # instructions" + "reply only 'ready'" is the *category*
+        # Claude's injection defense rejects, regardless of header
+        # wording. A casual onboarding line ("you're <role>, skim these
+        # files for context, say hi when you're ready") side-steps the
+        # defense by not making any pseudo-system-authority claims. The
         # ``/control-prompts/<session>.md`` substring relied on by
         # :func:`transcript_matches_session` (#935) is preserved.
+        role_label = role or "this PollyPM session"
         if instruct_path.exists():
             instruct_display = instruct_path
             return (
-                f"Hi — please read {instruct_display} for system context, "
-                f"then read {display_path} for your role guidance. Adopt both "
-                f'files as your operating instructions and reply only "ready" '
-                f"when done."
+                f"Hey — you're set up as {role_label}. Two files describe "
+                f"how things work here: {instruct_display} covers the "
+                f"PollyPM operating norms, and {display_path} has the "
+                f"role-specific guide. Take a minute to skim both, then "
+                f"say hi when you're settled in."
             )
         return (
-            f"Hi — please read {display_path} and adopt it as your operating "
-            f'instructions, then reply only "ready" when done.'
+            f"Hey — you're set up as {role_label}. Your role guide is at "
+            f"{display_path} — take a minute to skim it, then say hi when "
+            f"you're settled in."
         )

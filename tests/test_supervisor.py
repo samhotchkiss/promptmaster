@@ -2140,15 +2140,18 @@ def test_send_initial_input_proceeds_when_target_window_matches_launch(
     assert not launch.fresh_launch_marker.exists()
 
 
-def test_send_initial_input_heartbeat_pane_gets_heartbeat_kickoff(
+def test_send_initial_input_heartbeat_pane_skips_kickoff(
     monkeypatch, tmp_path: Path,
 ) -> None:
-    """#932 — heartbeat kickoff into a pm-heartbeat pane proceeds.
+    """#1007 — heartbeat-supervisor pane no longer receives a kickoff.
 
-    The mainline case for the storage-closet heartbeat window. The
-    target-window guard verifies ``window_name == "pm-heartbeat"`` and
-    lets the send through. Confirms the guard isn't biased toward
-    operator-pm — every role's kickoff routes to its own window.
+    Direction 2: the heartbeat tick loop runs as Python in
+    :class:`pollypm.heartbeat.boot.HeartbeatRail` (a daemon thread in
+    the cockpit/supervisor process). The ``pm-heartbeat`` Claude pane
+    is observability-only — bootstrapping it tripped Claude's prompt-
+    injection defense and the agent rejected the bootstrap as an
+    injection attempt. Direction 2 stops sending the kickoff at all;
+    the pane stays a dormant REPL the user can chat with ad-hoc.
     """
     config = _config(tmp_path)
     supervisor = Supervisor(config)
@@ -2178,8 +2181,8 @@ def test_send_initial_input_heartbeat_pane_gets_heartbeat_kickoff(
 
     supervisor._send_initial_input_if_fresh(launch, "%hb")
 
-    assert len(sent) == 1
-    assert sent[0][1] == "heartbeat kickoff"
+    # Direction 2: no kickoff sent, no fresh-launch marker consumed.
+    assert sent == []
 
 
 def test_send_initial_input_per_task_worker_window_matches(
@@ -2285,18 +2288,26 @@ def test_target_window_helper_recognises_crossed_pane_via_send_log(
     cockpit smoke test the user requested.
 
     Drives two consecutive kickoffs against the supervisor's send-keys
-    log to mirror the live failure mode: heartbeat launch → pm-heartbeat
-    pane (must succeed), operator launch → pm-operator pane (must
-    succeed). Then the *crossed* attempt — heartbeat launch into the
-    pm-operator pane — must produce no additional send. Replicates the
-    ordering invariant from the issue without any tmux interaction.
+    log. Reviewer launch → pm-reviewer pane (must succeed), operator
+    launch → pm-operator pane (must succeed). Then the *crossed*
+    attempt — reviewer launch into the pm-operator pane — must produce
+    no additional send. Replicates the ordering invariant from #932
+    without any tmux interaction.
+
+    #1007: previously this test used heartbeat-supervisor as the
+    "legitimate first send" role, but Direction 2 (#1007) excludes
+    heartbeat-supervisor from kickoff entirely (the heartbeat tick
+    loop runs as Python in HeartbeatRail; the agent pane is
+    observability-only). Reviewer is the simplest control role still
+    in ``_INITIAL_INPUT_ROLES`` and exercises the same crossed-pane
+    guard.
     """
     config = _config(tmp_path)
     supervisor = Supervisor(config)
 
-    heartbeat_launch = _make_launch_for_role(
-        config, tmp_path, "heartbeat-supervisor",
-        initial_input="heartbeat kickoff",
+    reviewer_launch = _make_launch_for_role(
+        config, tmp_path, "reviewer",
+        initial_input="reviewer kickoff",
     )
     operator_launch = _make_launch_for_role(
         config, tmp_path, "operator-pm",
@@ -2304,7 +2315,7 @@ def test_target_window_helper_recognises_crossed_pane_via_send_log(
     )
 
     pane_window = {
-        "%hb": "pm-heartbeat-supervisor",
+        "%rv": "pm-reviewer",
         "%op": "pm-operator-pm",
     }
     monkeypatch.setattr(
@@ -2328,30 +2339,27 @@ def test_target_window_helper_recognises_crossed_pane_via_send_log(
     monkeypatch.setattr(supervisor, "_verify_input_submitted", lambda *a, **kw: None)
     monkeypatch.setattr("pollypm.supervisor.time.sleep", lambda *_: None)
 
-    # Step 1: legitimate heartbeat kickoff to its own pane.
-    supervisor._send_initial_input_if_fresh(heartbeat_launch, "%hb")
+    # Step 1: legitimate reviewer kickoff to its own pane.
+    supervisor._send_initial_input_if_fresh(reviewer_launch, "%rv")
     # Step 2: legitimate operator kickoff to its own pane.
     supervisor._send_initial_input_if_fresh(operator_launch, "%op")
-    # Step 3: the bug — heartbeat kickoff into the operator pane. Must
+    # Step 3: the bug — reviewer launch into the operator pane. Must
     # be refused without ever calling send_keys.
-    # The fresh-launch marker for heartbeat was consumed in Step 1, so
-    # use a fresh launch built with a brand-new marker for this attempt.
+    # The fresh-launch marker for the reviewer was consumed in Step 1,
+    # so use a fresh launch built with a brand-new marker.
     crossed_launch = _make_launch_for_role(
-        config, tmp_path, "heartbeat-supervisor",
-        initial_input="heartbeat kickoff (crossed)",
+        config, tmp_path, "reviewer",
+        initial_input="reviewer kickoff (crossed)",
     )
-    # _make_launch_for_role registers a session named ``heartbeat-supervisor-session``;
-    # both heartbeat launches share that registration so launch_by_session
-    # still resolves correctly. The marker has been re-created though.
     supervisor._send_initial_input_if_fresh(crossed_launch, "%op")
 
     targets_sent = [t for t, _ in sent]
     texts_sent = [text for _, text in sent]
-    assert targets_sent == ["%hb", "%op"], (
+    assert targets_sent == ["%rv", "%op"], (
         f"only the two legitimate sends should land — got {targets_sent!r}"
     )
-    assert "heartbeat kickoff (crossed)" not in texts_sent, (
-        "the crossed heartbeat kickoff into the operator pane must NOT "
+    assert "reviewer kickoff (crossed)" not in texts_sent, (
+        "the crossed reviewer kickoff into the operator pane must NOT "
         "have been delivered"
     )
 
@@ -2419,3 +2427,74 @@ def test_start_cockpit_tui_skips_respawn_when_rail_is_running(monkeypatch, tmp_p
     supervisor.start_cockpit_tui("pollypm")
 
     assert respawns == []
+
+
+# ---------------------------------------------------------------------------
+# #1007 — heartbeat-supervisor Direction 2: pane is observability-only
+# ---------------------------------------------------------------------------
+
+
+def test_initial_input_roles_excludes_heartbeat_supervisor() -> None:
+    """#1007 — ``heartbeat-supervisor`` is not in the kickoff role set.
+
+    Direction 2: the heartbeat tick loop runs as Python in
+    :class:`pollypm.heartbeat.boot.HeartbeatRail` (a daemon thread in
+    the cockpit/supervisor process). The agent pane is observability-
+    only — bootstrapping it tripped Claude's prompt-injection defense
+    and the agent rejected the bootstrap as an injection attempt.
+    Direction 2 stops sending the kickoff at all.
+    """
+    assert "heartbeat-supervisor" not in Supervisor._INITIAL_INPUT_ROLES
+    # Sanity: the other control roles still get bootstrapped.
+    assert "operator-pm" in Supervisor._INITIAL_INPUT_ROLES
+    assert "reviewer" in Supervisor._INITIAL_INPUT_ROLES
+    assert "worker" in Supervisor._INITIAL_INPUT_ROLES
+    assert "architect" in Supervisor._INITIAL_INPUT_ROLES
+
+
+def test_restart_session_skips_recovery_prompt_for_heartbeat(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#1007 — ``restart_session`` does not inject a recovery prompt
+    into the heartbeat-supervisor pane.
+
+    The previous behaviour stacked "RECOVERY MODE: RESUMING FROM
+    CHECKPOINT … last state was heartbeat-supervisor" messages on
+    every restart, which Claude's injection defense rejected as a
+    pseudo-system-authority assertion. Direction 2 (#1007) drops the
+    injection — the Python heartbeat loop kept ticking through the
+    restart, so there is nothing to resume.
+
+    The post-injection cleanup (runtime status update + alert
+    clearing) MUST still run; only the send_keys path is skipped.
+    """
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    # Stub the launch teardown / spawn path. We only care about the
+    # send_keys log + the post-restart store mutations.
+    monkeypatch.setattr(
+        supervisor.session_service.tmux, "has_session", lambda _name: False,
+    )
+    monkeypatch.setattr(
+        supervisor, "launch_session", lambda _name: None,
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "send_keys",
+        lambda target, text, **kw: sent.append((target, text)),
+    )
+
+    supervisor.restart_session(
+        "heartbeat", "claude_controller", failure_type="pane_dead",
+    )
+
+    # No recovery prompt sent into the pane.
+    assert sent == [], (
+        "heartbeat-supervisor recovery must not inject a recovery prompt"
+    )
+    # Post-recovery cleanup still runs.
+    runtime = supervisor.store.get_session_runtime("heartbeat")
+    assert runtime is not None
+    assert runtime.status == "healthy"
