@@ -165,8 +165,10 @@ STORAGE_CONTRACTS: Mapping[StorageConcept, ReadAPI] = {
         module="pollypm.work.sqlite_service",
         function="SQLiteWorkService.list_tasks",
         description=(
-            "The work service's task list. Per-project DB resolved "
-            "by pollypm.work.db_resolver."
+            "The work service's task list. Resolved to "
+            "<workspace_root>/.pollypm/state.db by "
+            "pollypm.work.db_resolver — project isolation is row-level "
+            "via the work_tasks.project column (#1004)."
         ),
     ),
     StorageConcept.EXECUTION: ReadAPI(
@@ -261,16 +263,20 @@ LEGACY_WRITERS: tuple[LegacyWriter, ...] = (
         tracked_issue="#704",
     ),
     LegacyWriter(
-        name="per-task workspace DB writes",
+        name="legacy per-project state.db",
         concept=StorageConcept.TASK,
         migration_plan=(
-            "All work-service writes go through SQLiteWorkService "
-            "with the resolved per-project DB path. Workspace-root "
-            "writes are reserved for messages-only concerns."
+            "Post-#1004 the canonical work DB is workspace-root only. "
+            "Any pre-existing <project>/.pollypm/state.db is migrated "
+            "into the workspace DB by "
+            "pollypm.work.legacy_per_project_db.migrate_legacy_per_project_dbs "
+            "and archived to state.db.legacy-1004. The resolver no "
+            "longer routes reads to per-project files."
         ),
         removal_condition=(
-            "Audit (issue #259/#377 family) reports zero workspace "
-            "DB task writes."
+            "Issue #1004 closed — every install has run the migration "
+            "and no production environment still ships per-project "
+            "state.db files."
         ),
         is_isolated=True,
     ),

@@ -158,3 +158,50 @@ class TestLegacyPathNotUsed:
         # the workspace root.
         assert resolved.parent.name == ".pollypm"
         assert resolved.parent.parent == env["workspace_root"]
+
+
+class TestLegacyPerProjectDbHusk:
+    """#1004: an existing ``<project>/.pollypm/state.db`` must NOT
+    short-circuit reads away from the workspace DB.
+
+    The pre-#1004 resolver returned the per-project file whenever it
+    existed on disk — even when empty — while writers (architect
+    notify, project_planning auto-fire, supervisor) silently kept
+    landing in the workspace DB. ``pm task list`` saw 0 rows while
+    the workspace DB had N. Reads and writes diverged.
+
+    These tests pin the empty-husk and populated-husk shapes so the
+    resolver can never silently regress.
+    """
+
+    def test_empty_per_project_db_does_not_redirect_reads(self, env):
+        proj_pollypm = env["project_path"] / ".pollypm"
+        proj_pollypm.mkdir(parents=True, exist_ok=True)
+        per_project_db = proj_pollypm / "state.db"
+        per_project_db.touch()
+        assert per_project_db.exists()
+
+        resolved = _resolve_db_path(_DEFAULT_DB, project="demo")
+        assert resolved == env["workspace_db"]
+        assert resolved != per_project_db
+
+    def test_populated_per_project_db_does_not_redirect_reads(self, env):
+        # Even a populated per-project DB must not be returned. Operators
+        # who need the data run ``pm migrate --apply`` to import it into
+        # the workspace DB; the resolver itself is no longer split-brained.
+        import sqlite3
+
+        proj_pollypm = env["project_path"] / ".pollypm"
+        proj_pollypm.mkdir(parents=True, exist_ok=True)
+        per_project_db = proj_pollypm / "state.db"
+        conn = sqlite3.connect(per_project_db)
+        conn.execute("CREATE TABLE work_tasks (project TEXT, task_number INT)")
+        conn.execute(
+            "INSERT INTO work_tasks (project, task_number) VALUES (?, ?)",
+            ("demo", 1),
+        )
+        conn.commit()
+        conn.close()
+
+        resolved = _resolve_db_path(_DEFAULT_DB, project="demo")
+        assert resolved == env["workspace_db"]

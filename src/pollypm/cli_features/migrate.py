@@ -135,10 +135,55 @@ def _run_apply(db_path: Path) -> None:
     outcome = _migrations.apply(db_path)
     if outcome.already_up_to_date:
         typer.echo("All migrations up to date.")
+    else:
+        migration_word = "migration" if len(outcome.applied) == 1 else "migrations"
+        typer.echo(
+            f"Applied {len(outcome.applied)} {migration_word} to {db_path}:"
+        )
+        for item in outcome.applied:
+            typer.echo(f"  [{item.namespace}] v{item.version}: {item.description}")
+    _run_legacy_per_project_db_migration()
+
+
+def _run_legacy_per_project_db_migration() -> None:
+    """Migrate any leftover per-project state.db files into workspace (#1004).
+
+    Idempotent: each project's per-project DB is migrated and archived
+    once. A re-run reports zero copied rows.
+    """
+    try:
+        from pollypm.work.legacy_per_project_db import (
+            migrate_legacy_per_project_dbs,
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"Per-project DB migration unavailable: {exc}", err=True)
         return
-    migration_word = "migration" if len(outcome.applied) == 1 else "migrations"
-    typer.echo(
-        f"Applied {len(outcome.applied)} {migration_word} to {db_path}:"
-    )
-    for item in outcome.applied:
-        typer.echo(f"  [{item.namespace}] v{item.version}: {item.description}")
+
+    reports = migrate_legacy_per_project_dbs()
+    if not reports:
+        return
+
+    actionable = [r for r in reports if any(r.rows_copied.values()) or r.errors]
+    if not actionable:
+        return
+
+    typer.echo("")
+    typer.echo("Per-project state.db migration (#1004):")
+    for report in actionable:
+        if report.errors:
+            typer.echo(
+                f"  {report.project_key}: FAILED — {'; '.join(report.errors)}",
+                err=True,
+            )
+            continue
+        copied_summary = ", ".join(
+            f"{table}={count}"
+            for table, count in report.rows_copied.items()
+            if count
+        ) or "no rows"
+        archive = (
+            f" → archived {report.archived_to.name}"
+            if report.archived_to is not None
+            else ""
+        )
+        typer.echo(f"  {report.project_key}: {copied_summary}{archive}")

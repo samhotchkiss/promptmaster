@@ -1298,6 +1298,19 @@ def test_recovery_waits_on_non_pollypm_lease(tmp_path: Path) -> None:
 
 def test_stalled_worker_gets_heartbeat_nudge_after_five_identical_cycles(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
+    # #1004: pin workspace_root so resolve_work_db_path lands inside
+    # tmp_path rather than the real ~/dev — the test asserts the
+    # *stall* nudge fires, which depends on _build_task_nudge finding
+    # no queued work for this worker. With workspace_root unset (the
+    # default), the resolver falls back to the developer's real
+    # ~/dev/.pollypm/state.db, which can carry a queued ``pollypm/1``
+    # and trip _build_task_nudge into returning a task nudge instead.
+    # Pre-#1004 the test passed by accident: the resolver short-
+    # circuited to a per-project tmp_path/.pollypm/state.db that the
+    # supervisor's own ensure_layout had created empty. The post-#1004
+    # resolver no longer routes per-project — pinning workspace_root
+    # is the correct way to scope the nudge query.
+    config.project.workspace_root = tmp_path
     config.sessions["worker"] = SessionConfig(
         name="worker",
         role="worker",
