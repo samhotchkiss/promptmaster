@@ -991,17 +991,88 @@ def _gather_worker_roster(config) -> list[WorkerRosterRow]:
                 )
             )
 
-    # Surface long-running control sessions from the storage-closet
-    # (architect-*, worker-*, pm-*) that aren't tracked as per-task
-    # workers in any project's work-service DB. Without this, the
-    # Workers panel could read '0 sessions' while the storage-closet
-    # had nine live windows (#871). Each unmatched window becomes a
-    # synthetic roster row labelled by its tmux window name so the
-    # user can at least see what is running.
+    # Surface storage-closet windows that aren't tracked as per-task
+    # workers in any project's work-service DB. Two shapes land here:
+    #
+    # * long-running control sessions — architect-*, worker-*, pm-* —
+    #   with no work_sessions row by design (#871). Without this, the
+    #   Workers panel could read '0 sessions' while the storage-closet
+    #   had nine live windows.
+    # * per-task worker windows — task-<project>-<N> — that the live
+    #   tmux server has but whose work_sessions row hasn't landed yet
+    #   (architect-spawned children, mismatched project paths, race
+    #   between window create + DB upsert). Filtering these out left
+    #   the user blind to what was actually burning tokens (#996); the
+    #   synthetic row below at least shows the window name + parsed
+    #   project/task number so action affordances still work.
     if storage_windows:
         already_tracked = {row.tmux_window for row in rows}
         for window_name, window in storage_windows.items():
             if window_name in already_tracked:
+                continue
+            is_dead = bool(getattr(window, "pane_dead", False))
+            if window_name.startswith("task-"):
+                # task-<project>-<N> — parse so the row carries a real
+                # task_number (the action affordance routes by it).
+                suffix = window_name[len("task-") :]
+                project_key, sep, task_num_raw = suffix.rpartition("-")
+                if not sep or not project_key or not task_num_raw:
+                    continue
+                try:
+                    task_number: int | None = int(task_num_raw)
+                except ValueError:
+                    continue
+                project = projects.get(project_key)
+                project_name = (
+                    project.display_label() if project is not None and hasattr(project, "display_label")
+                    else (getattr(project, "name", None) if project is not None else None)
+                    or project_key
+                )
+                # Best-effort turn detection so the per-task row gets
+                # the same working/idle dot the DB-backed rows do.
+                pane_text = ""
+                pane_id = getattr(window, "pane_id", None)
+                if not is_dead and tmux is not None and pane_id:
+                    try:
+                        pane_text = tmux.capture_pane(pane_id, lines=15) or ""
+                    except Exception:  # noqa: BLE001
+                        pane_text = ""
+                if is_dead:
+                    status = "offline"
+                elif pane_text and _pane_text_shows_active_turn(pane_text):
+                    status = "working"
+                else:
+                    status = "idle"
+                health, health_tooltip = _worker_health_snapshot(
+                    status=status,
+                    last_heartbeat_iso=None,
+                    token_total=0,
+                    session_name=window_name,
+                    current_node=None,
+                )
+                rows.append(
+                    WorkerRosterRow(
+                        project_key=project_key,
+                        project_name=str(project_name),
+                        session_name=window_name,
+                        status=status,
+                        health=health,
+                        health_tooltip=health_tooltip,
+                        task_id=None,
+                        task_number=task_number,
+                        task_title="(per-task worker)",
+                        current_node=None,
+                        turn_label="",
+                        last_commit_label="—",
+                        token_total=0,
+                        tmux_window=window_name,
+                        last_heartbeat=None,
+                        worktree_path=None,
+                        branch_name=None,
+                        just_shipped=False,
+                        shipment_token=None,
+                    )
+                )
                 continue
             if not (
                 window_name.startswith("architect-")
@@ -1011,7 +1082,6 @@ def _gather_worker_roster(config) -> list[WorkerRosterRow]:
                 continue
             kind, _, label = window_name.partition("-")
             project_key = label or "[workspace]"
-            is_dead = bool(getattr(window, "pane_dead", False))
             status = "offline" if is_dead else "idle"
             health, health_tooltip = _worker_health_snapshot(
                 status=status,

@@ -629,3 +629,155 @@ def test_gather_worker_roster_reuses_recent_heartbeat_snapshot(
     assert rows[0].health == "alive"
     assert "session: worker_demo" in rows[0].health_tooltip
     assert rows[0].turn_label.startswith("active")
+
+
+def test_gather_worker_roster_surfaces_per_task_storage_window(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """#996 — per-task ``task-<project>-<N>`` windows that the project
+    DB doesn't (yet) record must still appear in the worker roster.
+
+    Architect-spawned children, mismatched project paths, and the
+    create-window-then-upsert race all leave the storage closet with a
+    live ``task-*`` window that has no ``work_sessions`` row. Pre-fix,
+    the synthetic-row fallback only handled architect/worker/pm
+    prefixes; per-task workers vanished from the panel even though
+    ``tmux list-windows`` showed them running.
+    """
+    import pollypm.cockpit_inbox as cockpit_inbox
+    import pollypm.session_services as session_services
+    from pollypm.cockpit import _gather_worker_roster
+    from pollypm.work.sqlite_service import SQLiteWorkService
+
+    project_path = tmp_path / "demo"
+    project_path.mkdir()
+    (project_path / ".pollypm").mkdir()
+    db_path = project_path / ".pollypm" / "state.db"
+    # Touch the DB so the gather opens it; leave work_sessions empty.
+    SQLiteWorkService(db_path=db_path, project_path=project_path).close()
+
+    class _Project:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.name = "Demo"
+
+        def display_label(self) -> str:
+            return self.name
+
+    class _InnerProject:
+        tmux_session = "pollypm-test"
+
+    class _Config:
+        project = _InnerProject()
+
+        def __init__(self, project_path: Path) -> None:
+            self.projects = {"demo": _Project(project_path)}
+
+    class FakeWindow:
+        def __init__(self, name: str, pane_dead: bool = False) -> None:
+            self.name = name
+            self.pane_id = "%99"
+            self.pane_dead = pane_dead
+
+    class FakeTmux:
+        def list_windows(self, session_name: str):
+            assert session_name == "pollypm-test-storage-closet"
+            return [
+                FakeWindow("task-demo-1"),
+                FakeWindow("task-demo-7"),
+                FakeWindow("architect-demo"),
+            ]
+
+        def capture_pane(self, pane_id: str, lines: int = 15) -> str:
+            return ""
+
+    monkeypatch.setattr(
+        cockpit_inbox, "_try_load_supervisor_for_config", lambda config: None,
+    )
+    monkeypatch.setattr(session_services, "create_tmux_client", lambda: FakeTmux())
+
+    rows = _gather_worker_roster(_Config(project_path))
+
+    by_session = {row.session_name: row for row in rows}
+    assert "task-demo-1" in by_session, (
+        f"per-task window task-demo-1 missing from roster; saw {sorted(by_session)}"
+    )
+    assert "task-demo-7" in by_session
+    assert "architect-demo" in by_session  # legacy fallback still works.
+
+    task_row = by_session["task-demo-1"]
+    # The synthetic per-task row carries the parsed task number so the
+    # cockpit's "open worker" affordance routes to the right tmux window.
+    assert task_row.task_number == 1
+    assert task_row.project_key == "demo"
+    # The display name resolves through the configured project, not the
+    # raw key, so "Demo" (display_label) shows in the panel.
+    assert task_row.project_name == "Demo"
+    assert task_row.tmux_window == "task-demo-1"
+    # status defaults to idle when capture_pane returns nothing turn-active.
+    assert task_row.status == "idle"
+
+
+def test_gather_worker_roster_skips_malformed_task_window(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A ``task-<garbage>`` window with no parseable ``-<N>`` suffix is
+    skipped rather than crashing the roster gather."""
+    import pollypm.cockpit_inbox as cockpit_inbox
+    import pollypm.session_services as session_services
+    from pollypm.cockpit import _gather_worker_roster
+    from pollypm.work.sqlite_service import SQLiteWorkService
+
+    project_path = tmp_path / "demo"
+    project_path.mkdir()
+    (project_path / ".pollypm").mkdir()
+    SQLiteWorkService(
+        db_path=project_path / ".pollypm" / "state.db",
+        project_path=project_path,
+    ).close()
+
+    class _Project:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.name = "Demo"
+
+        def display_label(self) -> str:
+            return self.name
+
+    class _InnerProject:
+        tmux_session = "pollypm-test"
+
+    class _Config:
+        project = _InnerProject()
+
+        def __init__(self, project_path: Path) -> None:
+            self.projects = {"demo": _Project(project_path)}
+
+    class FakeWindow:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.pane_id = "%99"
+            self.pane_dead = False
+
+    class FakeTmux:
+        def list_windows(self, session_name: str):
+            return [
+                FakeWindow("task-"),                # no suffix
+                FakeWindow("task-bareword"),        # no -<N>
+                FakeWindow("task-demo-notanint"),   # non-numeric suffix
+                FakeWindow("task-demo-3"),          # well-formed
+            ]
+
+        def capture_pane(self, pane_id: str, lines: int = 15) -> str:
+            return ""
+
+    monkeypatch.setattr(
+        cockpit_inbox, "_try_load_supervisor_for_config", lambda config: None,
+    )
+    monkeypatch.setattr(session_services, "create_tmux_client", lambda: FakeTmux())
+
+    rows = _gather_worker_roster(_Config(project_path))
+    sessions = {row.session_name for row in rows}
+    assert sessions == {"task-demo-3"}
