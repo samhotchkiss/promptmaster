@@ -628,11 +628,16 @@ def _escalate_no_session(event: TaskAssignmentEvent, store: Any | None) -> None:
     """Raise (or refresh) a user-inbox alert when no session matches."""
     if store is None:
         return
-    # #760 — action-forward single-line copy. Names the actor in plain
-    # English and keeps the recovery path inside the cockpit instead of
-    # pushing the user to remember CLI commands.
+    # #760 — action-forward single-line UI hint. Names the actor in plain
+    # English and points at the cockpit recovery surface.
+    # #953 — also append a ``Try:`` block with the CLI commands a CLI-only
+    # operator can run. For reviewer-role alerts ``pm task approve`` is
+    # listed first because CLI-driven approve is the canonical, documented
+    # human-review path; for worker-role alerts ``pm task claim`` is first
+    # because per-task workers are the default capacity model.
     from pollypm.work.models import ActorType
 
+    cli_hint: str | None = None
     if event.actor_type is ActorType.ROLE:
         actor_display = f"the {event.actor_name} role"
         if event.actor_name == "architect":
@@ -640,21 +645,41 @@ def _escalate_no_session(event: TaskAssignmentEvent, store: Any | None) -> None:
                 f"Open project '{event.project}' and use Workers to start or "
                 "recover the architect."
             )
+            cli_hint = (
+                f"Try: pm worker-start --role architect {event.project}"
+            )
         elif event.actor_name == "worker":
             action_hint = (
                 "Open the task in Tasks; Polly will claim it when worker "
                 "capacity is available, or use Workers to start capacity now."
             )
+            cli_hint = (
+                f"Try: pm task claim {event.task_id}\n"
+                f"     (or pm worker-start --role worker {event.project} "
+                "for a long-running session)"
+            )
         elif event.actor_name == "reviewer":
             # #953 — human review is the canonical path; surface the
-            # in-cockpit Approve/Reject decision before session recovery.
+            # in-cockpit Approve/Reject decision before session recovery,
+            # and lead the CLI hint with ``pm task approve``.
             action_hint = (
                 "Open the task in Tasks or Inbox and use Approve or Reject."
+            )
+            cli_hint = (
+                f"Try: pm task approve {event.task_id} --actor <reviewer> "
+                "--reason \"...\"\n"
+                f"     (or pm worker-start --role reviewer {event.project} "
+                "for a long-running session)\n"
+                f"     (or pm task claim {event.task_id} for a per-task worker)"
             )
         else:
             action_hint = (
                 f"Open project '{event.project}' and use Workers to start or "
                 f"recover the {event.actor_name} role."
+            )
+            cli_hint = (
+                f"Try: pm worker-start --role {event.actor_name} "
+                f"{event.project}"
             )
     else:
         actor_display = event.actor_name or event.actor_type.value
@@ -666,6 +691,8 @@ def _escalate_no_session(event: TaskAssignmentEvent, store: Any | None) -> None:
         f"Task {event.task_id} was routed to {actor_display} but no "
         f"matching session is running. {action_hint}"
     )
+    if cli_hint:
+        message = f"{message}\n{cli_hint}"
     try:
         store.upsert_alert(
             "task_assignment",

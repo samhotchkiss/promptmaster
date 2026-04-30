@@ -350,15 +350,22 @@ class TestNotifyEscalation:
         assert outcome["outcome"] == "no_session"
         alerts = state_store.open_alerts()
         assert any(a.alert_type == "no_session_for_assignment:demo/1" for a in alerts)
-        # Message guides the user to the cockpit surface, not to a CLI command.
+        # Message guides the user to the cockpit surface AND to a CLI
+        # recovery command (#953 — keep CLI hints alongside UI guidance).
         matching = [a for a in alerts if a.alert_type.endswith(":demo/1")]
         assert any("Open the task in Tasks" in a.message for a in matching)
-        assert all("pm " not in a.message for a in matching)
+        # Worker-role no-session alert should surface ``pm task claim``
+        # as the per-task recovery path (not ``pm task approve`` — that
+        # is reviewer-only).
+        assert any("Try: pm task claim demo/1" in a.message for a in matching)
+        assert all(
+            "pm task approve" not in a.message for a in matching
+        ), "worker-role alert must not suggest pm task approve"
 
     def test_reviewer_no_session_hint_points_to_review_ui(self, state_store):
         """#953 — reviewer-role no-session alerts must surface human
-        Approve/Reject as the canonical path, without telling the user
-        to run recovery commands."""
+        Approve/Reject as the canonical path AND lead the ``Try:`` block
+        with ``pm task approve`` for CLI-only operators."""
         svc = FakeSessionService(handles=[])  # nobody live
         services = _RuntimeServices(
             session_service=svc, state_store=state_store,
@@ -374,9 +381,21 @@ class TestNotifyEscalation:
         matching = [a for a in alerts if a.alert_type.endswith(":demo/1")]
         assert matching, "expected a per-task no_session_for_assignment alert"
         message = matching[0].message
+        # UI-pointer copy stays.
         assert "Open the task in Tasks or Inbox" in message
         assert "Approve or Reject" in message
-        assert "pm " not in message
+        # CLI hint is restored, with ``pm task approve`` listed FIRST
+        # (canonical human-review path), followed by the long-running
+        # session and per-task worker fallbacks.
+        assert "Try: pm task approve demo/1" in message
+        # ``Try:`` line must come before the worker-start / claim
+        # fallbacks so ``pm task approve`` is unambiguously first.
+        approve_idx = message.find("pm task approve demo/1")
+        worker_start_idx = message.find("pm worker-start --role reviewer demo")
+        claim_idx = message.find("pm task claim demo/1")
+        assert approve_idx != -1
+        assert worker_start_idx != -1 and approve_idx < worker_start_idx
+        assert claim_idx != -1 and approve_idx < claim_idx
 
 
 # ---------------------------------------------------------------------------
