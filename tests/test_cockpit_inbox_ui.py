@@ -1886,3 +1886,104 @@ def test_background_refresh_renders_when_content_changes(inbox_env, inbox_app) -
                 f"actually changed (got {len(render_calls)} calls)"
             )
     _asyncio.run(body())
+
+
+def test_inbox_ctrl_h_returns_focus_to_rail_without_exiting(
+    inbox_env, inbox_app, monkeypatch,
+) -> None:
+    """Ctrl-h hands tmux focus back to the rail (#985).
+
+    The cockpit rail and the inbox right pane are separate tmux panes.
+    Once tmux focuses the right pane, j/k/Tab keystrokes are consumed
+    by the inbox app — the rail's own j/k bindings never see them.
+    Without an explicit "focus rail" affordance, the user has to
+    restart the cockpit to escape the inbox; this test pins the
+    keystroke in place so a regression breaks loudly.
+
+    Importantly, Ctrl-h must NOT call ``self.exit()``. The inbox app
+    keeps running so a follow-up rail click on Inbox snaps back into
+    the existing list (with cursor + filter state preserved) rather
+    than re-mounting from scratch.
+    """
+    calls: list[Path] = []
+
+    async def body() -> None:
+        async with inbox_app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            from pollypm import cockpit_ui as _ui_mod
+            monkeypatch.setattr(
+                "pollypm.cockpit_rail.focus_cockpit_rail_pane",
+                lambda path: calls.append(path) or True,
+            )
+
+            await pilot.press("ctrl+h")
+            await pilot.pause()
+
+            assert calls == [inbox_env["config_path"]]
+            # Inbox app is still running — the harness exits cleanly
+            # only because the test body returns, not because Ctrl-h
+            # tore the app down.
+            assert inbox_app.is_running
+    _run(body())
+
+
+def test_inbox_back_or_cancel_focuses_rail_before_exit(
+    inbox_env, inbox_app, monkeypatch,
+) -> None:
+    """Top-level ``q``/``Esc`` exits the inbox (legacy behaviour) AND
+    shifts tmux focus to the rail (#985).
+
+    Before this fix, ``self.exit()`` tore down the inbox app but left
+    tmux focus on the now-shell-only right pane. The user could no
+    longer drive the rail with j/k — the cockpit had to be killed
+    and restarted. The fix calls ``focus_cockpit_rail_pane`` before
+    exit so the user lands on the rail with one keystroke.
+    """
+    calls: list[Path] = []
+
+    async def body() -> None:
+        async with inbox_app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            monkeypatch.setattr(
+                "pollypm.cockpit_rail.focus_cockpit_rail_pane",
+                lambda path: calls.append(path) or True,
+            )
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert calls == [inbox_env["config_path"]]
+    _run(body())
+
+
+def test_inbox_back_or_cancel_skips_rail_focus_in_filter_input(
+    inbox_env, inbox_app, monkeypatch,
+) -> None:
+    """When the filter Input has focus, Esc clears the query and
+    bounces back to the list (its existing behaviour). It must NOT
+    shift tmux focus to the rail in that path — the user is still
+    inside the inbox surface.
+    """
+    calls: list[Path] = []
+
+    async def body() -> None:
+        async with inbox_app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            monkeypatch.setattr(
+                "pollypm.cockpit_rail.focus_cockpit_rail_pane",
+                lambda path: calls.append(path) or True,
+            )
+
+            # Open filter, type, then escape — should not call focus_rail.
+            await pilot.press("slash")
+            await pilot.pause()
+            assert inbox_app.filter_input.has_focus
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert calls == []
+    _run(body())

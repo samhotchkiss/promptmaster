@@ -2394,6 +2394,22 @@ class CockpitRouter:
             )
             self.tmux.select_pane(right_pane)
 
+    def focus_rail_pane(self) -> None:
+        """Hand tmux focus back to the cockpit rail pane (#985).
+
+        Called from right-pane Textual apps that want to surrender focus
+        without exiting (e.g. ``Ctrl-h`` / ``Escape`` on the inbox).
+        Without this, once tmux focuses the right pane there's no
+        keyboard-only way back to the rail short of restarting the
+        cockpit — j/k and Tab all land in the right pane app.
+        """
+        config = self._load_config()
+        window_target = f"{config.project.tmux_session}:{self._COCKPIT_WINDOW}"
+        self.ensure_cockpit_layout()
+        rail_pane = self._left_pane_id(window_target)
+        if rail_pane is not None:
+            self.tmux.select_pane(rail_pane)
+
     def send_key_to_right_pane(self, key: str) -> None:
         config = self._load_config()
         window_target = f"{config.project.tmux_session}:{self._COCKPIT_WINDOW}"
@@ -3177,6 +3193,37 @@ class CockpitRouter:
             args.extend(["--task", shlex.quote(task_id)])
         joined = " ".join(args)
         return f"sh -lc 'cd {root} && {joined}'"
+
+
+def focus_cockpit_rail_pane(config_path: Path) -> bool:
+    """Hand tmux focus from the right pane back to the cockpit rail (#985).
+
+    Inputs: the active cockpit ``config_path`` (used to resolve the tmux
+    session + cockpit window).
+    Outputs: ``True`` when a select-pane command was issued, ``False``
+    when the cockpit layout isn't there or any tmux call raised.
+    Side effects: a single ``tmux select-pane`` against the rail pane id.
+    Invariants: never raises — right-pane apps call this from key
+    bindings and a missing tmux session must not crash the inbox.
+
+    Without this helper, once the user's tmux client focuses the right
+    pane (via mouse click or the rail's Tab forward) every j/k/Enter
+    keystroke is consumed by whatever ``pm cockpit-pane <kind>`` app is
+    running there. Escape inside the inbox calls ``self.exit()`` which
+    tears down the inbox app but leaves tmux focus on the right pane,
+    so the rail still can't see keys until the user issues a tmux
+    prefix command. Right-pane apps bind a key to this helper so the
+    user gets back to the rail with one keystroke.
+    """
+    try:
+        router = CockpitRouter(config_path)
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        router.focus_rail_pane()
+    except Exception:  # noqa: BLE001
+        return False
+    return True
 
 
 # ── Render row ───────────────────────────────────────────────────────────────

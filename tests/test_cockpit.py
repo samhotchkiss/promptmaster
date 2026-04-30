@@ -2669,6 +2669,86 @@ def test_cockpit_router_focus_right_shows_return_affordance(monkeypatch, tmp_pat
     assert calls[1] == ("select", ("%2",))
 
 
+def test_cockpit_router_focus_rail_selects_leftmost_pane(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """``focus_rail_pane`` shifts tmux focus from the right pane back
+    to the rail (#985). Without this, right-pane apps like the inbox
+    have no path to return keyboard focus to the rail short of the
+    user issuing a tmux prefix command — and j/k stays trapped in the
+    right pane."""
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n"
+    )
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    class FakeTmux:
+        def run(self, *args: str, **_kwargs) -> None:
+            calls.append(("run", args))
+
+        def select_pane(self, target: str) -> None:
+            calls.append(("select", (target,)))
+
+    router = CockpitRouter(config_path)
+    router.tmux = FakeTmux()  # type: ignore[assignment]
+    monkeypatch.setattr(router, "ensure_cockpit_layout", lambda: None)
+    monkeypatch.setattr(router, "_left_pane_id", lambda target: "%1")
+
+    router.focus_rail_pane()
+
+    assert calls == [("select", ("%1",))]
+
+
+def test_focus_cockpit_rail_pane_helper_invokes_router(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """The module-level ``focus_cockpit_rail_pane`` helper is what
+    right-pane Textual apps call from key bindings. It must not raise
+    on missing tmux sessions and should pass the resolved config
+    through to a router."""
+    from pollypm import cockpit_rail as _rail_mod
+
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n"
+    )
+
+    captured: list[Path] = []
+
+    class _StubRouter:
+        def __init__(self, path: Path) -> None:
+            captured.append(path)
+
+        def focus_rail_pane(self) -> None:
+            captured.append(Path("called"))
+
+    monkeypatch.setattr(_rail_mod, "CockpitRouter", _StubRouter)
+
+    assert _rail_mod.focus_cockpit_rail_pane(config_path) is True
+    assert captured[0] == config_path
+    assert captured[-1] == Path("called")
+
+
+def test_focus_cockpit_rail_pane_helper_returns_false_on_router_failure(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """A construction failure (e.g. no config in test env) must not
+    propagate — right-pane apps call this from key handlers and a
+    crash would freeze the inbox."""
+    from pollypm import cockpit_rail as _rail_mod
+
+    config_path = tmp_path / "pollypm.toml"
+
+    class _ExplodingRouter:
+        def __init__(self, path: Path) -> None:
+            raise RuntimeError("no tmux here")
+
+    monkeypatch.setattr(_rail_mod, "CockpitRouter", _ExplodingRouter)
+
+    assert _rail_mod.focus_cockpit_rail_pane(config_path) is False
+
+
 def test_cockpit_router_ensure_layout_resizes_existing_left_pane(tmp_path: Path) -> None:
     calls: dict[str, object] = {}
 
