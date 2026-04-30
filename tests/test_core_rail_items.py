@@ -599,3 +599,82 @@ def test_classify_projects_review_status_does_not_set_has_working(
     )
     # Sanity: a real in_progress task DOES flag the spinner.
     assert has_working["inflight"] is True
+
+
+def test_active_task_numbers_excludes_terminal_and_review_tasks(
+    tmp_path: Path,
+) -> None:
+    """#1002 — the rail's per-project ``Task #N`` rows are sourced from
+    ``work_tasks`` (DB truth), not from a tmux walk of the storage
+    closet. The previous implementation enumerated ``task-<project>-<N>``
+    windows and surfaced any window the tmux server happened to know
+    about — including zombie windows left behind after the planning
+    pipeline completed. Reading from the DB instead means a missed
+    cleanup never leaks into the rail.
+
+    This test seeds tasks across every status and pins the contract:
+    only ``in_progress`` and ``rework`` tasks (i.e. tasks that have an
+    active claim and are doing work) surface as worker rows.
+    """
+    import sqlite3
+    from pollypm.plugins_builtin.core_rail_items.plugin import _active_task_numbers
+    from pollypm.models import KnownProject, ProjectKind
+
+    project_root = tmp_path / "demo"
+    (project_root / ".pollypm").mkdir(parents=True)
+    db_path = project_root / ".pollypm" / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE work_tasks ("
+            "  project TEXT NOT NULL,"
+            "  task_number INTEGER NOT NULL,"
+            "  work_status TEXT NOT NULL,"
+            "  PRIMARY KEY (project, task_number)"
+            ")"
+        )
+        # Cover every status the rail might see post-planning. The
+        # bikepath-shaped input: critic tasks done, plan_project review,
+        # one implementation task in_progress, one rework, the rest
+        # blocked / cancelled.
+        for number, status in [
+            (1, "draft"),
+            (2, "queued"),
+            (3, "in_progress"),     # surface
+            (4, "rework"),           # surface
+            (5, "blocked"),
+            (6, "on_hold"),
+            (7, "review"),           # do NOT surface
+            (8, "done"),             # do NOT surface
+            (9, "cancelled"),        # do NOT surface
+        ]:
+            conn.execute(
+                "INSERT INTO work_tasks(project, task_number, work_status) "
+                "VALUES (?, ?, ?)",
+                ("demo", number, status),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    project = KnownProject(
+        key="demo", path=project_root, name="Demo",
+        kind=ProjectKind.GIT, tracked=True,
+    )
+
+    assert _active_task_numbers(project) == [3, 4]
+
+
+def test_active_task_numbers_handles_missing_db_gracefully(
+    tmp_path: Path,
+) -> None:
+    """A project without a ``state.db`` (e.g. fresh / never-touched)
+    must not raise; the rail just shows no per-task rows."""
+    from pollypm.plugins_builtin.core_rail_items.plugin import _active_task_numbers
+    from pollypm.models import KnownProject, ProjectKind
+
+    project = KnownProject(
+        key="empty", path=tmp_path / "empty", name="Empty",
+        kind=ProjectKind.GIT, tracked=True,
+    )
+    assert _active_task_numbers(project) == []

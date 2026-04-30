@@ -53,6 +53,7 @@ def session_health_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
             "considered": 0,
             "alerts_raised": 0,
             "skipped_planned": 0,
+            "zombie_task_windows_killed": 0,
         }
         try:
             msg_store = getattr(supervisor, "_msg_store", None)
@@ -69,6 +70,9 @@ def session_health_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
             "ephemeral_considered": ephemeral_summary["considered"],
             "ephemeral_alerts_raised": ephemeral_summary["alerts_raised"],
             "ephemeral_skipped_planned": ephemeral_summary["skipped_planned"],
+            "ephemeral_zombie_task_windows_killed": (
+                ephemeral_summary.get("zombie_task_windows_killed", 0)
+            ),
         }
 
 

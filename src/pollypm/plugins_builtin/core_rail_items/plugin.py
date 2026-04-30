@@ -161,6 +161,89 @@ def _user_waiting_task_ids(ctx: RailContext) -> frozenset[str]:
     return frozenset(out)
 
 
+def _active_task_numbers(project: Any, *, config: Any = None) -> list[int]:
+    """Return per-task task numbers that the DB considers actively worked.
+
+    DB-truth source for the rail's per-project ``Task #N`` rows (#1002).
+    The legacy implementation enumerated ``task-<project>-<N>`` windows in
+    the storage-closet tmux session, which leaked zombie windows
+    (post-completion cleanup gaps) into the rail and routed clicks to
+    task IDs the DB no longer knows about. Reading from ``work_tasks``
+    instead means a missed window kill cannot leak to the UI: only tasks
+    in ``in_progress`` / ``rework`` (i.e. an active claim is open)
+    surface as worker rows. ``review`` tasks are excluded — work is
+    done and the row would lead to a worker pane with nothing to do.
+
+    Resolution mirrors :func:`pollypm.work.db_resolver.resolve_work_db_path`:
+    check the per-project ``state.db`` first; if it has no rows for
+    ``project.key``, fall through to the workspace-root ``state.db``
+    derived from ``config.project.workspace_root``. This keeps the
+    rail correct for both the per-project layout and the
+    workspace-root layout (untracked / shared-DB projects) without
+    introducing a hard dependency on ``load_config`` from the rail.
+
+    Returns numbers sorted ascending so rows render in stable order.
+    Failures (missing db, sqlite errors) yield an empty list — the
+    rail simply shows no per-task rows rather than crashing.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    project_key = getattr(project, "key", None)
+    if not project_key:
+        return []
+
+    candidates: list[Path] = [project.path / ".pollypm" / "state.db"]
+    workspace_root = None
+    if config is not None:
+        workspace_root = getattr(
+            getattr(config, "project", None), "workspace_root", None,
+        )
+    if workspace_root is not None:
+        candidates.append(Path(workspace_root) / ".pollypm" / "state.db")
+
+    seen: set[str] = set()
+    for db_path in candidates:
+        try:
+            if not db_path.exists():
+                continue
+        except OSError:
+            continue
+        key = str(db_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            try:
+                rows = conn.execute(
+                    "SELECT task_number FROM work_tasks "
+                    "WHERE project = ? "
+                    "AND work_status IN ('in_progress','rework') "
+                    "ORDER BY task_number ASC",
+                    (project_key,),
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        if rows:
+            out: list[int] = []
+            for row in rows:
+                try:
+                    out.append(int(row[0]))
+                except (TypeError, ValueError):
+                    continue
+            return out
+    return []
+
+
 def _polly_state(ctx: RailContext) -> str:
     return _session_state(ctx, "operator")
 
@@ -374,6 +457,7 @@ def _project_rows(ctx: RailContext) -> list[RailRow]:
     if not active and not inactive:
         return []
     selected = _selected_key(ctx)
+    config = _config(ctx)
 
     # Map project -> session name for session_state fallback.
     from pollypm.models import CONTROL_ROLES
@@ -423,23 +507,12 @@ def _project_rows(ctx: RailContext) -> list[RailRow]:
                 label="  Tasks",
                 state="sub",
             ))
-            supervisor = _supervisor(ctx)
-            if supervisor is not None:
-                try:
-                    storage = supervisor.storage_closet_session_name()
-                    task_prefix = f"task-{project_key}-"
-                    for win in router.tmux.list_windows(storage):
-                        if win.name.startswith(task_prefix):
-                            task_num = win.name[len(task_prefix):]
-                            rows.append(RailRow(
-                                key=f"project:{project_key}:task:{task_num}",
-                                label=f"  \u27f3 Task #{task_num}",
-                                state="sub",
-                            ))
-                except Exception:  # noqa: BLE001
-                    logger.debug(
-                        "core_rail_items: storage-closet enumeration failed", exc_info=True,
-                    )
+            for task_num in _active_task_numbers(project, config=config):
+                rows.append(RailRow(
+                    key=f"project:{project_key}:task:{task_num}",
+                    label=f"  \u27f3 Task #{task_num}",
+                    state="sub",
+                ))
             rows.append(RailRow(
                 key=f"project:{project_key}:settings",
                 label="  Settings",

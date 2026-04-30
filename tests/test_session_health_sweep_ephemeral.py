@@ -341,8 +341,197 @@ class TestSweepEphemeralSessions:
         summary = sweep_ephemeral_sessions(supervisor, store)
 
         assert summary == {
-            "considered": 0, "alerts_raised": 0, "skipped_planned": 0,
+            "considered": 0,
+            "alerts_raised": 0,
+            "skipped_planned": 0,
+            "zombie_task_windows_killed": 0,
         }
+
+    def test_zombie_task_window_killed_when_db_task_terminal(
+        self, tmp_path: Any,
+    ) -> None:
+        """#1002 — kill ``task-<project>-<N>`` window when the DB task
+        is in a terminal state. This closes the post-planning cleanup
+        gap where critic tasks transition to ``done`` but their tmux
+        windows linger and surface as clickable zombies in the rail.
+        """
+        import sqlite3
+        from pathlib import Path
+
+        # Build a fake tracked project with a state.db that says task #2
+        # is done (terminal). The sweep should kill task-myproj-2.
+        project_root = Path(tmp_path) / "myproj"
+        (project_root / ".pollypm").mkdir(parents=True)
+        db_path = project_root / ".pollypm" / "state.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE work_tasks ("
+            "  project TEXT NOT NULL,"
+            "  task_number INTEGER NOT NULL,"
+            "  work_status TEXT NOT NULL,"
+            "  PRIMARY KEY (project, task_number)"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO work_tasks(project, task_number, work_status) "
+            "VALUES (?, ?, ?)",
+            ("myproj", 2, "done"),
+        )
+        conn.execute(
+            "INSERT INTO work_tasks(project, task_number, work_status) "
+            "VALUES (?, ?, ?)",
+            ("myproj", 3, "in_progress"),
+        )
+        conn.commit()
+        conn.close()
+
+        @dataclass
+        class _FakeProject:
+            key: str
+            path: Path
+
+        @dataclass
+        class _FakeConfig:
+            projects: dict[str, Any]
+
+        @dataclass
+        class _FakeHandle:
+            name: str
+            window_name: str
+            tmux_session: str = "pollypm-storage-closet"
+
+        @dataclass
+        class _RecordingTmux:
+            killed: list[str] = field(default_factory=list)
+
+            def kill_window(self, target: str) -> None:
+                self.killed.append(target)
+
+        @dataclass
+        class _FakeSvc:
+            handles: list[_FakeHandle]
+            health_by_name: dict[str, FakeHealth] = field(default_factory=dict)
+            tmux: _RecordingTmux = field(default_factory=_RecordingTmux)
+
+            def list(self) -> list[_FakeHandle]:
+                return list(self.handles)
+
+            def health(self, name: str) -> FakeHealth:
+                return self.health_by_name.get(name, FakeHealth())
+
+        @dataclass
+        class _FakeSup:
+            session_service: _FakeSvc
+            config: _FakeConfig
+            planned_launches: list[FakeLaunch] = field(default_factory=list)
+
+            def plan_launches(self) -> list[FakeLaunch]:
+                return list(self.planned_launches)
+
+        svc = _FakeSvc(
+            handles=[
+                _FakeHandle(
+                    name="task-myproj-2",
+                    window_name="task-myproj-2",
+                ),
+                _FakeHandle(
+                    name="task-myproj-3",
+                    window_name="task-myproj-3",
+                ),
+            ],
+        )
+        supervisor = _FakeSup(
+            session_service=svc,
+            config=_FakeConfig(
+                projects={"myproj": _FakeProject(key="myproj", path=project_root)},
+            ),
+        )
+        store = FakeStore()
+
+        summary = sweep_ephemeral_sessions(supervisor, store)
+
+        # Only the terminal task window is killed.
+        assert summary["zombie_task_windows_killed"] == 1
+        assert svc.tmux.killed == ["pollypm-storage-closet:task-myproj-2"]
+
+    def test_zombie_task_window_killed_when_db_row_missing(
+        self, tmp_path: Any,
+    ) -> None:
+        """#1002 sister-case — task row absent from the DB also counts
+        as a zombie. This catches the planning critic case where the
+        critic task is created and then garbage-collected from the DB
+        before its window is killed.
+        """
+        import sqlite3
+        from pathlib import Path
+
+        project_root = Path(tmp_path) / "ghost"
+        (project_root / ".pollypm").mkdir(parents=True)
+        db_path = project_root / ".pollypm" / "state.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE work_tasks ("
+            "  project TEXT NOT NULL,"
+            "  task_number INTEGER NOT NULL,"
+            "  work_status TEXT NOT NULL,"
+            "  PRIMARY KEY (project, task_number)"
+            ")"
+        )
+        conn.commit()
+        conn.close()
+
+        @dataclass
+        class _P:
+            key: str
+            path: Path
+
+        @dataclass
+        class _C:
+            projects: dict[str, Any]
+
+        @dataclass
+        class _H:
+            name: str
+            window_name: str
+            tmux_session: str = "pollypm-storage-closet"
+
+        @dataclass
+        class _Tmux:
+            killed: list[str] = field(default_factory=list)
+
+            def kill_window(self, target: str) -> None:
+                self.killed.append(target)
+
+        @dataclass
+        class _Svc:
+            handles: list[_H]
+            tmux: _Tmux = field(default_factory=_Tmux)
+
+            def list(self) -> list[_H]:
+                return list(self.handles)
+
+            def health(self, name: str) -> FakeHealth:
+                return FakeHealth()
+
+        @dataclass
+        class _Sup:
+            session_service: _Svc
+            config: _C
+
+            def plan_launches(self) -> list[FakeLaunch]:
+                return []
+
+        svc = _Svc(handles=[_H(name="task-ghost-1", window_name="task-ghost-1")])
+        supervisor = _Sup(
+            session_service=svc,
+            config=_C(projects={"ghost": _P(key="ghost", path=project_root)}),
+        )
+        store = FakeStore()
+
+        summary = sweep_ephemeral_sessions(supervisor, store)
+
+        assert summary["zombie_task_windows_killed"] == 1
+        assert svc.tmux.killed == ["pollypm-storage-closet:task-ghost-1"]
 
     def test_per_session_health_failure_does_not_abort_sweep(self) -> None:
         """A health() exception on session N must not skip session N+1."""
