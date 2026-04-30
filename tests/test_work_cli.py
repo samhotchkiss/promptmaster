@@ -66,6 +66,46 @@ class TestCliList:
         assert "Task A" in result.output
         assert "Task B" in result.output
 
+    def test_cli_list_hides_pm_notify_inbox_tasks(self, db_path):
+        """``pm notify`` materialises a chat-flow task carrying the
+        ``notify`` label so the cockpit inbox can surface the
+        architect's plan_review handoff. Those rows must NOT appear
+        in the canonical task list — they have no node-level
+        transition affordance and clutter the work view (#1003).
+        """
+        _create_task(db_path, title="Real work task")
+        # Mirror cli_features/session_runtime.py::notify task creation:
+        # chat-flow + ``notify`` label + plan_review labels.
+        runner.invoke(
+            task_app,
+            [
+                "create",
+                "Plan ready for review: proj",
+                "--project", "proj",
+                "--flow", "chat",
+                "--description", "Press A to approve.",
+                "--db", db_path,
+                "--label", "notify",
+                "--label", "notify_message:42",
+                "--label", "plan_review",
+                "--label", "plan_task:proj/1",
+            ],
+        )
+
+        # Default: notify-backed inbox row is hidden.
+        result = runner.invoke(task_app, ["list", "--db", db_path])
+        assert result.exit_code == 0
+        assert "Real work task" in result.output
+        assert "Plan ready for review" not in result.output
+
+        # Opt-in: ``--include-inbox`` resurfaces them for debugging.
+        result = runner.invoke(
+            task_app, ["list", "--include-inbox", "--db", db_path],
+        )
+        assert result.exit_code == 0
+        assert "Real work task" in result.output
+        assert "Plan ready for review" in result.output
+
 
 class TestCliLifecycle:
     def test_cli_lifecycle(self, db_path):

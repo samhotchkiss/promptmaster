@@ -631,12 +631,26 @@ def task_list(
         "--with-tokens",
         help="Include per-task token usage columns (in/out/sessions). #86",
     ),
+    include_inbox: bool = typer.Option(
+        False,
+        "--include-inbox",
+        help=(
+            "Also list ``pm notify``-backed inbox tasks (chat-flow rows "
+            "carrying the ``notify`` label). Hidden by default because "
+            "they have no node-level transition affordance and clutter "
+            "the work view. #1003"
+        ),
+    ),
     db: str = _DB_OPTION,
     output_json: bool = _JSON_OPTION,
 ) -> None:
     """List tasks with optional filters."""
+    from pollypm.notify_task import is_notify_inbox_task
+
     svc = _svc(db, project=project)
     tasks = svc.list_tasks(work_status=status, project=project, assignee=assignee)
+    if not include_inbox:
+        tasks = [task for task in tasks if not is_notify_inbox_task(task)]
     _print_task_table(tasks, as_json=output_json, with_tokens=with_tokens)
 
 

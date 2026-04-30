@@ -54,6 +54,7 @@ from pollypm.plugins_builtin.task_assignment_notify.api import (
     RECENT_SWEEPER_PING_SECONDS,
     SWEEPER_PING_CONTEXT_ENTRY_TYPE,
 )
+from pollypm.notify_task import is_notify_inbox_task
 from pollypm.rejection_feedback import (
     RejectionFeedbackNotice,
     is_rejection_feedback_task,
@@ -1534,6 +1535,15 @@ class PollyTasksApp(App[None]):
                         continue
                     for candidate in candidates:
                         if is_rejection_feedback_task(candidate):
+                            continue
+                        # ``pm notify --priority immediate`` materialises a
+                        # ``chat``-flow task so the cockpit inbox can render
+                        # the architect's plan_review (and other operator
+                        # announcements) with structured action affordances.
+                        # That row has no node-level transition the user
+                        # can act on from the Tasks pane, so we filter it
+                        # out here and keep it inbox-only (#1003).
+                        if is_notify_inbox_task(candidate):
                             continue
                         tid = getattr(candidate, "task_id", None)
                         if not tid or tid in tasks_by_id:

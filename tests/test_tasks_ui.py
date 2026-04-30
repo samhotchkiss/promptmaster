@@ -1264,6 +1264,67 @@ def test_task_app_surfaces_unread_rejection_feedback(env, monkeypatch) -> None:
     _run(body())
 
 
+def test_task_app_filters_pm_notify_inbox_tasks(env, monkeypatch) -> None:
+    """``pm notify --priority immediate`` materialises a chat-flow task
+    so the cockpit inbox can render the architect's plan_review handoff
+    with ``v open · d discuss · A approve`` — but those rows have no
+    node-level transition affordance, so they MUST stay out of the
+    Tasks pane (#1003). Otherwise users see ``<project>/7 "Plan ready
+    for review: <project>"`` as a draft row that nothing in the Tasks
+    UI can act on.
+    """
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    work_task = _task(node_id="synthesize", title="Plan project demo")
+    notify_task = _task(
+        task_number=7,
+        node_id=None,  # chat-flow notify rows park outside the flow graph
+        title="Plan ready for review: demo",
+        status=WorkStatus.DRAFT,
+        flow_template_id="chat",
+        labels=[
+            "plan_review",
+            "project:demo",
+            "plan_task:demo/1",
+            "explainer:/tmp/demo-plan-review.html",
+            "notify",
+            "notify_message:42",
+        ],
+        description=(
+            "Plan: docs/project-plan.md\nExplainer: /tmp/demo-plan-review.html\n"
+            "Press v to open, d to discuss, A to approve."
+        ),
+    )
+    fake_svc = _FakeSvc(
+        tasks_factory=lambda: [work_task, notify_task],
+        flow=_flow(),
+        context_by_id={("demo/1", None): work_task.context},
+    )
+
+    monkeypatch.setattr(
+        "pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]),
+    )
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            rows = _table_rows(app.query_one("#tasks-table", DataTable))
+
+            # Only the real plan_project work task is visible — the
+            # ``pm notify``-backed plan_review row stays inbox-only.
+            assert len(rows) == 1
+            row_text = " ".join(rows[0])
+            assert "Plan project demo" in row_text
+            assert "Plan ready for review" not in row_text
+
+    _run(body())
+
+
 def test_task_app_leads_user_review_with_plain_language_summary(
     env, monkeypatch,
 ) -> None:
