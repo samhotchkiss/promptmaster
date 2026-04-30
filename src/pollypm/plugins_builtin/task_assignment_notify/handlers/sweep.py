@@ -1295,6 +1295,30 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
         finally:
             _close_quietly(project_work)
 
+    # #1005: after the sweep has refreshed the open alert set, walk any
+    # ``<role>/no_session`` alerts and attempt auto-recovery
+    # (``pm worker-start --role <role> <project>``). The helper bounds
+    # retries, applies an exponential backoff per (role, project), and
+    # escalates to ``<role>/no_session_spawn_failed`` once attempts
+    # exhaust — mirroring the heartbeat's ``recovery_limit`` pattern.
+    spawn_summary: dict[str, int] = {}
+    try:
+        from pollypm.recovery.no_session_spawn import (
+            auto_recover_no_session_alerts,
+            summarize_decisions,
+        )
+
+        decisions = auto_recover_no_session_alerts(
+            services,
+            config_path=config_path,
+        )
+        spawn_summary = summarize_decisions(decisions)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: no_session auto-recovery failed",
+            exc_info=True,
+        )
+
     return {
         "outcome": "swept",
         "considered": totals["considered"],
@@ -1303,4 +1327,5 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
         "projects_skipped": projects_skipped,
         "no_session_alerts": len(alerted_pairs),
         "plan_missing_alerts": len(plan_missing_projects),
+        "no_session_auto_recovery": spawn_summary,
     }

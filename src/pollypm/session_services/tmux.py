@@ -1180,20 +1180,22 @@ class TmuxSessionService:
         # See issue #263.
         display_path = prompt_path
         instruct_path = self._config.project.root_dir / ".pollypm" / "docs" / "SYSTEM.md"
-        # Mirror the supervisor framing (#868): tag the bootstrap so a
-        # user who opens the chat sees this is plumbing, not directed
-        # at them.
-        framing_header = (
-            "[PollyPM bootstrap — system message, please ignore on screen]"
-        )
+        # #1005: plain conversational phrasing — the "[PollyPM bootstrap
+        # — system message, please ignore on screen]" header tripped
+        # Claude's prompt-injection defense (the model refused to adopt
+        # its own bootstrap as instructions). A normal "please read X"
+        # request routes through instruction-following instead. The
+        # ``/control-prompts/<session>.md`` substring relied on by
+        # :func:`transcript_matches_session` (#935) is preserved.
         if instruct_path.exists():
             instruct_display = instruct_path
             return (
-                f"{framing_header}\n"
-                f"Read {instruct_display} for system context, then read {display_path} for your role. "
-                f'Adopt both as your operating instructions, reply only "ready", then wait.'
+                f"Hi — please read {instruct_display} for system context, "
+                f"then read {display_path} for your role guidance. Adopt both "
+                f'files as your operating instructions and reply only "ready" '
+                f"when done."
             )
         return (
-            f"{framing_header}\n"
-            f'Read {display_path}, adopt it as your operating instructions, reply only "ready", then wait.'
+            f"Hi — please read {display_path} and adopt it as your operating "
+            f'instructions, then reply only "ready" when done.'
         )

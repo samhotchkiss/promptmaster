@@ -3334,23 +3334,27 @@ class Supervisor:
         display_path = prompt_path
         # Point to both SYSTEM.md (PollyPM reference) and the control prompt (role)
         instruct_path = self.config.project.root_dir / ".pollypm" / "docs" / "SYSTEM.md"
-        # Frame the bootstrap with an "ignore the next message" header
-        # so when the user opens PM Chat for the first time, they see a
-        # clear marker that the path-laden instruction the agent reads
-        # is plumbing — not something they're meant to act on (#868).
-        framing_header = (
-            "[PollyPM bootstrap — system message, please ignore on screen]"
-        )
+        # #1005: the prior framing header ("[PollyPM bootstrap — system
+        # message, please ignore on screen]") tripped Claude's prompt-
+        # injection defense — the model treated its own bootstrap as an
+        # untrusted instruction and refused to adopt the role guidance.
+        # The fix is plain conversational phrasing: a normal "please read
+        # X then Y" routes through Claude's instruction-following path
+        # rather than its injection-defense path. The path substring
+        # (``/control-prompts/<session>.md``) that
+        # ``transcript_matches_session`` relies on is preserved, so
+        # resume-attribution (#935) still works on the new format.
         if instruct_path.exists():
             instruct_display = instruct_path
             return (
-                f"{framing_header}\n"
-                f'Read {instruct_display} for system context, then read {display_path} for your role. '
-                f'Adopt both as your operating instructions, reply only "ready", then wait.'
+                f"Hi — please read {instruct_display} for system context, "
+                f"then read {display_path} for your role guidance. Adopt both "
+                f'files as your operating instructions and reply only "ready" '
+                f"when done."
             )
         return (
-            f"{framing_header}\n"
-            f'Read {display_path}, adopt it as your operating instructions, reply only "ready", then wait.'
+            f"Hi — please read {display_path} and adopt it as your operating "
+            f'instructions, then reply only "ready" when done.'
         )
 
     def _schedule_persona_verify(self, launch: SessionLaunchSpec, target: str) -> None:
