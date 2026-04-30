@@ -1877,9 +1877,17 @@ class CockpitRouter:
             # columns — avoids the visible flash of a 50/50 split followed by resize.
             window_width = panes[0].pane_width if panes else 200
             right_size = max(window_width - self.rail_width() - 1, 40)
+            # #991 — context-aware repair split. When the user's selection
+            # is project-scoped (e.g. they just clicked PM Chat or a
+            # project sub-item), splitting with the hardcoded
+            # ``pm cockpit-pane polly`` default leaves Polly's workspace
+            # dashboard visible if any subsequent mount step bails — the
+            # exact fallthrough surface in #991. Pick a default that
+            # matches the user's intent so a partial repair shows the
+            # project's pane, not Polly's.
             right_pane_id = self.tmux.split_window(
                 target,
-                self._right_pane_command("polly"),
+                self._default_repair_command(state),
                 horizontal=True,
                 detached=True,
                 size=right_size,
@@ -2314,12 +2322,22 @@ class CockpitRouter:
             rail_command = supervisor.console_command()
         except Exception:  # noqa: BLE001
             rail_command = None
+        # #991 — context-aware default. The window manager uses
+        # ``default_content_command`` for repair paths
+        # (``_repair_dead_panes``, ``_split_content_pane``). When the
+        # user's selection is on a project, falling through to Polly's
+        # workspace dashboard during a repair is the exact symptom of
+        # #991. Match the repair surface to the user's intent.
+        try:
+            default_command = self._default_repair_command(self._load_state())
+        except Exception:  # noqa: BLE001
+            default_command = self._right_pane_command("polly")
         return CockpitWindowManager(
             CockpitWindowSpec(
                 tmux_session=tmux_session,
                 cockpit_window=self._COCKPIT_WINDOW,
                 rail_width=self.rail_width(),
-                default_content_command=self._right_pane_command("polly"),
+                default_content_command=default_command,
                 rail_command=rail_command,
             ),
             self.tmux,
@@ -3214,6 +3232,39 @@ class CockpitRouter:
         if kind == "activity" and project_key:
             return f"activity:{project_key}"
         return kind
+
+    def _default_repair_command(self, state: dict[str, object] | None) -> str:
+        """Return the right-pane command to use when repairing a degraded
+        cockpit layout (e.g. ``ensure_cockpit_layout`` finds <2 panes).
+
+        Inputs: the cockpit state dict (so a fresh-load isn't required).
+        Outputs: a shell command string the caller can hand to
+        ``tmux split-window``.
+        Side effects: none.
+
+        Without this helper, the repair split hardcoded
+        ``pm cockpit-pane polly``. When the user's intent is on a project
+        (``selected = project:<key>:session`` or any project sub-item),
+        a layout-recovery split followed by a failed mount left the Polly
+        workspace dashboard visible — the exact fallthrough #991 reports
+        for architect-only projects. Routing the repair split to a
+        project-aware command (the project's static dashboard for
+        project routes; Polly only when the selection itself is workspace
+        scoped) keeps a partial repair on the user's intended surface.
+        """
+        selected: object | None = None
+        if isinstance(state, dict):
+            selected = state.get("selected")
+        if isinstance(selected, str) and selected.startswith("project:"):
+            parts = selected.split(":")
+            if len(parts) >= 2 and parts[1]:
+                project_key = parts[1]
+                # ``settings``/``issues`` panes have their own kinds, but
+                # the project static dashboard is a sane neutral surface
+                # while the actual mount finishes — every project sub
+                # route legitimately overlays the project dashboard.
+                return self._right_pane_command("project", project_key)
+        return self._right_pane_command("polly")
 
     def _right_pane_command(
         self,

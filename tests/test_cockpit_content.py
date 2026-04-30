@@ -192,3 +192,65 @@ def test_invalid_route_returns_error_content() -> None:
     assert isinstance(plan, ErrorPane)
     assert plan.reason == "unknown_route"
     assert plan.right_pane_state == "error"
+
+
+def test_pm_chat_for_architect_only_project_routes_to_architect_session() -> None:
+    """#991 — architect-only projects (no per-task worker yet) must mount
+    the architect when PM Chat is clicked, not fall through to Polly.
+
+    bikepath at the time of the report had only ``architect_bikepath``
+    enabled in its session map. The resolver must treat the architect as
+    the project's active agent and return a ``LiveAgentPane`` pointing at
+    it — direction A in the issue. Definitely NOT Polly's workspace
+    dashboard, and not a generic fallback that drops the architect.
+    """
+    context = CockpitContentContext.from_projects(
+        ["bikepath", "booktalk"],
+        project_sessions={
+            "bikepath": "architect_bikepath",
+            "booktalk": "worker_booktalk",
+        },
+    )
+
+    plan = resolve_cockpit_content("project:bikepath:session", context)
+
+    assert isinstance(plan, LiveAgentPane)
+    assert plan.project_key == "bikepath"
+    assert plan.session_name == "architect_bikepath"
+    # The architect IS the project's active agent in pre-task / planning
+    # state; mount it. The fallback is the project dashboard (NOT Polly,
+    # NOT another project's worker).
+    assert plan.fallback is not None
+    assert plan.fallback.pane_kind == "project"
+    assert plan.fallback.project_key == "bikepath"
+    assert plan.fallback.command_args == ("cockpit-pane", "project", "bikepath")
+    # Polly never appears for a project-scoped click — guard against
+    # the fallthrough surface #991 reported.
+    assert "polly" not in repr(plan).lower()
+    assert "operator" not in repr(plan)
+
+
+def test_pm_chat_with_separate_worker_still_routes_to_worker() -> None:
+    """#964 regression — projects with a distinct ``worker_<key>`` session
+    (booktalk, coin-flip) must still mount the worker, not the architect
+    or any other project's session, and definitely not Polly. The fix
+    for #991 must not perturb this path."""
+    context = CockpitContentContext.from_projects(
+        ["booktalk", "coin_flip", "bikepath"],
+        project_sessions={
+            "booktalk": "worker_booktalk",
+            "coin_flip": "worker_coin_flip",
+            "bikepath": "architect_bikepath",
+        },
+    )
+
+    booktalk_plan = resolve_cockpit_content("project:booktalk:session", context)
+    coin_plan = resolve_cockpit_content("project:coin_flip:session", context)
+
+    assert isinstance(booktalk_plan, LiveAgentPane)
+    assert booktalk_plan.session_name == "worker_booktalk"
+    assert isinstance(coin_plan, LiveAgentPane)
+    assert coin_plan.session_name == "worker_coin_flip"
+    for plan in (booktalk_plan, coin_plan):
+        assert "polly" not in repr(plan).lower()
+        assert "operator" not in repr(plan)

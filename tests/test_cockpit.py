@@ -2748,6 +2748,64 @@ def test_cockpit_router_ensure_layout_splits_when_missing_right_pane(tmp_path: P
     assert "cockpit-pane polly" in calls["split"][1]
 
 
+def test_ensure_cockpit_layout_project_selection_repairs_with_project_command(
+    tmp_path: Path,
+) -> None:
+    """#991 — when ``selected`` is on a project-scoped route (e.g. PM
+    Chat), the ``<2 panes`` repair split must NOT default to
+    ``pm cockpit-pane polly``. Otherwise a layout-recovery split during
+    a project-scoped click leaves Polly's workspace dashboard visible if
+    any subsequent mount step bails — the exact fallthrough surface
+    reported in #991 for architect-only projects.
+    """
+    calls: dict[str, object] = {}
+
+    class FakeTmux:
+        def list_panes(self, target: str):
+            calls.setdefault("list_targets", []).append(target)
+            if "split" not in calls:
+                return [type("Pane", (), {"pane_id": "%1", "active": True, "pane_width": 200})()]
+            return [
+                type("Pane", (), {"pane_id": "%1", "active": True, "pane_width": 30})(),
+                type("Pane", (), {"pane_id": "%2", "active": False, "pane_width": 169})(),
+            ]
+
+        def split_window(
+            self,
+            target: str,
+            command: str,
+            *,
+            horizontal: bool = True,
+            detached: bool = True,
+            percent: int | None = None,
+            size: int | None = None,
+        ):
+            calls["split"] = (target, command, horizontal, detached, size)
+            return "%2"
+
+        def select_pane(self, target: str):
+            calls["selected"] = target
+
+        def run(self, *args, **kwargs):
+            calls.setdefault("run", []).append(args)
+
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n"
+    )
+    router = CockpitRouter(config_path)
+    router.tmux = FakeTmux()  # type: ignore[assignment]
+    router._write_state({"selected": "project:bikepath:session"})
+
+    router.ensure_cockpit_layout()
+
+    split_command = calls["split"][1]
+    assert "cockpit-pane project bikepath" in split_command, split_command
+    # #991 — the user is on a project route; a partial-repair split
+    # must never land on Polly's workspace dashboard.
+    assert "cockpit-pane polly" not in split_command, split_command
+
+
 def test_cockpit_router_focus_right_shows_return_affordance(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "pollypm.toml"
     config_path.write_text(
