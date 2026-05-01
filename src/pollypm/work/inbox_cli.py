@@ -86,12 +86,19 @@ def _message_row_to_display(row: dict[str, Any]) -> dict[str, Any]:
     ``project/number`` work-task id the same listing might include.
     """
     payload = row.get("payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
     scope = row.get("scope") or ""
     sender = row.get("sender") or ""
     project = payload.get("project") or scope or "inbox"
     # Priority inferred from tier — immediate lands open and is actionable.
     tier = row.get("tier") or "immediate"
     priority = "high" if tier == "immediate" and row.get("type") == "alert" else "normal"
+    # #1013 — surface dedup state when present so repeats render as
+    # "9x - last seen 2d ago" instead of one row per occurrence.
+    from pollypm.inbox_dedup import format_dedup_suffix
+    dedup_suffix = format_dedup_suffix(payload)
+    count_value = payload.get("count") if isinstance(payload, dict) else None
     return {
         "id": f"msg:{row.get('id')}",
         "title": row.get("subject") or "(no subject)",
@@ -102,6 +109,8 @@ def _message_row_to_display(row: dict[str, Any]) -> dict[str, Any]:
         "sender": sender,
         "project": project,
         "created_at": str(row.get("created_at") or ""),
+        "dedup_count": int(count_value) if isinstance(count_value, int) else None,
+        "dedup_suffix": dedup_suffix,
     }
 
 
@@ -260,6 +269,12 @@ def inbox_root(
     typer.echo("-" * 70)
     for m in display_messages:
         title = _format_inbox_title(m["title"])
+        # #1013 — append "9x - last seen 2d ago" when the row has
+        # dedup state (count > 1). Empty suffix is the no-op default
+        # so the column layout stays stable for non-dedup rows.
+        suffix = m.get("dedup_suffix") or ""
+        if suffix:
+            title = f"{title} ({suffix})"
         typer.echo(
             f"{m['id']:<20} {m['type']:<10} "
             f"{m['priority']:<10} {title}"

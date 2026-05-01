@@ -525,6 +525,23 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
                 "they never pollute the real signal (#754)."
             ),
         ),
+        dedup_key: str = typer.Option(
+            "",
+            "--dedup-key",
+            help=(
+                "Stable identifier for collapsing repeated alert "
+                "patterns (#1013). When two ``pm notify`` calls share "
+                "the same ``--dedup-key`` and an open notify with that "
+                "key exists, the existing row's ``count`` is "
+                "incremented and ``last_seen`` refreshed instead of a "
+                "second row being inserted. Use for repeating "
+                "operator-tooling alerts like "
+                "``polly:rejected-recovery-mode-injection`` so the "
+                "inbox shows ``9x - last seen 2 days ago`` instead of "
+                "twelve near-identical rows. Empty (default) keeps "
+                "the legacy insert-every-time behavior."
+            ),
+        ),
         db: str = typer.Option(
             ".pollypm/state.db", "--db",
             help="Path to SQLite database (default: same resolution as `pm inbox`).",
@@ -731,19 +748,61 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
         if user_prompt_payload is not None:
             payload["user_prompt"] = user_prompt_payload
 
-        try:
-            message_id = store.enqueue_message(
-                type="notify",
-                tier=resolved_priority,
-                recipient=requester_role,
-                sender=actor,
-                subject=subject,
-                body=body,
-                scope=project,
-                labels=label_list or None,
-                payload=payload,
-                state="closed" if resolved_priority == "immediate" else tier_state,
+        # #1013 — dedup-key collapsing for repeated alert patterns.
+        # When --dedup-key is set and a matching open notify exists,
+        # increment its ``count`` + refresh ``last_seen`` instead of
+        # spawning a second row. Empty key (the default) keeps the
+        # legacy insert-every-time behavior so existing callers don't
+        # silently change semantics.
+        from pollypm.inbox_dedup import (
+            bump_dedup_message,
+            find_open_dedup_message,
+            initial_dedup_payload,
+        )
+        dedup_key_value = (dedup_key or "").strip()
+        existing_dedup_row = (
+            find_open_dedup_message(
+                store, dedup_key_value, recipient=requester_role,
             )
+            if dedup_key_value
+            else None
+        )
+
+        try:
+            if existing_dedup_row is not None:
+                # Bump path — caller signaled "this is the same alert
+                # I posted before". Refresh subject/body/payload so the
+                # most recent context wins, and increment count.
+                message_id = bump_dedup_message(
+                    store,
+                    existing_dedup_row,
+                    subject=subject,
+                    body=body,
+                    payload={**payload, "dedup_key": dedup_key_value},
+                    labels=label_list or None,
+                    tier=resolved_priority,
+                )
+            else:
+                # First-write path. Annotate payload with count=1 +
+                # last_seen so a future bump has a stable shape to
+                # increment.
+                seeded_payload = (
+                    initial_dedup_payload(payload, dedup_key_value)
+                    if dedup_key_value
+                    else payload
+                )
+                message_id = store.enqueue_message(
+                    type="notify",
+                    tier=resolved_priority,
+                    recipient=requester_role,
+                    sender=actor,
+                    subject=subject,
+                    body=body,
+                    scope=project,
+                    labels=label_list or None,
+                    payload=seeded_payload,
+                    state="closed" if resolved_priority == "immediate" else tier_state,
+                )
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"Failed to enqueue notify message: {exc}", err=True)
             raise typer.Exit(code=1) from exc
