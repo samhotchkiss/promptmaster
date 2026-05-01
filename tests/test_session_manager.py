@@ -396,6 +396,62 @@ class TestProvisionWorker:
         # create_session called only once
         assert mock_tmux.create_session.call_count == 1
 
+    def test_provision_worker_reaps_dead_existing_session(
+        self, manager, mock_tmux, mock_svc, tmp_project,
+    ):
+        """#1012: when an existing ``work_sessions`` row points at a tmux
+        pane that's no longer alive, ``provision_worker`` must drop the
+        orphan and re-provision instead of returning the dead row.
+
+        Pre-fix the auto-claim sweep accumulated 60+ ``build vN
+        abandoned`` rows on bikepath/8 because each ``provision_worker``
+        call short-circuited on the orphan record and never spawned a
+        new tmux window.
+        """
+        with patch("pollypm.work.session_manager.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+            # First claim: builds the worker_sessions row + tmux window.
+            first = manager.provision_worker("proj/1", "agent-1")
+            assert first.pane_id == "%1"
+            create_session_calls_before = mock_tmux.create_session.call_count
+
+            # Simulate the bikepath/8 failure mode: tmux window was
+            # killed externally but the work_sessions row still has
+            # ``ended_at IS NULL``.
+            mock_tmux.is_pane_alive.return_value = False
+
+            # Re-provision must reap the dead row and spawn a new window
+            # rather than silently returning the orphan.
+            second = manager.provision_worker("proj/1", "agent-1")
+
+        assert second.task_id == "proj/1"
+        # tmux create-session/window must have run AGAIN — the orphan was
+        # not silently honoured.
+        assert (
+            mock_tmux.create_session.call_count
+            + mock_tmux.create_window.call_count
+            > create_session_calls_before
+        ), "expected fresh tmux launch after dead-pane reap (#1012)"
+
+    def test_provision_worker_returns_existing_when_pane_still_alive(
+        self, manager, mock_tmux, tmp_project,
+    ):
+        """#1012 negative: a live pane keeps the legacy idempotent
+        behaviour. The dead-pane reap must not destabilise the common
+        re-claim path where the worker is still up and running.
+        """
+        with patch("pollypm.work.session_manager.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+            first = manager.provision_worker("proj/1", "agent-1")
+            mock_tmux.is_pane_alive.return_value = True
+            second = manager.provision_worker("proj/1", "agent-1")
+
+        assert first.pane_id == second.pane_id
+        # create_session ran exactly once — the second call short-circuited.
+        assert mock_tmux.create_session.call_count == 1
+
     def test_provision_worker_acquires_session_lock(self, manager, mock_tmux, tmp_project):
         """provision_worker must acquire the per-task session lock so two
         concurrent claims on the same task can't both race git worktree add."""

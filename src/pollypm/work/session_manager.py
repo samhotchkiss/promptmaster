@@ -167,13 +167,29 @@ class SessionManager:
         serialized via a per-task session lock so two racing ``claim()``
         invocations can't both run ``git worktree add`` against the
         same path.
+
+        #1012 — when an existing ``work_sessions`` row points at a tmux
+        pane that has since died (window closed by the user, host
+        rebooted, supervisor crash mid-bootstrap), drop the dead row
+        instead of returning it. Pre-#1012 the orphan record made
+        ``provision_worker`` a silent no-op forever: the auto-claim
+        sweep would re-claim the task every tick, ``release_stale_claim``
+        marked the execution ``abandoned`` because no live window
+        matched, and the next claim found the same dead row and bailed
+        again. ``bikepath/8`` accumulated 60+ ``build vN abandoned``
+        rows in ~7h with zero useful work. Validating the existing
+        row's pane and tearing it down when stale lets the next
+        provision run actually create the window.
         """
         project, task_number = _parse_task_id(task_id)
 
-        # Check for existing active session
+        # Check for existing active session — but verify the underlying
+        # tmux pane is still alive before honouring the row (#1012).
         existing = self.session_for_task(task_id)
-        if existing is not None:
+        if existing is not None and self._existing_session_is_alive(existing):
             return existing
+        if existing is not None:
+            self._reap_dead_existing_session(task_id, existing)
 
         # Derive slug from task_id for branch/path naming
         task_slug = f"{project}-{task_number}"
@@ -202,15 +218,17 @@ class SessionManager:
                     task_id, exc,
                 )
                 existing = self.session_for_task(task_id)
-                if existing is not None:
+                if existing is not None and self._existing_session_is_alive(existing):
                     return existing
                 raise
 
             # Re-check after acquiring the lock in case another provision
             # completed while we were waiting.
             existing = self.session_for_task(task_id)
-            if existing is not None:
+            if existing is not None and self._existing_session_is_alive(existing):
                 return existing
+            if existing is not None:
+                self._reap_dead_existing_session(task_id, existing)
 
             worker_session = self._provision_locked(
                 task_id=task_id,
@@ -230,6 +248,83 @@ class SessionManager:
                         "provision_worker[%s]: failed to release session lock: %s",
                         task_id, exc,
                     )
+
+    # ------------------------------------------------------------------
+    # Existing-session liveness (#1012)
+    # ------------------------------------------------------------------
+
+    def _existing_session_is_alive(self, session: "WorkerSession") -> bool:
+        """Return True when the existing session row still has a live pane.
+
+        #1012 — pre-fix, ``provision_worker`` returned the existing row
+        unconditionally. When the supervisor / user closed the per-task
+        tmux window without going through ``teardown_worker``, the row
+        survived with ``ended_at IS NULL`` and ``provision_worker``
+        became a silent no-op. The auto-claim sweep then accumulated
+        endless ``build vN abandoned`` executions because each cycle
+        ``release_stale_claim`` marked the active visit abandoned but
+        no new window was ever spawned to take its place.
+
+        The check is best-effort: if the tmux client raises (e.g. tmux
+        server gone) we treat the session as alive and keep the legacy
+        idempotent behaviour, since spawning a fresh window with no
+        tmux server would fail anyway.
+        """
+        pane_id = session.pane_id
+        if not pane_id:
+            return False
+        is_alive = getattr(self._tmux, "is_pane_alive", None)
+        if not callable(is_alive):
+            return True
+        try:
+            return bool(is_alive(pane_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "provision_worker[%s]: is_pane_alive(%s) raised: %s; "
+                "treating session as alive",
+                session.task_id, pane_id, exc,
+            )
+            return True
+
+    def _reap_dead_existing_session(
+        self, task_id: str, session: "WorkerSession",
+    ) -> None:
+        """End the stale ``work_sessions`` row so re-provision can run.
+
+        #1012 — stamps ``ended_at`` on the orphaned row without
+        attempting JSONL archival or worktree removal. Those phases
+        belong to the canonical ``teardown_worker`` path; for orphan
+        recovery we only need to drop the active-row marker so the
+        next ``session_for_task`` call returns ``None`` and the
+        provision can proceed.
+
+        Any DB error is logged and swallowed — the next provision
+        will hit the same orphan and retry the reap. Far better than
+        raising and aborting the claim entirely.
+        """
+        try:
+            project, task_number = _parse_task_id(task_id)
+        except ValueError:
+            return
+        logger.warning(
+            "provision_worker[%s]: reaping dead worker_session row "
+            "(pane_id=%r) before re-provisioning (#1012)",
+            task_id, session.pane_id,
+        )
+        try:
+            self._svc.end_worker_session(
+                task_project=project,
+                task_number=task_number,
+                ended_at=_now(),
+                total_input_tokens=0,
+                total_output_tokens=0,
+                archive_path=None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "provision_worker[%s]: failed to end stale worker_session: %s",
+                task_id, exc,
+            )
 
     def _provision_locked(
         self,
