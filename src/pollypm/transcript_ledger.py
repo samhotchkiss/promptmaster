@@ -86,50 +86,58 @@ def _scan_claude_transcript(path: Path, account_name: str, account: AccountConfi
     usage_events: list[TranscriptUsageEvent] = []
 
     try:
-        for line in path.open():
-            obj = json.loads(line)
-            observed_at = _parse_iso_timestamp(obj.get("timestamp")) or observed_at
-            if obj.get("type") != "assistant":
-                continue
-            message = obj.get("message") or {}
-            if not isinstance(message, dict):
-                continue
-            session_name = str(obj.get("sessionId") or session_name)
-            cwd = str(obj.get("cwd") or cwd or "")
-            model = message.get("model")
-            if isinstance(model, str) and model and model != "<synthetic>":
-                model_name = model
-            usage = message.get("usage") or {}
-            if not isinstance(usage, dict):
-                continue
-            total = usage.get("total_tokens")
-            if total is None:
-                # Count actual tokens used, NOT cache reads (which are free/cheap)
-                total = sum(
-                    int(usage.get(key, 0) or 0)
-                    for key in (
-                        "input_tokens",
-                        "output_tokens",
-                        "cache_creation_input_tokens",
-                        # cache_read_input_tokens excluded — cached reads are
-                        # nearly free and inflate the count by 10-100x
+        # #1019 — context-manager open. The previous bare ``path.open()``
+        # iterator left the file handle dangling until GC, leaking one fd
+        # per transcript. With thousands of archived jsonls scanned every
+        # heartbeat tick this exhausted RLIMIT_NOFILE within hours and
+        # surfaced as ``Errno 24 Too many open files`` against the
+        # ``.ingestion-state.lock`` (the next caller of ``open()`` after
+        # the leak crossed the limit).
+        with path.open() as handle:
+            for line in handle:
+                obj = json.loads(line)
+                observed_at = _parse_iso_timestamp(obj.get("timestamp")) or observed_at
+                if obj.get("type") != "assistant":
+                    continue
+                message = obj.get("message") or {}
+                if not isinstance(message, dict):
+                    continue
+                session_name = str(obj.get("sessionId") or session_name)
+                cwd = str(obj.get("cwd") or cwd or "")
+                model = message.get("model")
+                if isinstance(model, str) and model and model != "<synthetic>":
+                    model_name = model
+                usage = message.get("usage") or {}
+                if not isinstance(usage, dict):
+                    continue
+                total = usage.get("total_tokens")
+                if total is None:
+                    # Count actual tokens used, NOT cache reads (which are free/cheap)
+                    total = sum(
+                        int(usage.get(key, 0) or 0)
+                        for key in (
+                            "input_tokens",
+                            "output_tokens",
+                            "cache_creation_input_tokens",
+                            # cache_read_input_tokens excluded — cached reads are
+                            # nearly free and inflate the count by 10-100x
+                        )
+                    )
+                tokens_used = int(total or 0)
+                cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+                if tokens_used <= 0:
+                    continue
+                cumulative += tokens_used
+                point_time = observed_at or _mtime_timestamp(path)
+                usage_events.append(
+                    TranscriptUsageEvent(
+                        observed_at=point_time,
+                        model_name=model_name,
+                        project_key=_project_key_for_cwd(config, cwd),
+                        tokens_used=tokens_used,
+                        cache_read_tokens=cache_read,
                     )
                 )
-            tokens_used = int(total or 0)
-            cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
-            if tokens_used <= 0:
-                continue
-            cumulative += tokens_used
-            point_time = observed_at or _mtime_timestamp(path)
-            usage_events.append(
-                TranscriptUsageEvent(
-                    observed_at=point_time,
-                    model_name=model_name,
-                    project_key=_project_key_for_cwd(config, cwd),
-                    tokens_used=tokens_used,
-                    cache_read_tokens=cache_read,
-                )
-            )
     except Exception:  # noqa: BLE001
         return None
 
@@ -160,74 +168,77 @@ def _scan_codex_transcript(path: Path, account_name: str, account: AccountConfig
     usage_events: list[TranscriptUsageEvent] = []
 
     try:
-        for line in path.open():
-            obj = json.loads(line)
-            observed_at = _parse_iso_timestamp(obj.get("timestamp")) or observed_at
-            entry_type = obj.get("type")
-            if entry_type == "session_meta":
+        # #1019 — context-manager open. See sibling comment in
+        # ``_scan_claude_transcript`` for the fd-leak history.
+        with path.open() as handle:
+            for line in handle:
+                obj = json.loads(line)
+                observed_at = _parse_iso_timestamp(obj.get("timestamp")) or observed_at
+                entry_type = obj.get("type")
+                if entry_type == "session_meta":
+                    payload = obj.get("payload") or {}
+                    if isinstance(payload, dict):
+                        session_name = str(payload.get("id") or session_name)
+                        cwd = str(payload.get("cwd") or cwd or "")
+                    continue
+                if entry_type == "turn_context":
+                    payload = obj.get("payload") or {}
+                    if isinstance(payload, dict):
+                        cwd = str(payload.get("cwd") or cwd or "")
+                        model = payload.get("model")
+                        if isinstance(model, str) and model:
+                            model_name = model
+                    continue
+                if entry_type != "event_msg":
+                    continue
                 payload = obj.get("payload") or {}
-                if isinstance(payload, dict):
-                    session_name = str(payload.get("id") or session_name)
-                    cwd = str(payload.get("cwd") or cwd or "")
-                continue
-            if entry_type == "turn_context":
-                payload = obj.get("payload") or {}
-                if isinstance(payload, dict):
-                    cwd = str(payload.get("cwd") or cwd or "")
-                    model = payload.get("model")
-                    if isinstance(model, str) and model:
-                        model_name = model
-                continue
-            if entry_type != "event_msg":
-                continue
-            payload = obj.get("payload") or {}
-            if not isinstance(payload, dict) or payload.get("type") != "token_count":
-                continue
-            info = payload.get("info") or {}
-            if not isinstance(info, dict):
-                continue
-            total_usage = info.get("total_token_usage") or {}
-            last_usage = info.get("last_token_usage") or total_usage
-            if not isinstance(total_usage, dict):
-                total_usage = {}
-            if not isinstance(last_usage, dict):
-                last_usage = {}
-            total_cumulative = total_usage.get("total_tokens")
-            if total_cumulative is None:
-                total_cumulative = sum(
-                    int(total_usage.get(key, 0) or 0)
-                    for key in (
-                        "input_tokens",
-                        "cached_input_tokens",
-                        "output_tokens",
-                        "reasoning_output_tokens",
+                if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info") or {}
+                if not isinstance(info, dict):
+                    continue
+                total_usage = info.get("total_token_usage") or {}
+                last_usage = info.get("last_token_usage") or total_usage
+                if not isinstance(total_usage, dict):
+                    total_usage = {}
+                if not isinstance(last_usage, dict):
+                    last_usage = {}
+                total_cumulative = total_usage.get("total_tokens")
+                if total_cumulative is None:
+                    total_cumulative = sum(
+                        int(total_usage.get(key, 0) or 0)
+                        for key in (
+                            "input_tokens",
+                            "cached_input_tokens",
+                            "output_tokens",
+                            "reasoning_output_tokens",
+                        )
+                    )
+                tokens_used = last_usage.get("total_tokens")
+                if tokens_used is None:
+                    tokens_used = sum(
+                        int(last_usage.get(key, 0) or 0)
+                        for key in (
+                            "input_tokens",
+                            "cached_input_tokens",
+                            "output_tokens",
+                            "reasoning_output_tokens",
+                        )
+                    )
+                tokens_used = int(tokens_used or 0)
+                total_cumulative = int(total_cumulative or 0)
+                if total_cumulative <= 0 or tokens_used <= 0:
+                    continue
+                cumulative = max(cumulative, total_cumulative)
+                point_time = observed_at or _mtime_timestamp(path)
+                usage_events.append(
+                    TranscriptUsageEvent(
+                        observed_at=point_time,
+                        model_name=model_name,
+                        project_key=_project_key_for_cwd(config, cwd),
+                        tokens_used=tokens_used,
                     )
                 )
-            tokens_used = last_usage.get("total_tokens")
-            if tokens_used is None:
-                tokens_used = sum(
-                    int(last_usage.get(key, 0) or 0)
-                    for key in (
-                        "input_tokens",
-                        "cached_input_tokens",
-                        "output_tokens",
-                        "reasoning_output_tokens",
-                    )
-                )
-            tokens_used = int(tokens_used or 0)
-            total_cumulative = int(total_cumulative or 0)
-            if total_cumulative <= 0 or tokens_used <= 0:
-                continue
-            cumulative = max(cumulative, total_cumulative)
-            point_time = observed_at or _mtime_timestamp(path)
-            usage_events.append(
-                TranscriptUsageEvent(
-                    observed_at=point_time,
-                    model_name=model_name,
-                    project_key=_project_key_for_cwd(config, cwd),
-                    tokens_used=tokens_used,
-                )
-            )
     except Exception:  # noqa: BLE001
         return None
 
@@ -269,52 +280,65 @@ def _scan_account_transcripts(config, account_name: str) -> list[TranscriptScanR
 
 
 def sync_token_ledger_for_config(config, *, account: str | None = None) -> list[TranscriptTokenSample]:
+    # #1019 — close the StateStore on exit. Each call opened a fresh
+    # SQLite connection (which in WAL mode allocates db + -wal + -shm
+    # file descriptors) without ever calling ``store.close()``. Because
+    # this function runs every heartbeat tick, three fds-per-minute
+    # accumulated and exhausted ``RLIMIT_NOFILE`` within hours, surfacing
+    # as ``Errno 24 Too many open files`` against whichever ``open()``
+    # crossed the limit (typically ``transcripts/.ingestion-state.lock``).
     store = StateStore(config.project.state_db)
-    account_names = [account] if account else list(config.accounts)
-    ingested: list[TranscriptTokenSample] = []
-    rollups: dict[tuple[str, str, str, str, str], int] = {}
-    updated_at = datetime.now(UTC).isoformat()
+    try:
+        account_names = [account] if account else list(config.accounts)
+        ingested: list[TranscriptTokenSample] = []
+        rollups: dict[tuple[str, str, str, str, str], int] = {}
+        updated_at = datetime.now(UTC).isoformat()
 
-    for account_name in account_names:
-        for result in _scan_account_transcripts(config, account_name):
-            sample = result.final_sample
-            store.upsert_token_sample(
-                session_name=sample.session_name,
-                account_name=sample.account_name,
-                provider=sample.provider,
-                model_name=sample.model_name,
-                project_key=sample.project_key,
-                cumulative_tokens=sample.cumulative_tokens,
-                observed_at=sample.observed_at.isoformat(),
-            )
-            ingested.append(sample)
-            for event in result.usage_events:
-                hour_bucket = event.observed_at.astimezone(UTC).replace(minute=0, second=0, microsecond=0).isoformat()
-                key = (
-                    hour_bucket,
-                    sample.account_name,
-                    sample.provider,
-                    event.model_name,
-                    event.project_key,
+        for account_name in account_names:
+            for result in _scan_account_transcripts(config, account_name):
+                sample = result.final_sample
+                store.upsert_token_sample(
+                    session_name=sample.session_name,
+                    account_name=sample.account_name,
+                    provider=sample.provider,
+                    model_name=sample.model_name,
+                    project_key=sample.project_key,
+                    cumulative_tokens=sample.cumulative_tokens,
+                    observed_at=sample.observed_at.isoformat(),
                 )
-                rollups[key] = rollups.get(key, 0) + event.tokens_used
+                ingested.append(sample)
+                for event in result.usage_events:
+                    hour_bucket = event.observed_at.astimezone(UTC).replace(minute=0, second=0, microsecond=0).isoformat()
+                    key = (
+                        hour_bucket,
+                        sample.account_name,
+                        sample.provider,
+                        event.model_name,
+                        event.project_key,
+                    )
+                    rollups[key] = rollups.get(key, 0) + event.tokens_used
 
-    store.replace_token_usage_hourly(
-        [
-            TokenUsageHourlyRecord(
-                hour_bucket=hour_bucket,
-                account_name=account_name,
-                provider=provider,
-                model_name=model_name,
-                project_key=project_key,
-                tokens_used=tokens_used,
-                updated_at=updated_at,
-            )
-            for (hour_bucket, account_name, provider, model_name, project_key), tokens_used in sorted(rollups.items())
-        ],
-        account_names=account_names,
-    )
-    return ingested
+        store.replace_token_usage_hourly(
+            [
+                TokenUsageHourlyRecord(
+                    hour_bucket=hour_bucket,
+                    account_name=account_name,
+                    provider=provider,
+                    model_name=model_name,
+                    project_key=project_key,
+                    tokens_used=tokens_used,
+                    updated_at=updated_at,
+                )
+                for (hour_bucket, account_name, provider, model_name, project_key), tokens_used in sorted(rollups.items())
+            ],
+            account_names=account_names,
+        )
+        return ingested
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def sync_token_ledger(config_path: Path, *, account: str | None = None) -> list[TranscriptTokenSample]:
@@ -323,6 +347,16 @@ def sync_token_ledger(config_path: Path, *, account: str | None = None) -> list[
 
 
 def recent_token_usage(config_path: Path, *, limit: int = 24) -> list[TokenUsageHourlyRecord]:
+    # #1019 — close the StateStore on exit (see sibling comment in
+    # ``sync_token_ledger_for_config``). The StateStore here was leaking
+    # the same way; every CLI/UI lookup of recent usage left a sqlite
+    # connection (and its WAL/SHM fds) dangling.
     config = load_config(config_path)
     store = StateStore(config.project.state_db)
-    return store.recent_token_usage(limit=limit)
+    try:
+        return store.recent_token_usage(limit=limit)
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001
+            pass

@@ -96,6 +96,24 @@ if TYPE_CHECKING:
     from pollypm.store.protocol import Store
 
 
+def _count_open_fds() -> int | None:
+    """Return the count of open file descriptors held by this process.
+
+    Cross-platform best-effort: prefers ``/proc/self/fd`` (Linux) and
+    falls back to ``/dev/fd`` (macOS / BSDs). Returns ``None`` if neither
+    path is readable so callers can no-op silently.
+
+    Used by the heartbeat fd-pressure sweep (#1019) to raise a ``warn``
+    alert before the process exhausts ``RLIMIT_NOFILE``.
+    """
+    for candidate in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(candidate))
+        except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+            continue
+    return None
+
+
 _OWNER_PREFIXES = {
     "heartbeat": "H:",
     "polly": "P:",
@@ -1223,6 +1241,42 @@ class Supervisor:
         """
         self.console_window.focus()
 
+    # #1019 — early-warning fd sweep. Raise a ``warn`` alert before a
+    # leak crosses ``RLIMIT_NOFILE`` and starts surfacing as
+    # ``Errno 24 Too many open files`` against random ``open()`` calls
+    # (the original symptom hit the transcript-ingestion lock path).
+    _FD_WARN_THRESHOLD_RATIO = 0.8
+
+    def _check_fd_pressure(self) -> None:
+        try:
+            import resource
+            soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            open_count = _count_open_fds()
+            if open_count is None or soft <= 0:
+                return
+            ratio = open_count / float(soft)
+            if ratio >= self._FD_WARN_THRESHOLD_RATIO:
+                self._msg_store.upsert_alert(
+                    "heartbeat",
+                    "fd_exhaustion_pending",
+                    "warn",
+                    (
+                        f"File-descriptor pressure: {open_count}/{soft} open "
+                        f"({ratio:.0%}). Approaching RLIMIT_NOFILE — leak "
+                        "likely. See #1019."
+                    ),
+                )
+            else:
+                # Once back under the threshold, retract the warning so
+                # it doesn't linger after a fix lands or a restart drains.
+                try:
+                    self._msg_store.clear_alert("heartbeat", "fd_exhaustion_pending")
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            # Sweep is best-effort — never let it crash the heartbeat tick.
+            return
+
     def run_heartbeat(self, snapshot_lines: int = 200) -> list[AlertRecord]:
         """Run one session-health sweep.
 
@@ -1238,6 +1292,10 @@ class Supervisor:
         ``src/pollypm/plugins_builtin/itsalive/plugin.py`` for the
         replacement handlers.
         """
+        # #1019 — sweep fd pressure before doing any work that opens files.
+        # Catches a leak earlier than the inevitable Errno 24 crash.
+        self._check_fd_pressure()
+
         # Phase 1 residual: token-ledger sync is still inline because it
         # requires the main-thread SQLite connection and no equivalent
         # handler exists yet (post-v1 migration target).

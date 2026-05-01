@@ -1,4 +1,6 @@
+import gc
 import json
+import os
 from pathlib import Path
 
 from pollypm.config import write_config
@@ -171,3 +173,132 @@ def test_sync_token_ledger_reads_claude_and_codex_jsonl(tmp_path: Path) -> None:
     usage_by_account = {row.account_name: row.tokens_used for row in usage}
     assert usage_by_account["claude_main"] == 370
     assert usage_by_account["codex_main"] == 355
+
+
+def _count_open_fds() -> int | None:
+    """Return open-fd count or ``None`` if the platform doesn't expose
+    a readable /proc-style fd directory (Windows, exotic sandboxes)."""
+    for candidate in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(candidate))
+        except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+            continue
+    return None
+
+
+def test_sync_token_ledger_does_not_leak_file_descriptors(tmp_path: Path) -> None:
+    """Regression for #1019.
+
+    Before the fix, ``_scan_claude_transcript`` and ``_scan_codex_transcript``
+    used a bare ``for line in path.open():`` iterator that left the file
+    handle dangling until garbage collection. With many transcripts scanned
+    every heartbeat tick this exhausted ``RLIMIT_NOFILE`` within hours and
+    surfaced as ``Errno 24 Too many open files`` against the next caller of
+    ``open()`` (the transcript-ingestion lock).
+    """
+    fd_listing = _count_open_fds()
+    if fd_listing is None:
+        import pytest
+
+        pytest.skip("platform exposes neither /proc/self/fd nor /dev/fd")
+
+    config_path = _config(tmp_path)
+    root = config_path.parent
+
+    # Lay down a handful of transcripts per provider so a leak compounds
+    # quickly under a small tick count.
+    claude_home = root / ".pollypm/homes/claude_main"
+    codex_home = root / ".pollypm/homes/codex_main"
+    claude_root = claude_home / ".claude/projects/-Users-sam-dev-pollypm"
+    codex_root = codex_home / ".codex/sessions/2026/04/08"
+    claude_root.mkdir(parents=True, exist_ok=True)
+    codex_root.mkdir(parents=True, exist_ok=True)
+
+    for index in range(8):
+        (claude_root / f"session-{index}.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "sessionId": f"session-{index}",
+                    "cwd": str(root),
+                    "message": {
+                        "role": "assistant",
+                        "model": "claude-opus-4-6",
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 5,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                        },
+                    },
+                }
+            )
+            + "\n"
+        )
+        (codex_root / f"rollout-{index}.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "timestamp": "2026-04-08T10:00:00Z",
+                            "type": "session_meta",
+                            "payload": {"id": f"codex-{index}", "cwd": str(root)},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "timestamp": "2026-04-08T10:00:01Z",
+                            "type": "turn_context",
+                            "payload": {"cwd": str(root), "model": "gpt-5.4"},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "timestamp": "2026-04-08T10:00:02Z",
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "token_count",
+                                "info": {
+                                    "total_token_usage": {"total_tokens": 10},
+                                    "last_token_usage": {"total_tokens": 10},
+                                },
+                            },
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+    # Prime caches / module imports so the baseline reflects steady state.
+    sync_token_ledger(config_path)
+
+    # Disable cyclic GC so a reference cycle in StateStore (or any other
+    # opener) can't mask the leak. Pure refcounting still reaps deterministic
+    # local references — what we want to catch is anything that needs
+    # an explicit ``close()``.
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        baseline = _count_open_fds()
+        assert baseline is not None
+
+        # 20 heartbeat-equivalent ticks. Pre-fix the unclosed StateStore
+        # leaked ~2 fds per call (the SQLite db handle plus its WAL/SHM
+        # companions when WAL mode is active). Post-fix the steady-state
+        # delta should stay well under a small bound. The 30-fd budget
+        # absorbs prime-time variance from lazy WAL checkpointing.
+        for _ in range(20):
+            sync_token_ledger(config_path)
+
+        final = _count_open_fds()
+        assert final is not None
+        delta = final - baseline
+        assert delta < 30, (
+            f"file-descriptor count grew unbounded across 20 ticks "
+            f"(baseline={baseline}, final={final}, delta={delta}). "
+            "Suspect a missing close() / context manager — see #1019."
+        )
+    finally:
+        if gc_was_enabled:
+            gc.enable()

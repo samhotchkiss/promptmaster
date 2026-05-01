@@ -808,3 +808,109 @@ def test_run_heartbeat_invokes_recovery_alert_auto_clear_sweep(
         "_sweep_recovered_recovery_alerts must be invoked from run_heartbeat "
         "(post-#1010 wiring); pre-fix it lived only on dead _run_heartbeat_local"
     )
+
+
+# ---------------------------------------------------------------------------
+# #1019 — fd-exhaustion early-warning sweep
+# ---------------------------------------------------------------------------
+
+
+def test_check_fd_pressure_raises_warn_when_above_threshold(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """#1019 — when open-fd usage crosses 80% of RLIMIT_NOFILE, the
+    heartbeat sweep raises a ``warn`` alert so the operator can react
+    before the next ``open()`` call returns ``Errno 24``."""
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    # Pretend we have 900 open fds against a soft limit of 1000 (90%).
+    monkeypatch.setattr("pollypm.supervisor._count_open_fds", lambda: 900)
+
+    import resource as _resource
+
+    monkeypatch.setattr(
+        _resource,
+        "getrlimit",
+        lambda which: (1000, 1000) if which == _resource.RLIMIT_NOFILE else (0, 0),
+    )
+
+    raised: list[tuple] = []
+
+    def _spy_upsert(session_name, alert_type, severity, message):
+        raised.append((session_name, alert_type, severity, message))
+
+    monkeypatch.setattr(supervisor._msg_store, "upsert_alert", _spy_upsert)
+    monkeypatch.setattr(
+        supervisor._msg_store, "clear_alert", lambda *a, **k: None,
+    )
+
+    supervisor._check_fd_pressure()
+
+    assert raised, "expected fd_exhaustion_pending alert to be raised"
+    session_name, alert_type, severity, message = raised[0]
+    assert session_name == "heartbeat"
+    assert alert_type == "fd_exhaustion_pending"
+    assert severity == "warn"
+    assert "1000" in message and "900" in message
+
+
+def test_check_fd_pressure_clears_when_back_under_threshold(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """The companion clear-path: when fd usage drops below the threshold,
+    the previously-raised alert is cleared so the warning doesn't linger
+    after a leak is fixed or a restart drains the count."""
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    monkeypatch.setattr("pollypm.supervisor._count_open_fds", lambda: 100)
+
+    import resource as _resource
+
+    monkeypatch.setattr(
+        _resource,
+        "getrlimit",
+        lambda which: (1000, 1000) if which == _resource.RLIMIT_NOFILE else (0, 0),
+    )
+
+    cleared: list[tuple] = []
+
+    def _spy_clear(session_name, alert_type):
+        cleared.append((session_name, alert_type))
+
+    monkeypatch.setattr(
+        supervisor._msg_store, "upsert_alert", lambda *a, **k: None,
+    )
+    monkeypatch.setattr(supervisor._msg_store, "clear_alert", _spy_clear)
+
+    supervisor._check_fd_pressure()
+
+    assert ("heartbeat", "fd_exhaustion_pending") in cleared
+
+
+def test_check_fd_pressure_silent_when_count_unavailable(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """On platforms that expose neither /proc/self/fd nor /dev/fd the
+    sweep must no-op rather than raising spurious alerts."""
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+
+    monkeypatch.setattr("pollypm.supervisor._count_open_fds", lambda: None)
+
+    raised: list = []
+    monkeypatch.setattr(
+        supervisor._msg_store,
+        "upsert_alert",
+        lambda *a, **k: raised.append(a),
+    )
+    monkeypatch.setattr(
+        supervisor._msg_store,
+        "clear_alert",
+        lambda *a, **k: raised.append(a),
+    )
+
+    supervisor._check_fd_pressure()
+
+    assert not raised
