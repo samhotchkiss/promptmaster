@@ -981,6 +981,14 @@ class PollyCockpitApp(App[None]):
         # whenever a project surface is up in the right pane.
         Binding("c", "forward_project_chat", "Chat PM", show=False, priority=True),
         Binding("l", "forward_project_log", "Project log", show=False, priority=True),
+        # #1016 — ``R`` (capital) surfaces the recovery action for the
+        # current project's most-stuck task. From the rail it forwards
+        # to the right pane (project dashboard) so the dashboard /
+        # Tasks pane handler can render the block.
+        Binding(
+            "R", "forward_recovery_action", "Recovery",
+            show=False, priority=True,
+        ),
         Binding("u", "trigger_upgrade", "Upgrade", show=False),
         Binding("x", "dismiss_update_pill", "Dismiss Update", show=False),
         Binding("a", "view_alerts", "Alerts", show=False),
@@ -2432,6 +2440,18 @@ class PollyCockpitApp(App[None]):
     def action_forward_project_log(self) -> None:
         if self._on_project_surface():
             self._send_key_to_right_pane("l")
+
+    def action_forward_recovery_action(self) -> None:
+        """#1016 — forward ``R`` to the right pane so the project
+        dashboard / Tasks pane can render the recovery block.
+
+        On a project surface the right pane runs either the project
+        dashboard renderer or the Tasks pane app; both treat ``R`` as
+        the recovery affordance keystroke. From any other surface the
+        forward is a no-op (recovery is a stuck-task concept).
+        """
+        if self._on_project_surface():
+            self._send_key_to_right_pane("R")
 
     def action_toggle_project_pin(self) -> None:
         key = self._selected_row_key()
@@ -11657,6 +11677,10 @@ class PollyProjectDashboardApp(App[None]):
         Binding("g", "plan_scroll_top", "Top", show=False),
         Binding("G", "plan_scroll_bottom", "Bottom", show=False),
         Binding("u,r", "refresh", "Refresh", show=False),
+        # #1016 — capital ``R`` surfaces the recovery action for the
+        # project's most-stuck task. Refresh stays on ``r``; ``R`` is
+        # the recovery affordance the issue spec asks for.
+        Binding("R", "recovery_action", "Recovery"),
         Binding("a", "view_alerts", "Alerts", show=False),
         Binding("ctrl+k,colon", "open_command_palette", "Palette", priority=True),
         Binding("question_mark", "show_keyboard_help", "Help", priority=True),
@@ -12466,6 +12490,68 @@ class PollyProjectDashboardApp(App[None]):
                     )
                     if reason:
                         out.append(f"      [dim]paused: {_escape(reason)}[/dim]")
+                # Recovery affordance (#1016): every stuck task now also
+                # gets a "what should I do?" line. The dispatch table in
+                # ``recovery_actions`` parses the reason; the dashboard
+                # renders the title + the first non-comment CLI step
+                # so the operator can act without drilling into detail
+                # view first. The full block lives in the task detail
+                # surface (``cockpit_tasks._render_overview``).
+                if status in {"on_hold", "blocked"}:
+                    raw_reason = (
+                        str(t.get("hold_reason") or "")
+                        if status == "on_hold"
+                        else "blocked: waiting on " + (
+                            (t.get("blocked_by") or [""])[0]
+                            if isinstance(t.get("blocked_by"), list)
+                            and t.get("blocked_by")
+                            else ""
+                        )
+                    )
+                    recovery_proxy = {
+                        "task_id": str(t.get("task_id") or ""),
+                        "project": (
+                            str(t.get("task_id") or "").split("/", 1)[0]
+                            if "/" in str(t.get("task_id") or "")
+                            else ""
+                        ),
+                        "task_number": t.get("task_number"),
+                        "work_status": status,
+                        "reason": raw_reason,
+                    }
+                    try:
+                        from pollypm.recovery_actions import (
+                            recovery_action_for,
+                        )
+                        action = recovery_action_for(recovery_proxy)
+                    except Exception:  # noqa: BLE001
+                        action = None
+                    if action is not None:
+                        first_step = next(
+                            (
+                                step for step in action.cli_steps
+                                if step and not step.startswith("#")
+                            ),
+                            "",
+                        )
+                        kb = (
+                            f" · press {action.keybinding}"
+                            if action.keybinding else ""
+                        )
+                        if first_step:
+                            out.append(
+                                "      [#7fbf6a]→ recovery: "
+                                f"{_escape(action.detail)}[/]"
+                            )
+                            out.append(
+                                f"        [dim]$ {_escape(first_step)}"
+                                f"{kb}[/dim]"
+                            )
+                        else:
+                            out.append(
+                                "      [#7fbf6a]→ recovery: "
+                                f"{_escape(action.detail)}{kb}[/]"
+                            )
                 # In-progress rows tell the operator which worker is
                 # carrying the task and which node they're at right now.
                 # Without this signal, the dashboard says "1 in
@@ -13162,6 +13248,63 @@ class PollyProjectDashboardApp(App[None]):
 
     def action_refresh(self) -> None:
         self._refresh()
+
+    def action_recovery_action(self) -> None:
+        """#1016 — surface the recovery action for this project's
+        most-stuck task.
+
+        We pick the *first* task in the on_hold or blocked bucket
+        (the dashboard data is already sorted most-recent-first per
+        ``_dashboard_pipeline_buckets``) and notify the operator with
+        the full recovery block. Renderers also embed a one-line
+        recovery hint per stuck row inline, so this hotkey is the
+        "do it now" affordance — not the only place the action shows.
+        """
+        try:
+            from pollypm.recovery_actions import (
+                recovery_action_for,
+                render_recovery_action_block,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        data = getattr(self, "data", None)
+        buckets = getattr(data, "task_buckets", {}) or {}
+        candidate = None
+        for status in ("on_hold", "blocked"):
+            entries = buckets.get(status) or []
+            if entries:
+                first = entries[0]
+                proxy = {
+                    "task_id": str(first.get("task_id") or ""),
+                    "task_number": first.get("task_number"),
+                    "work_status": status,
+                    "reason": str(first.get("hold_reason") or "")
+                    if status == "on_hold"
+                    else "blocked: waiting on " + (
+                        (first.get("blocked_by") or [""])[0]
+                        if isinstance(first.get("blocked_by"), list)
+                        and first.get("blocked_by")
+                        else ""
+                    ),
+                }
+                action = recovery_action_for(proxy)
+                if action is not None:
+                    candidate = action
+                    break
+        if candidate is None:
+            try:
+                self.notify(
+                    "No recovery action available — no stuck tasks.",
+                    severity="information",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            block = "\n".join(render_recovery_action_block(candidate))
+            self.notify(block, title="Recovery action", timeout=12)
+        except Exception:  # noqa: BLE001
+            pass
 
     def action_back(self) -> None:
         self.run_worker(

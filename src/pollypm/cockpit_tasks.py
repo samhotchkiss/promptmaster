@@ -693,6 +693,22 @@ def _render_overview(
     lines = [
         f"{icon} #{task.task_number} {priority_glyph(task)} {task.title}",
     ]
+    # Recovery action (#1016) — when this task is stuck, the FIRST
+    # thing the detail view shows is "here is exactly what to do
+    # next", BEFORE the plain-English summary or status block. The
+    # original bug (#1016) was that the detail view buried the next
+    # step under prose; this hoists it.
+    try:
+        from pollypm.recovery_actions import (
+            recovery_action_for,
+            render_recovery_action_block,
+        )
+        recovery = recovery_action_for(task)
+    except Exception:  # noqa: BLE001
+        recovery = None
+    if recovery is not None:
+        lines.append("")
+        lines.extend(render_recovery_action_block(recovery))
     # Plain-English takeaway first — before any of the technical
     # metadata — so a human reviewer doesn't have to decode the
     # description to know what's actually happening.
@@ -1048,6 +1064,11 @@ class PollyTasksApp(App[None]):
     BINDINGS = [
         Binding("slash", "focus_search", "Search", show=False),
         Binding("r", "refresh", "Refresh"),
+        # #1016 — capital ``R`` runs (or shows) the recovery action for
+        # the selected stuck task. We keep lowercase ``r`` on refresh
+        # so existing muscle memory survives; ``R`` is unbound elsewhere
+        # in this pane.
+        Binding("R", "recovery_action", "Recovery"),
         Binding("a", "approve_task", "Approve"),
         Binding("x", "reject_task", "Reject"),
         Binding("c", "clear_filters", "Clear Filters", show=False),
@@ -1829,6 +1850,19 @@ class PollyTasksApp(App[None]):
                 title = f"↻ {title}"
             if feedback is not None:
                 title = f"🔄 {title}"
+            # Recovery glyph (#1016 scope-expansion comment) — stuck
+            # tasks get a leading "→R" marker in the row so the
+            # operator can see at a glance which rows have a known
+            # recovery affordance available. Press R on a selected
+            # stuck row to view / run the recovery (handled by
+            # ``action_recovery``).
+            try:
+                from pollypm.recovery_actions import recovery_action_for
+                row_recovery = recovery_action_for(task)
+            except Exception:  # noqa: BLE001
+                row_recovery = None
+            if row_recovery is not None:
+                title = f"→R {title}"
             self.task_table.add_row(
                 task_number,
                 status,
@@ -2211,6 +2245,54 @@ class PollyTasksApp(App[None]):
 
     def action_refresh(self) -> None:
         self._refresh_list(select_first=False)
+
+    def action_recovery_action(self) -> None:
+        """#1016 — surface the recovery affordance for the selected
+        stuck task.
+
+        Behaviour:
+
+        * If no task is selected, no-op.
+        * If the selected task isn't stuck, post a transient toast
+          ("no recovery action — task is healthy").
+        * Otherwise, emit a notification with the recovery title +
+          first CLI step. Running the steps for the operator would
+          require a confirmation modal we haven't built yet (it can
+          ``git commit`` or merge, both irreversible) — for now we
+          surface the action prominently so the operator can copy /
+          paste with one keystroke. The detail view already shows the
+          full block.
+        """
+        if not self._selected_task_id:
+            return
+        task = next(
+            (t for t in self._tasks if t.task_id == self._selected_task_id),
+            None,
+        )
+        if task is None:
+            return
+        try:
+            from pollypm.recovery_actions import (
+                recovery_action_for,
+                render_recovery_action_block,
+            )
+            action = recovery_action_for(task)
+        except Exception:  # noqa: BLE001
+            action = None
+        if action is None:
+            try:
+                self.notify(
+                    "No recovery action — this task is not stuck.",
+                    severity="information",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            block = "\n".join(render_recovery_action_block(action))
+            self.notify(block, title="Recovery action", timeout=12)
+        except Exception:  # noqa: BLE001
+            pass
 
     def action_refresh_live(self) -> None:
         if not self._selected_task_id:
