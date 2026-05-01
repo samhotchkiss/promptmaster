@@ -144,6 +144,20 @@ def inbox_root(
             "that's normally hidden. Pass ``all`` to show every channel."
         ),
     ),
+    include_inbox: bool = typer.Option(
+        False,
+        "--include-inbox",
+        help=(
+            "Also list ``pm notify``-backed inbox tasks (chat-flow rows "
+            "carrying the ``notify`` label). Hidden by default because "
+            "they're stub announcements with no node-level transition "
+            "affordance — the architect's plan_review handoff lands as "
+            "one of these and clutters the listing without giving the "
+            "user anything actionable to type. The cockpit inbox pane "
+            "still surfaces them via its own structured action affordances. "
+            "(#1013, mirrors the ``pm task list`` opt-in shipped in #1003.)"
+        ),
+    ),
 ) -> None:
     """Show messages + tasks waiting on the user.
 
@@ -209,6 +223,17 @@ def inbox_root(
     # --- Tasks path (work-service, chat flow) --------------------------
     svc = _svc(db, project=project)
     tasks = inbox_tasks(svc, project=project)
+
+    # #1013 — hide ``pm notify``-backed stub tasks (chat-flow rows
+    # carrying the ``notify`` label) by default. They're announcements
+    # with no node-level transition affordance and the architect's
+    # plan_review handoff lands as one of them. The cockpit inbox pane
+    # still surfaces them via its specialised actions; the CLI listing
+    # has no equivalent affordance, so listing them just buries the
+    # genuinely actionable rows.
+    if not include_inbox:
+        from pollypm.notify_task import is_notify_inbox_task
+        tasks = [task for task in tasks if not is_notify_inbox_task(task)]
 
     if output_json:
         typer.echo(
