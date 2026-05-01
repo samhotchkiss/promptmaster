@@ -298,6 +298,15 @@ class SessionManager:
         next ``session_for_task`` call returns ``None`` and the
         provision can proceed.
 
+        #1014 (Bug B) — uses ``mark_worker_session_ended`` so token
+        counters are preserved. Pre-#1014 the reap called
+        ``end_worker_session(..., total_input_tokens=0,
+        total_output_tokens=0, ...)`` which silently clobbered any
+        partial-archive token totals from prior cycles; the user-visible
+        consequence on ``bikepath/8`` was ``pm task get`` permanently
+        showing ``in=0 out=0`` despite real token spend across multiple
+        build / review-handoff visits.
+
         Any DB error is logged and swallowed — the next provision
         will hit the same orphan and retry the reap. Far better than
         raising and aborting the claim entirely.
@@ -312,19 +321,69 @@ class SessionManager:
             task_id, session.pane_id,
         )
         try:
-            self._svc.end_worker_session(
-                task_project=project,
-                task_number=task_number,
-                ended_at=_now(),
-                total_input_tokens=0,
-                total_output_tokens=0,
-                archive_path=None,
-            )
+            mark_ended = getattr(self._svc, "mark_worker_session_ended", None)
+            if callable(mark_ended):
+                mark_ended(
+                    task_project=project,
+                    task_number=task_number,
+                    ended_at=_now(),
+                )
+            else:
+                # Pre-#1014 fallback for work-service stubs that don't
+                # implement the token-preserving helper. We pass the
+                # existing token totals back through ``end_worker_session``
+                # so we still don't zero them out.
+                self._svc.end_worker_session(
+                    task_project=project,
+                    task_number=task_number,
+                    ended_at=_now(),
+                    total_input_tokens=self._existing_session_token_in(
+                        project, task_number,
+                    ),
+                    total_output_tokens=self._existing_session_token_out(
+                        project, task_number,
+                    ),
+                    archive_path=None,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "provision_worker[%s]: failed to end stale worker_session: %s",
                 task_id, exc,
             )
+
+    def _existing_session_token_in(
+        self, project: str, task_number: int,
+    ) -> int:
+        """Best-effort read of the current row's input-token counter.
+
+        Used by the legacy fallback in :meth:`_reap_dead_existing_session`
+        on work-service stubs that pre-date #1014's
+        ``mark_worker_session_ended``. Returns 0 on any error so the
+        reap still proceeds.
+        """
+        try:
+            record = self._svc.get_worker_session(
+                task_project=project, task_number=task_number,
+            )
+        except Exception:  # noqa: BLE001
+            return 0
+        if record is None:
+            return 0
+        return int(getattr(record, "total_input_tokens", 0) or 0)
+
+    def _existing_session_token_out(
+        self, project: str, task_number: int,
+    ) -> int:
+        """Best-effort read of the current row's output-token counter."""
+        try:
+            record = self._svc.get_worker_session(
+                task_project=project, task_number=task_number,
+            )
+        except Exception:  # noqa: BLE001
+            return 0
+        if record is None:
+            return 0
+        return int(getattr(record, "total_output_tokens", 0) or 0)
 
     def _provision_locked(
         self,

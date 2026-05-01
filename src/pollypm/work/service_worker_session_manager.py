@@ -22,6 +22,7 @@ from pollypm.work.service_worker_sessions import (
     ensure_worker_session_schema,
     get_worker_session,
     list_worker_sessions,
+    mark_worker_session_ended,
     update_worker_session_tokens,
     upsert_worker_session,
 )
@@ -111,6 +112,21 @@ class WorkSessionManager:
             total_input_tokens=total_input_tokens,
             total_output_tokens=total_output_tokens,
             archive_path=archive_path,
+        )
+
+    def mark_ended(
+        self,
+        *,
+        task_project: str,
+        task_number: int,
+        ended_at: str,
+    ) -> None:
+        """Stamp ``ended_at`` only — preserves token counters (#1014)."""
+        mark_worker_session_ended(
+            self.service,
+            task_project=task_project,
+            task_number=task_number,
+            ended_at=ended_at,
         )
 
     def update_tokens(

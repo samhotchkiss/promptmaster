@@ -3524,6 +3524,26 @@ class SQLiteWorkService:
             archive_path=archive_path,
         )
 
+    def mark_worker_session_ended(
+        self,
+        *,
+        task_project: str,
+        task_number: int,
+        ended_at: str,
+    ) -> None:
+        """Stamp ``ended_at`` without touching token counters (#1014).
+
+        Used by the orphan-reap path so a crash-recovery doesn't zero
+        out the tokens an earlier session already wrote. The next
+        teardown's archive scan still overwrites with the worktree's
+        cumulative total via SET semantics.
+        """
+        self._worker_session_mgr.mark_ended(
+            task_project=task_project,
+            task_number=task_number,
+            ended_at=ended_at,
+        )
+
     def update_worker_session_tokens(
         self,
         *,

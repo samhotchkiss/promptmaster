@@ -724,6 +724,12 @@ class MockWorkService:
     ) -> None:
         key = (task_project, task_number)
         existing = self._worker_sessions.get(key, {})
+        # #1014 (Bug B) — preserve token counters across re-claims so a
+        # crash-recovery / reject-bounce that triggers a fresh provision
+        # doesn't silently zero out the running tally. Mirrors the
+        # SQLite ON CONFLICT contract.
+        preserved_in = int(existing.get("total_input_tokens", 0) or 0)
+        preserved_out = int(existing.get("total_output_tokens", 0) or 0)
         existing.update(
             {
                 "task_project": task_project,
@@ -735,8 +741,8 @@ class MockWorkService:
                 "started_at": started_at,
                 "ended_at": None,
                 "archive_path": None,
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
+                "total_input_tokens": preserved_in,
+                "total_output_tokens": preserved_out,
                 "provider": provider,
                 "provider_home": provider_home,
             }
@@ -790,6 +796,20 @@ class MockWorkService:
         row["total_input_tokens"] = total_input_tokens
         row["total_output_tokens"] = total_output_tokens
         row["archive_path"] = archive_path
+
+    def mark_worker_session_ended(
+        self,
+        *,
+        task_project: str,
+        task_number: int,
+        ended_at: str,
+    ) -> None:
+        """Stamp ``ended_at`` only — preserves token counters (#1014)."""
+        key = (task_project, task_number)
+        row = self._worker_sessions.get(key)
+        if row is None:
+            return
+        row["ended_at"] = ended_at
 
     def update_worker_session_tokens(
         self,

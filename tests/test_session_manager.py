@@ -96,7 +96,12 @@ class _StubWorkService:
                               pane_id, worktree_path, branch_name, started_at,
                               provider=None, provider_home=None):
         # Stub mirrors the real upsert (see ``service_worker_sessions``)
-        # — the real one carries provider/provider_home (#809).
+        # — the real one carries provider/provider_home (#809) and as of
+        # #1014 (Bug B) preserves token counters across re-claim cycles
+        # (the row's PK is ``(task_project, task_number)`` so a fresh
+        # provision is the same row replayed; zeroing counters here was
+        # the silent cause of ``pm task get`` showing ``in=0 out=0`` on
+        # bikepath/8 despite real spend).
         self.conn.execute(
             "INSERT INTO work_sessions "
             "(task_project, task_number, agent_name, pane_id, worktree_path, "
@@ -110,9 +115,7 @@ class _StubWorkService:
             "provider=excluded.provider, "
             "provider_home=excluded.provider_home, "
             "ended_at=NULL, "
-            "archive_path=NULL, "
-            "total_input_tokens=0, "
-            "total_output_tokens=0",
+            "archive_path=NULL",
             (task_project, task_number, agent_name, pane_id, worktree_path,
              branch_name, started_at, provider, provider_home),
         )
@@ -155,6 +158,15 @@ class _StubWorkService:
             "WHERE task_project = ? AND task_number = ?",
             (ended_at, total_input_tokens, total_output_tokens, archive_path,
              task_project, task_number),
+        )
+        self.conn.commit()
+
+    def mark_worker_session_ended(self, *, task_project, task_number, ended_at):
+        """Stamp ``ended_at`` only — preserves token counters (#1014)."""
+        self.conn.execute(
+            "UPDATE work_sessions SET ended_at = ? "
+            "WHERE task_project = ? AND task_number = ?",
+            (ended_at, task_project, task_number),
         )
         self.conn.commit()
 
@@ -433,6 +445,110 @@ class TestProvisionWorker:
             + mock_tmux.create_window.call_count
             > create_session_calls_before
         ), "expected fresh tmux launch after dead-pane reap (#1012)"
+
+    def test_provision_worker_preserves_tokens_across_reclaim(
+        self, manager, mock_tmux, mock_svc, tmp_project,
+    ):
+        """#1014 (Bug B): re-provisioning a worker must not zero the
+        token counters that an earlier session's teardown wrote.
+
+        Pre-fix the SQLite ``upsert_worker_session`` reset
+        ``total_input_tokens`` / ``total_output_tokens`` to 0 on
+        ``ON CONFLICT``. The schema's PK is ``(task_project,
+        task_number)`` so every re-claim of the same task hits that
+        ON CONFLICT path — meaning the running token tally surfaced by
+        ``pm task get`` was always the *current* in-flight session's
+        contribution, not the cumulative spend across cycles. On
+        ``bikepath/8`` the user saw ``in=0 out=0`` despite obvious
+        token spend across multiple build / review handoffs.
+        """
+        with patch("pollypm.work.session_manager.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+            manager.provision_worker("proj/1", "agent-1")
+
+            # Simulate teardown writing tokens. We bypass teardown_worker's
+            # archival path (which depends on JSONL files on disk) and just
+            # call end_worker_session directly to model the post-archive
+            # state.
+            mock_svc.end_worker_session(
+                task_project="proj",
+                task_number=1,
+                ended_at="2026-04-30T00:00:00+00:00",
+                total_input_tokens=5000,
+                total_output_tokens=1500,
+                archive_path="/tmp/archive",
+            )
+
+            # Re-provision (e.g. a fresh claim after rejection bounces
+            # the task back through the queue).
+            manager.provision_worker("proj/1", "agent-1")
+
+        row = mock_svc._conn.execute(
+            "SELECT total_input_tokens, total_output_tokens "
+            "FROM work_sessions WHERE task_project = ? AND task_number = ?",
+            ("proj", 1),
+        ).fetchone()
+        assert row is not None
+        assert row["total_input_tokens"] == 5000, (
+            "re-provision must NOT zero the input-token counter (#1014)"
+        )
+        assert row["total_output_tokens"] == 1500, (
+            "re-provision must NOT zero the output-token counter (#1014)"
+        )
+
+    def test_orphan_reap_preserves_token_counters(
+        self, manager, mock_tmux, mock_svc, tmp_project,
+    ):
+        """#1014 (Bug B): the dead-pane reap path must not zero the
+        token counters either.
+
+        The #1012 reap helper called ``end_worker_session(...,
+        total_input_tokens=0, total_output_tokens=0, ...)``, which in
+        the live ``bikepath/8`` repro silently wiped any prior
+        archival tokens every time the supervisor resurrected a
+        crashed pane. Switching to ``mark_worker_session_ended``
+        (added in #1014) keeps the counters untouched on reap; only
+        the canonical ``teardown_worker`` archive scan ever overwrites
+        them.
+        """
+        with patch("pollypm.work.session_manager.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+            manager.provision_worker("proj/1", "agent-1")
+            mock_svc.end_worker_session(
+                task_project="proj",
+                task_number=1,
+                ended_at="2026-04-30T00:00:00+00:00",
+                total_input_tokens=4200,
+                total_output_tokens=900,
+                archive_path="/tmp/archive",
+            )
+            # Resurrect the row so it looks like an active orphan
+            # (ended_at IS NULL with a dead pane). We toggle ended_at
+            # back to NULL via the SQLite stub directly because the
+            # public API doesn't expose a "reopen" path.
+            mock_svc._conn.execute(
+                "UPDATE work_sessions SET ended_at = NULL "
+                "WHERE task_project = ? AND task_number = ?",
+                ("proj", 1),
+            )
+            mock_svc._conn.commit()
+
+            # Pane is now reported dead; provision_worker should reap.
+            mock_tmux.is_pane_alive.return_value = False
+            manager.provision_worker("proj/1", "agent-1")
+
+        row = mock_svc._conn.execute(
+            "SELECT total_input_tokens, total_output_tokens "
+            "FROM work_sessions WHERE task_project = ? AND task_number = ?",
+            ("proj", 1),
+        ).fetchone()
+        assert row is not None
+        assert row["total_input_tokens"] == 4200, (
+            "orphan reap must NOT zero token counters (#1014 Bug B)"
+        )
+        assert row["total_output_tokens"] == 900
 
     def test_provision_worker_returns_existing_when_pane_still_alive(
         self, manager, mock_tmux, tmp_project,

@@ -92,6 +92,25 @@ def upsert_worker_session(
     provider: str | None = None,
     provider_home: str | None = None,
 ) -> None:
+    """Insert or refresh the work_sessions row for a task.
+
+    #1014 (Bug B) — preserve ``total_input_tokens`` /
+    ``total_output_tokens`` on ``ON CONFLICT``. The schema holds exactly
+    one row per task (PK on ``(task_project, task_number)``) so a fresh
+    provision is the same row replayed with a new pane. Pre-#1014 this
+    upsert hard-reset both counters to ``0`` whenever a re-claim or
+    crash-recovery produced a new pane, throwing away tokens that had
+    been written by an earlier session's teardown / partial archival.
+    The user-visible symptom on ``bikepath/8`` was ``pm task get`` showing
+    ``in=0 out=0`` for a worker that had clearly burned real tokens
+    across multiple build cycles.
+
+    The next teardown's ``end_worker_session`` rescans the worktree's
+    accumulated JSONL files and writes the cumulative total via SET
+    semantics, so preserving the prior totals here doesn't risk
+    double-counting — we just keep the running tally visible between
+    teardowns instead of zeroing it on every fresh provision.
+    """
     service._conn.execute(
         "INSERT INTO work_sessions "
         "(task_project, task_number, agent_name, pane_id, worktree_path, "
@@ -105,9 +124,7 @@ def upsert_worker_session(
         "provider=excluded.provider, "
         "provider_home=excluded.provider_home, "
         "ended_at=NULL, "
-        "archive_path=NULL, "
-        "total_input_tokens=0, "
-        "total_output_tokens=0",
+        "archive_path=NULL",
         (
             task_project,
             task_number,
@@ -119,6 +136,37 @@ def upsert_worker_session(
             provider,
             provider_home,
         ),
+    )
+    service._conn.commit()
+
+
+def mark_worker_session_ended(
+    service: "SQLiteWorkService",
+    *,
+    task_project: str,
+    task_number: int,
+    ended_at: str,
+) -> None:
+    """Stamp ``ended_at`` on a worker_session row without touching tokens.
+
+    #1014 (Bug B) — used by the orphan-reap path in ``provision_worker``
+    when the prior pane died without going through ``teardown_worker``.
+    Pre-#1014 the reap called ``end_worker_session(total_input_tokens=0,
+    total_output_tokens=0, ...)`` which clobbered any token totals that
+    a partial archival or earlier completed session had written. The
+    user has no other surface for "what did this worker cost so far",
+    so zeroing tokens on a recovery action was a silent telemetry loss.
+
+    This helper only touches the active-row marker (``ended_at``) so the
+    next ``session_for_task(active_only=True)`` returns ``None`` and the
+    fresh provision can run without dragging the old pane id forward.
+    Token totals stay untouched; the next teardown's archive scan will
+    overwrite them with the worktree's cumulative count.
+    """
+    service._conn.execute(
+        "UPDATE work_sessions SET ended_at = ? "
+        "WHERE task_project = ? AND task_number = ?",
+        (ended_at, task_project, task_number),
     )
     service._conn.commit()
 

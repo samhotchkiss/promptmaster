@@ -377,6 +377,23 @@ class WorkService(Protocol):
         """Stamp ``ended_at`` and final accounting on a worker session."""
         ...
 
+    def mark_worker_session_ended(
+        self,
+        *,
+        task_project: str,
+        task_number: int,
+        ended_at: str,
+    ) -> None:
+        """Stamp ``ended_at`` without touching token counters (#1014).
+
+        Used by the orphan-reap path in ``provision_worker`` so a
+        crash-recovery doesn't zero the token totals an earlier session
+        wrote. Implementations may default to ``end_worker_session``
+        with the existing counters when they don't track token
+        accumulation.
+        """
+        ...
+
     def update_worker_session_tokens(
         self,
         *,

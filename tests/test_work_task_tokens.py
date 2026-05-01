@@ -72,8 +72,12 @@ def _seed_worker_session(
 
     We write directly to the table because the schema holds exactly one
     row per task (PRIMARY KEY on ``(task_project, task_number)``). The
-    public ``upsert_worker_session`` zeros the counters on insert, which
-    is the wrong affordance for a test that wants to assert aggregation.
+    public ``upsert_worker_session`` accepts no token kwargs (those are
+    written by ``end_worker_session`` after archive parsing), so a test
+    that wants to assert aggregation still has to bypass it. As of
+    #1014 the upsert no longer zeros pre-existing counters on conflict,
+    but it also doesn't accept token args directly — we still go around
+    it for seed-and-assert tests.
     """
     svc._conn.execute(
         "INSERT OR REPLACE INTO work_sessions "
