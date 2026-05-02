@@ -128,8 +128,22 @@ class Store(Protocol):
         """Create or refresh an alert for ``(session_name, alert_type)``."""
         ...
 
-    def clear_alert(self, session_name: str, alert_type: str) -> None:
-        """Clear any alert matching ``(session_name, alert_type)``."""
+    def clear_alert(
+        self,
+        session_name: str,
+        alert_type: str,
+        *,
+        who_cleared: str = "system",
+    ) -> None:
+        """Clear any alert matching ``(session_name, alert_type)``.
+
+        Implementations should also emit an ``alert.cleared`` event into
+        the activity stream when at least one open row is closed so the
+        activity feed surfaces both creates and clears (#1033). The
+        ``who_cleared`` kwarg attributes the close — e.g.
+        ``auto:supervisor-recovery``, ``manual:pm-alert-clear``,
+        ``manual:cockpit-y-key``.
+        """
         ...
 
     # ------------------------------------------------------------------

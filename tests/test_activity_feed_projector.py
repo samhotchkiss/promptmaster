@@ -558,3 +558,145 @@ def test_plugin_initialize_emits_loaded_event_without_view_side_effects(tmp_path
     finally:
         conn.close()
     assert api.emitted and api.emitted[0][0] == "loaded"
+
+
+# ---------------------------------------------------------------------------
+# #1033 — alert.cleared lifecycle visibility in the activity feed.
+# ---------------------------------------------------------------------------
+
+
+def test_alert_cleared_event_surfaces_in_feed(tmp_path: Path) -> None:
+    """A ``clear_alert`` call writes an ``alert.cleared`` event that the
+    activity feed surfaces alongside the original alert create.
+    """
+    db = tmp_path / "state.db"
+    store = SQLAlchemyStore(f"sqlite:///{db}")
+    try:
+        store.upsert_alert(
+            session_name="worker_demo",
+            alert_type="plan_gate",
+            severity="warn",
+            message="missing plan",
+        )
+        store.clear_alert(
+            "worker_demo", "plan_gate", who_cleared="auto:test-cycle",
+        )
+    finally:
+        store.close()
+
+    entries = EventProjector(db).project(limit=20)
+    kinds = [e.kind for e in entries]
+    # Both create (kind=alert) and clear (kind=alert.cleared) should land.
+    assert "alert" in kinds
+    assert "alert.cleared" in kinds
+
+    cleared = next(e for e in entries if e.kind == "alert.cleared")
+    assert cleared.payload.get("who_cleared") == "auto:test-cycle"
+    assert cleared.payload.get("alert_type") == "plan_gate"
+    # ``alert.cleared`` is good news — render at routine severity so a
+    # wall of clears doesn't shout louder than active alerts.
+    assert cleared.severity == "routine"
+    # Summary should be a human-readable string sourced from the
+    # payload (not a `kind on actor` fallback).
+    assert "Cleared plan_gate" in cleared.summary
+
+
+def test_kind_filter_alert_matches_cleared_family(tmp_path: Path) -> None:
+    """``--kind alert`` filter expands to the alert lifecycle family so
+    a single CLI invocation shows both creates and clears (#1033)."""
+    db = tmp_path / "state.db"
+    store = SQLAlchemyStore(f"sqlite:///{db}")
+    try:
+        store.upsert_alert(
+            session_name="worker_demo",
+            alert_type="plan_gate",
+            severity="warn",
+            message="missing plan",
+        )
+        store.clear_alert(
+            "worker_demo", "plan_gate", who_cleared="manual:pm-alert-clear",
+        )
+        # An unrelated event must NOT leak through the alert filter.
+        store.record_event(
+            scope="worker_demo",
+            sender="worker_demo",
+            subject="heartbeat",
+            payload={},
+        )
+    finally:
+        store.close()
+
+    entries = EventProjector(db).project(kinds=["alert"], limit=20)
+    kinds = sorted({e.kind for e in entries})
+    assert kinds == ["alert", "alert.cleared"]
+
+
+def test_clear_alert_no_op_does_not_emit_event(tmp_path: Path) -> None:
+    """No-op clears (heartbeat sweep, already-cleared retry) must NOT
+    spam the activity feed with phantom ``alert.cleared`` rows."""
+    db = tmp_path / "state.db"
+    store = SQLAlchemyStore(f"sqlite:///{db}")
+    try:
+        store.clear_alert("nothing", "never_opened")
+    finally:
+        store.close()
+
+    entries = EventProjector(db).project(limit=20)
+    cleared = [e for e in entries if e.kind == "alert.cleared"]
+    assert cleared == []
+
+
+def test_alert_cleared_via_v1_service_emits_event(tmp_path: Path) -> None:
+    """``pm alert clear <id>`` (v1 service path) emits an
+    ``alert.cleared`` event whose payload attributes the close to the
+    explicit CLI invocation (#1033).
+    """
+    from sqlalchemy import select as _select
+
+    from pollypm.store.schema import messages as _messages
+
+    db = tmp_path / "state.db"
+    store = SQLAlchemyStore(f"sqlite:///{db}")
+    try:
+        store.upsert_alert(
+            session_name="worker_demo",
+            alert_type="plan_gate",
+            severity="warn",
+            message="missing plan",
+        )
+        # Resolve the alert id then close it via the same shape that
+        # ``ServiceAPIv1.clear_alert`` uses.
+        rows = store.query_messages(
+            type="alert", state="open", scope="worker_demo",
+        )
+        assert rows
+        target = rows[0]
+        alert_id = int(target["id"])
+        store.close_message(alert_id)
+        store.record_event(
+            scope="worker_demo",
+            sender="plan_gate",
+            subject="alert.cleared",
+            payload={
+                "event_type": "alert.cleared",
+                "alert_id": alert_id,
+                "alert_type": "plan_gate",
+                "session_name": "worker_demo",
+                "severity": "warn",
+                "who_cleared": "manual:pm-alert-clear",
+                "summary": (
+                    f"Cleared alert #{alert_id} plan_gate on worker_demo"
+                    " (manual:pm-alert-clear)"
+                ),
+                "message": "missing plan",
+                "opened_at": str(target.get("created_at") or ""),
+            },
+        )
+    finally:
+        store.close()
+
+    entries = EventProjector(db).project(kinds=["alert"], limit=20)
+    cleared = [e for e in entries if e.kind == "alert.cleared"]
+    assert len(cleared) == 1
+    assert cleared[0].payload["who_cleared"] == "manual:pm-alert-clear"
+    assert cleared[0].payload["alert_id"] == alert_id

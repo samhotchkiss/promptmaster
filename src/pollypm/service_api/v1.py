@@ -349,19 +349,29 @@ class PollyPMService:
             alert_id=alert_id,
         )
 
-        supervisor.msg_store.append_event(
+        # #1033: emit the same ``alert.cleared`` shape that
+        # :meth:`Store.clear_alert` writes for every other clear path
+        # (supervisor auto-clear, recovery, cockpit). Sharing the schema
+        # lets the activity feed render every clear with one set of
+        # rules. ``who_cleared`` attributes the close to the explicit
+        # CLI invocation.
+        supervisor.msg_store.record_event(
             scope=alert.session_name,
-            sender=alert.session_name,
-            subject="alert",
+            sender=alert.alert_type,
+            subject="alert.cleared",
             payload={
-                "message": activity_summary(
-                    summary=f"Cleared alert {alert.alert_type}#{alert_id}",
-                    severity="routine",
-                    verb="cleared",
-                    subject=alert.alert_type,
-                ),
-                "alert_type": alert.alert_type,
+                "event_type": "alert.cleared",
                 "alert_id": alert_id,
+                "alert_type": alert.alert_type,
+                "session_name": alert.session_name,
+                "severity": alert.severity,
+                "who_cleared": "manual:pm-alert-clear",
+                "summary": (
+                    f"Cleared alert #{alert_id} {alert.alert_type}"
+                    f" on {alert.session_name} (manual:pm-alert-clear)"
+                ),
+                "message": message_text,
+                "opened_at": str(target.get("created_at") or ""),
             },
         )
         return alert

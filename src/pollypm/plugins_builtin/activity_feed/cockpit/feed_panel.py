@@ -118,7 +118,14 @@ def apply_filter(
     already-fetched list without another DB round-trip.
     """
     project_set = set(feed_filter.projects) if feed_filter.projects else None
-    kind_set = set(feed_filter.kinds) if feed_filter.kinds else None
+    # #1033: ``alert`` filter should match the lifecycle family
+    # (``alert`` create + ``alert.cleared`` clear) so the cockpit panel's
+    # alert filter shows both ends of the same alert. Mirrors the CLI's
+    # ``_expand_kind_filter`` in the projector.
+    from pollypm.plugins_builtin.activity_feed.handlers.event_projector import (
+        _expand_kind_filter,
+    )
+    kind_set = _expand_kind_filter(feed_filter.kinds)
     actor_set = set(feed_filter.actors) if feed_filter.actors else None
     cutoff: datetime | None = None
     delta = feed_filter.since()
@@ -241,6 +248,15 @@ def format_entry_row(
     project = _project_label(entry)
     actor = entry.actor or "system"
     verb = entry.verb or entry.kind
+    # #1033: distinguish create vs clear in the alert lifecycle so a
+    # quick scan tells the user which way the row is pointing. Only
+    # rewrite the verb when the emitter didn't supply a richer one
+    # (e.g. ``activity_summary(verb='alerted', ...)``) so structured
+    # events keep their authored verb intact.
+    if entry.kind == "alert" and verb in ("alert", entry.kind):
+        verb = "alert↑"
+    elif entry.kind == "alert.cleared" and verb in ("alert.cleared", entry.kind):
+        verb = "alert↓"
     prefix = "!" if entry.severity == "critical" else " "
     pin = "📌 " if entry.pinned else ""
     width = max(project_width or len(project), len(project))

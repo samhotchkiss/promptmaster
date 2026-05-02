@@ -617,15 +617,46 @@ class SQLAlchemyStore:
             payload={"severity": severity, "session_name": session_name},
         )
 
-    def clear_alert(self, session_name: str, alert_type: str) -> None:
+    def clear_alert(
+        self,
+        session_name: str,
+        alert_type: str,
+        *,
+        who_cleared: str = "system",
+    ) -> None:
         """Close any open alert matching ``(session_name, alert_type)``.
 
         Mirrors the legacy :meth:`StateStore.clear_alert` — if no open
         row exists, the call is a no-op (we don't raise on "already
         cleared" because the heartbeat drives this on every sweep).
+
+        When at least one open row is closed, an ``alert.cleared`` event
+        is recorded into the activity stream so the feed shows a paired
+        clear for every create (#1033). The ``who_cleared`` kwarg lets
+        callers attribute the close (``auto:supervisor-recovery``,
+        ``manual:pm-alert-clear``, ``manual:cockpit-y-key``); the default
+        of ``"system"`` keeps existing call sites working without
+        changes.
         """
         now = datetime.now(timezone.utc)
         with self.transaction() as conn:
+            existing = conn.execute(
+                select(
+                    messages.c.id,
+                    messages.c.subject,
+                    messages.c.payload_json,
+                    messages.c.created_at,
+                ).where(
+                    and_(
+                        messages.c.type == "alert",
+                        messages.c.scope == session_name,
+                        messages.c.sender == alert_type,
+                        messages.c.state == "open",
+                    )
+                )
+            ).fetchall()
+            if not existing:
+                return
             conn.execute(
                 update(messages)
                 .where(
@@ -637,6 +668,45 @@ class SQLAlchemyStore:
                     )
                 )
                 .values(state="closed", closed_at=now, updated_at=now)
+            )
+
+        # Emit one ``alert.cleared`` event per row that we just closed.
+        # Done after the UPDATE transaction so reads of the event will
+        # always see ``state='closed'`` on the underlying alert row.
+        for row in existing:
+            try:
+                row_payload = json.loads(row[2]) if row[2] else {}
+            except (json.JSONDecodeError, ValueError):
+                row_payload = {}
+            severity = ""
+            if isinstance(row_payload, dict):
+                severity = str(row_payload.get("severity") or "")
+            subject_text = row[1] or ""
+            if subject_text.startswith("[Alert] "):
+                subject_text = subject_text[len("[Alert] "):]
+            summary_text = (
+                f"Cleared {alert_type} on {session_name}"
+                f" ({who_cleared})"
+            )
+            self.record_event(
+                scope=session_name,
+                sender=alert_type,
+                subject="alert.cleared",
+                payload={
+                    "event_type": "alert.cleared",
+                    "alert_id": int(row[0]),
+                    "alert_type": alert_type,
+                    "session_name": session_name,
+                    "severity": severity,
+                    "who_cleared": who_cleared,
+                    "summary": summary_text,
+                    "message": subject_text,
+                    "opened_at": (
+                        row[3].isoformat()
+                        if hasattr(row[3], "isoformat")
+                        else str(row[3] or "")
+                    ),
+                },
             )
 
     # ------------------------------------------------------------------

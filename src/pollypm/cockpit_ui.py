@@ -1356,7 +1356,11 @@ class PollyCockpitApp(App[None]):
         if supervisor is None:
             return
         try:
-            supervisor.msg_store.clear_alert(item.session_name, item.alert_type)
+            supervisor.msg_store.clear_alert(
+                item.session_name,
+                item.alert_type,
+                who_cleared="manual:cockpit-y-key",
+            )
         finally:
             self._close_alert_supervisor(supervisor)
         self.notify(
@@ -1414,7 +1418,11 @@ class PollyCockpitApp(App[None]):
         if supervisor is None:
             return
         try:
-            supervisor.msg_store.clear_alert(session_name, "recovery_limit")
+            supervisor.msg_store.clear_alert(
+                session_name,
+                "recovery_limit",
+                who_cleared="manual:cockpit-resume-recovery",
+            )
             # Reset the recovery-attempt counter so the next failure
             # gets ``_RECOVERY_LIMIT`` retries again instead of slamming
             # straight back into ``recovery_limit``.
@@ -1458,7 +1466,11 @@ class PollyCockpitApp(App[None]):
             account_name = launch.account.name
             # Clear the pause flag first so the supervisor's recovery
             # loop won't immediately re-raise it on the next failure.
-            supervisor.msg_store.clear_alert(session_name, "recovery_limit")
+            supervisor.msg_store.clear_alert(
+                session_name,
+                "recovery_limit",
+                who_cleared="manual:cockpit-restart-session",
+            )
             supervisor.store.upsert_session_runtime(
                 session_name=session_name,
                 status="recovering",

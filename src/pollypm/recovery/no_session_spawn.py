@@ -699,7 +699,23 @@ def auto_recover_no_session_alerts(
             clear = getattr(store, "clear_alert", None)
             if callable(clear):
                 try:
-                    clear(session_name, SPAWN_FAILED_ALERT_TYPE)
+                    clear(
+                        session_name,
+                        SPAWN_FAILED_ALERT_TYPE,
+                        who_cleared="auto:no-session-spawn-recovery",
+                    )
+                except TypeError:
+                    # Older Store implementations / test doubles may not
+                    # accept the kwarg yet — fall back to the legacy
+                    # positional shape so we don't break the recovery
+                    # path on partial upgrades.
+                    try:
+                        clear(session_name, SPAWN_FAILED_ALERT_TYPE)
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "no_session_spawn: clear_alert(spawn_failed) "
+                            "failed for %s", session_name, exc_info=True,
+                        )
                 except Exception:  # noqa: BLE001
                     logger.debug(
                         "no_session_spawn: clear_alert(spawn_failed) "

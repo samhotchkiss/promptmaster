@@ -240,6 +240,51 @@ class TestAlertWrappers:
         store.clear_alert("nothing", "never_opened")
         rows = store.query_messages(type="alert", scope="nothing")
         assert rows == []
+        # No-op clears must NOT spam an alert.cleared event into the
+        # activity stream — the event log would fill with phantom clears
+        # from every heartbeat sweep otherwise.
+        events = store.query_messages(type="event", scope="nothing")
+        assert events == []
+
+    def test_clear_alert_emits_cleared_event(self, store: SQLAlchemyStore):
+        # #1033: every successful clear writes an ``alert.cleared`` event
+        # into the activity stream so the feed shows both ends of the
+        # alert lifecycle.
+        store.upsert_alert(
+            session_name="worker-foo",
+            alert_type="pane_dead",
+            severity="warn",
+            message="Pane is dead",
+        )
+        store.clear_alert("worker-foo", "pane_dead", who_cleared="auto:test")
+        events = store.query_messages(
+            type="event", scope="worker-foo",
+        )
+        cleared = [e for e in events if e["subject"] == "alert.cleared"]
+        assert len(cleared) == 1
+        payload = cleared[0]["payload"]
+        assert payload["event_type"] == "alert.cleared"
+        assert payload["alert_type"] == "pane_dead"
+        assert payload["who_cleared"] == "auto:test"
+        assert payload["severity"] == "warn"
+        assert "Cleared pane_dead" in payload["summary"]
+
+    def test_clear_alert_default_who_cleared_is_system(
+        self, store: SQLAlchemyStore,
+    ):
+        # Existing call sites that don't pass ``who_cleared`` get the
+        # neutral ``system`` attribution — protocol back-compat for #1033.
+        store.upsert_alert(
+            session_name="s",
+            alert_type="t",
+            severity="warn",
+            message="m",
+        )
+        store.clear_alert("s", "t")
+        events = store.query_messages(type="event", scope="s")
+        cleared = [e for e in events if e["subject"] == "alert.cleared"]
+        assert len(cleared) == 1
+        assert cleared[0]["payload"]["who_cleared"] == "system"
 
 
 # ---------------------------------------------------------------------------

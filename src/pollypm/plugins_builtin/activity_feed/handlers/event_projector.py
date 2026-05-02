@@ -379,7 +379,16 @@ class EventProjector:
             kind = _kind_from_message_row(row)
             actor = row.get("scope") or row.get("sender") or "system"
             parsed = _parse_message(message)
-            summary = parsed.summary or _fallback_summary(
+            # Prefer an explicit ``payload.summary`` when emitters set
+            # one (e.g. #1033's ``alert.cleared`` events) — it carries a
+            # human-readable string the projector should use directly
+            # instead of falling back to ``kind on actor``.
+            payload_summary: str | None = None
+            if isinstance(payload, dict):
+                raw_summary = payload.get("summary")
+                if isinstance(raw_summary, str) and raw_summary:
+                    payload_summary = raw_summary
+            summary = parsed.summary or payload_summary or _fallback_summary(
                 kind, message, actor,
             )
             severity = parsed.severity or _severity_from_message_row(row)
@@ -519,7 +528,7 @@ class EventProjector:
         # Filter post-projection so callers can constrain without having
         # to wire each filter into every source.
         project_filter = set(projects) if projects else None
-        kind_filter = set(kinds) if kinds else None
+        kind_filter = _expand_kind_filter(kinds)
         actor_filter = set(actors) if actors else None
 
         def _keep(entry: FeedEntry) -> bool:
@@ -557,6 +566,30 @@ class EventProjector:
                 seen_alert_keys.add(key)
             deduped.append(entry)
         return deduped[:limit]
+
+
+_ALERT_KIND_FAMILY: frozenset[str] = frozenset({"alert", "alert.cleared"})
+
+
+def _expand_kind_filter(kinds: Iterable[str] | None) -> set[str] | None:
+    """Expand a ``--kind`` filter so an ``alert`` term matches the family.
+
+    #1033 introduced ``alert.cleared`` as a sibling kind for cleared
+    alerts. The user-visible filter ``--kind alert`` should match both
+    creates and clears so a single command shows the full lifecycle —
+    expand the term here rather than asking the user to spell out two
+    kinds. Other terms pass through untouched.
+    """
+    if not kinds:
+        return None
+    expanded: set[str] = set()
+    for raw in kinds:
+        if not raw:
+            continue
+        expanded.add(raw)
+        if raw == "alert":
+            expanded.update(_ALERT_KIND_FAMILY)
+    return expanded
 
 
 def _timestamp_sort_key(entry: FeedEntry) -> str:
@@ -640,6 +673,14 @@ def _severity_from_message_row(row: dict[str, Any]) -> str:
     (alert/recovery -> recommendation, error/stuck -> critical, else
     routine).
     """
+    kind = _kind_from_message_row(row)
+    # ``alert.cleared`` is good news (#1033) — render at routine weight
+    # so a wall of green clears doesn't visually outweigh a single
+    # active alert. Checked before the payload-severity branch because
+    # cleared events inherit ``severity='warn'`` from the original alert
+    # and would otherwise dress up as ``recommendation``.
+    if kind == "alert.cleared":
+        return "routine"
     payload = row.get("payload") or {}
     if isinstance(payload, dict):
         sev = payload.get("severity")
@@ -649,7 +690,6 @@ def _severity_from_message_row(row: dict[str, Any]) -> str:
                 return "critical"
             if sev in {"warn", "warning"}:
                 return "recommendation"
-    kind = _kind_from_message_row(row)
     if kind in {"alert", "recovery"}:
         return "recommendation"
     if kind in {"error", "stuck"}:

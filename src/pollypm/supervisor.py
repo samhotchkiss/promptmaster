@@ -2428,7 +2428,11 @@ class Supervisor:
                 # manual ``Resume auto-recovery`` button in
                 # ``cockpit_ui.py:_alert_action_resume_recovery``.
                 try:
-                    self._msg_store.clear_alert(session_name, alert_type)
+                    self._msg_store.clear_alert(
+                        session_name,
+                        alert_type,
+                        who_cleared=f"auto:supervisor-recovery:{alert_type}",
+                    )
                     if alert_type == "recovery_limit":
                         self.store.upsert_session_runtime(
                             session_name=session_name,
