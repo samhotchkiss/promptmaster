@@ -469,6 +469,179 @@ def _clear_plan_missing_alert(services: Any, *, project: str) -> None:
         )
 
 
+def _review_pending_session_name(project: str, task_number: int) -> str:
+    """Return the synthetic session name used for review-pending alerts.
+
+    #1053: review-state tasks are work-for-the-human (approve / reject /
+    inspect). The session_name pattern ``review-<project>-<N>`` lets the
+    cockpit's per-session alert grouping sort these alongside other
+    per-task signals while remaining idempotent in ``upsert_alert``.
+    """
+    return f"review-{project}-{task_number}"
+
+
+def _emit_review_pending_alert(
+    services: Any,
+    *,
+    project: str,
+    task: Any,
+) -> None:
+    """Raise (or refresh) a ``review_pending`` alert for a review-state task.
+
+    #1053 — mirror of :func:`_emit_plan_missing_alert`. Each task in
+    ``review`` state produces one alert, keyed by the
+    ``review-<project>-<N>`` session_name so repeat sweep ticks just
+    refresh the row via ``upsert_alert``'s
+    ``(session_name, alert_type, status='open')`` dedupe.
+    """
+    store = services.msg_store or services.state_store
+    if store is None:
+        return
+    # #1001: project-existence guard. When the registry is non-empty and
+    # ``project`` isn't in it, the project is a ghost — drop the alert.
+    known_keys = _known_project_keys(services)
+    if known_keys and project not in known_keys:
+        return
+    task_number = getattr(task, "task_number", None)
+    if task_number is None:
+        return
+    title = getattr(task, "title", "") or ""
+    task_n = f"{project}/{task_number}"
+    session_name = _review_pending_session_name(project, int(task_number))
+    message = (
+        f"Task {task_n} is awaiting human review: \"{title}\". "
+        f"Run `pm task approve {task_n}` to approve, "
+        f"`pm task reject {task_n}` to reject, or "
+        f"`pm task get {task_n}` to read the review summary."
+    )
+    try:
+        store.upsert_alert(session_name, "review_pending", "warn", message)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: upsert_alert(review_pending) failed for %s",
+            session_name, exc_info=True,
+        )
+
+
+def _clear_review_pending_alert(
+    services: Any, *, project: str, task_number: int,
+) -> None:
+    """Clear the open ``review_pending`` alert for a task if present.
+
+    #1053 — fired when a task transitions out of ``review`` (approved,
+    rejected back to rework, cancelled, etc.). Mirror of
+    :func:`_clear_plan_missing_alert`.
+    """
+    store = services.msg_store or services.state_store
+    if store is None:
+        return
+    session_name = _review_pending_session_name(project, int(task_number))
+    try:
+        store.clear_alert(session_name, "review_pending")
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: clear_alert(review_pending) failed for %s",
+            session_name, exc_info=True,
+        )
+
+
+def _sweep_stale_review_pending_alerts(
+    services: Any,
+    seen: set[tuple[str, int]],
+) -> int:
+    """Close ``review_pending`` alerts for tasks no longer in ``review``.
+
+    #1053 — companion to :func:`_emit_review_pending_alert`. Walks the
+    open alert set looking for rows with ``alert_type ==
+    'review_pending'`` whose ``session_name`` decodes to a
+    ``(project, task_number)`` key that wasn't observed during this
+    sweep cycle (because the task was approved / rejected / cancelled).
+    Mirrors the ``alert.cleared`` lifecycle pattern from #1033.
+
+    Returns the count of cleared alerts (observability — folded into
+    the sweep handler's result dict).
+    """
+    store = services.msg_store or services.state_store
+    if store is None:
+        return 0
+    pairs: list[tuple[str, str]] = []
+    query = getattr(store, "query_messages", None)
+    if callable(query):
+        try:
+            for row in query(type="alert", state="open"):
+                if str(row.get("sender") or "") != "review_pending":
+                    continue
+                pairs.append(
+                    (str(row.get("scope") or ""), "review_pending"),
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_assignment sweep: review_pending query_messages failed",
+                exc_info=True,
+            )
+            pairs = []
+    if not pairs:
+        list_open = getattr(store, "open_alerts", None)
+        if callable(list_open):
+            try:
+                for alert in list_open():
+                    if str(getattr(alert, "alert_type", "") or "") != "review_pending":
+                        continue
+                    pairs.append(
+                        (
+                            str(getattr(alert, "session_name", "") or ""),
+                            "review_pending",
+                        ),
+                    )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "task_assignment sweep: review_pending open_alerts failed",
+                    exc_info=True,
+                )
+                return 0
+    cleared = 0
+    for scope, alert_type in pairs:
+        decoded = _decode_review_pending_session_name(scope)
+        if decoded is None:
+            continue
+        if decoded in seen:
+            continue
+        try:
+            store.clear_alert(scope, alert_type)
+            cleared += 1
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_assignment sweep: clear_alert(review_pending) failed for %s",
+                scope, exc_info=True,
+            )
+    return cleared
+
+
+def _decode_review_pending_session_name(scope: str) -> tuple[str, int] | None:
+    """Decode a ``review-<project>-<N>`` session_name back to its key.
+
+    Returns ``None`` for any string that doesn't match the pattern (the
+    trailing token must be a positive integer task number; the
+    ``review-`` prefix is required). ``project`` keys may legally
+    contain dashes themselves so we anchor on the trailing
+    ``-<digits>`` and treat everything between the ``review-`` prefix
+    and that suffix as the project key.
+    """
+    if not scope.startswith("review-"):
+        return None
+    body = scope[len("review-"):]
+    head, sep, tail = body.rpartition("-")
+    if not sep or not head or not tail:
+        return None
+    try:
+        task_number = int(tail)
+    except ValueError:
+        return None
+    if task_number <= 0:
+        return None
+    return head, task_number
+
+
 def _sweep_ghost_project_alerts(services: Any) -> int:
     """Clear ``no_session*`` alerts whose project is no longer registered.
 
@@ -647,6 +820,7 @@ def _sweep_work_service(
     alerted_pairs: set[tuple[str, str]],
     plan_missing_projects: set[str],
     plan_decisions: dict[str, bool],
+    review_pending_tasks: set[tuple[str, int]] | None = None,
     project_path: Any = None,
     project: Any = None,
 ) -> None:
@@ -695,6 +869,29 @@ def _sweep_work_service(
             )
             continue
         for task in tasks:
+            # #1053: surface review-state tasks via a ``review_pending``
+            # alert so ``pm alerts`` shows the user what's awaiting their
+            # approval. Emission is independent of the assignment-notify
+            # path below — even if no machine actor is bound, a task in
+            # ``review`` is by definition work-for-the-human and should
+            # be visible. Tracked so the post-sweep clearing pass can
+            # close alerts whose task transitioned out of ``review``.
+            if (
+                review_pending_tasks is not None
+                and status == WorkStatus.REVIEW.value
+            ):
+                review_project = getattr(task, "project", None)
+                review_task_n = getattr(task, "task_number", None)
+                if review_project and review_task_n is not None:
+                    review_pending_tasks.add(
+                        (str(review_project), int(review_task_n)),
+                    )
+                    _emit_review_pending_alert(
+                        services,
+                        project=str(review_project),
+                        task=task,
+                    )
+
             event = _build_event_for_task(work, task)
             if event is None:
                 continue
@@ -1432,6 +1629,11 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
     alerted_pairs: set[tuple[str, str]] = set()
     plan_missing_projects: set[str] = set()
     plan_decisions: dict[str, bool] = {}
+    # #1053: ``(project, task_number)`` pairs for tasks observed in
+    # ``review`` state during this sweep cycle. After the sweep, any
+    # open ``review_pending`` alert whose key isn't in this set is
+    # stale (task approved / rejected / cancelled) and gets cleared.
+    review_pending_tasks: set[tuple[str, int]] = set()
     projects_scanned = 0
     projects_skipped = 0
 
@@ -1460,6 +1662,7 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
                 alerted_pairs=alerted_pairs,
                 plan_missing_projects=plan_missing_projects,
                 plan_decisions=plan_decisions,
+                review_pending_tasks=review_pending_tasks,
                 project_path=None,
             )
         finally:
@@ -1513,6 +1716,7 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
                 alerted_pairs=alerted_pairs,
                 plan_missing_projects=plan_missing_projects,
                 plan_decisions=plan_decisions,
+                review_pending_tasks=review_pending_tasks,
                 project_path=getattr(project, "path", None),
                 project=project,
             )
@@ -1542,6 +1746,16 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
             projects_scanned += 1
         finally:
             _close_quietly(project_work)
+
+    # #1053: clear stale ``review_pending`` alerts. Walk every open
+    # alert with ``alert_type == 'review_pending'`` and close any whose
+    # ``(project, task_number)`` key wasn't observed in the review-state
+    # tracking set above. Tasks that were approved, rejected, or
+    # cancelled since the previous sweep tick are no longer in
+    # ``review`` and shouldn't keep nagging the user.
+    review_pending_cleared = _sweep_stale_review_pending_alerts(
+        services, review_pending_tasks,
+    )
 
     # #1005: after the sweep has refreshed the open alert set, walk any
     # ``<role>/no_session`` alerts and attempt auto-recovery
@@ -1575,5 +1789,7 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
         "projects_skipped": projects_skipped,
         "no_session_alerts": len(alerted_pairs),
         "plan_missing_alerts": len(plan_missing_projects),
+        "review_pending_alerts": len(review_pending_tasks),
+        "review_pending_cleared": review_pending_cleared,
         "no_session_auto_recovery": spawn_summary,
     }
