@@ -32,6 +32,7 @@ from typing import Any, Iterator
 
 from sqlalchemy import Executable, MetaData, and_, delete, insert, select, text, update
 from sqlalchemy.engine import Connection, CursorResult, Engine
+from sqlalchemy.exc import IntegrityError
 
 from pollypm.store.engine import make_engines
 from pollypm.store.event_buffer import EventBuffer
@@ -154,11 +155,61 @@ class SQLAlchemyStore:
         ``metadata.create_all`` is itself idempotent thanks to SQLAlchemy's
         ``checkfirst=True`` default, and the FTS DDL uses ``IF NOT EXISTS``
         guards, so re-running on an already-bootstrapped DB is a no-op.
+
+        #1044 — Before installing the partial unique index that enforces
+        ``one open alert per (scope, sender)``, run a one-shot backfill
+        that closes any duplicate open alert rows the pre-fix race left
+        behind. Without this, ``CREATE UNIQUE INDEX`` would fail on any
+        workspace whose ``pm alerts`` output already shows duplicate
+        rows (the exact symptom the issue was filed for). The backfill
+        keeps the *oldest* row id per ``(type='alert', scope, sender)``
+        group and marks the rest as ``closed`` — the operator-facing
+        view de-duplicates in the same heartbeat tick the upgrade lands.
         """
         metadata.create_all(self._write_engine)
         with self.transaction() as conn:
+            # Run the backfill first so the partial unique index DDL
+            # below doesn't trip over pre-existing duplicates.
+            self._collapse_duplicate_open_alerts(conn)
             for stmt in FTS_DDL_STATEMENTS:
                 conn.execute(text(stmt))
+
+    @staticmethod
+    def _collapse_duplicate_open_alerts(conn: Connection) -> int:
+        """Close duplicate open alert rows, keeping the oldest id per group.
+
+        #1044 — backfill helper. Returns the number of rows closed (0 on
+        a clean DB). Called from :meth:`_bootstrap_schema` immediately
+        before the partial unique index is created so the ``CREATE
+        UNIQUE INDEX`` statement doesn't fail on existing dupes.
+
+        Group key is ``(type='alert', scope, sender)`` — same tuple the
+        unique index constrains. Within each group the smallest ``id``
+        survives ('older first', matching the issue's "keep older" ask)
+        and every other open row is flipped to ``state='closed'`` with a
+        ``closed_at`` timestamp so downstream surfaces (cockpit,
+        ``pm alerts``) see exactly one open row per project / alert
+        type.
+        """
+        now = datetime.now(timezone.utc)
+        result = conn.execute(
+            text(
+                """
+                UPDATE messages
+                SET state = 'closed', closed_at = :now, updated_at = :now
+                WHERE type = 'alert'
+                  AND state = 'open'
+                  AND id NOT IN (
+                      SELECT MIN(id)
+                      FROM messages
+                      WHERE type = 'alert' AND state = 'open'
+                      GROUP BY scope, sender, recipient
+                  )
+                """
+            ),
+            {"now": now},
+        )
+        return int(result.rowcount or 0)
 
     # ------------------------------------------------------------------
     # Event log — firehose ('event' type) entries.
@@ -333,50 +384,97 @@ class SQLAlchemyStore:
         now = datetime.now(timezone.utc)
         payload_json = json.dumps(payload if payload is not None else {})
         labels_json = json.dumps(labels if labels is not None else [])
-        with self.transaction() as conn:
+
+        def _select_existing(conn: Connection) -> int | None:
             conditions = [messages.c.state == "open"]
             for field in dedupe_key:
                 conditions.append(messages.c[field] == local_vars[field])
-            existing = conn.execute(
+            row = conn.execute(
                 select(messages.c.id)
                 .where(and_(*conditions))
                 .order_by(messages.c.id.desc())
                 .limit(1)
             ).fetchone()
-            if existing is not None:
-                row_id = int(existing[0])
-                conn.execute(
-                    update(messages)
-                    .where(messages.c.id == row_id)
-                    .values(
-                        tier=tier,
-                        subject=stamped_subject,
-                        body=body,
-                        payload_json=payload_json,
-                        labels=labels_json,
-                        parent_id=parent_id,
-                        updated_at=now,
-                    )
+            return int(row[0]) if row is not None else None
+
+        def _apply_update(conn: Connection, row_id: int) -> None:
+            conn.execute(
+                update(messages)
+                .where(messages.c.id == row_id)
+                .values(
+                    tier=tier,
+                    subject=stamped_subject,
+                    body=body,
+                    payload_json=payload_json,
+                    labels=labels_json,
+                    parent_id=parent_id,
+                    updated_at=now,
                 )
-                return row_id
-            result = conn.execute(
-                insert(messages),
-                {
-                    "scope": scope,
-                    "type": type,
-                    "tier": tier,
-                    "recipient": recipient,
-                    "sender": sender,
-                    "state": "open",
-                    "parent_id": parent_id,
-                    "subject": stamped_subject,
-                    "body": body,
-                    "payload_json": payload_json,
-                    "labels": labels_json,
-                },
             )
-            inserted = result.inserted_primary_key
-        return int(inserted[0]) if inserted else 0
+
+        # First attempt: classic select-then-(update|insert) inside a
+        # single writer transaction. Single-process this is race-free
+        # because the writer pool is size=1; cross-process the SELECT
+        # may see a stale snapshot and the INSERT may collide with the
+        # partial unique index (#1044). On IntegrityError we retry
+        # exactly once — a second SELECT now sees the row the other
+        # writer just committed, and we land on the UPDATE branch
+        # instead of inserting a second open row.
+        try:
+            with self.transaction() as conn:
+                existing_id = _select_existing(conn)
+                if existing_id is not None:
+                    _apply_update(conn, existing_id)
+                    return existing_id
+                result = conn.execute(
+                    insert(messages),
+                    {
+                        "scope": scope,
+                        "type": type,
+                        "tier": tier,
+                        "recipient": recipient,
+                        "sender": sender,
+                        "state": "open",
+                        "parent_id": parent_id,
+                        "subject": stamped_subject,
+                        "body": body,
+                        "payload_json": payload_json,
+                        "labels": labels_json,
+                    },
+                )
+                inserted = result.inserted_primary_key
+            return int(inserted[0]) if inserted else 0
+        except IntegrityError:
+            # #1044 — another writer raced us to the INSERT. The unique
+            # index rejected the duplicate, which is the correct
+            # outcome. Re-enter the transaction, re-SELECT, and update
+            # the row that won the race. If for some reason no row is
+            # visible on retry (the other writer rolled back), retry
+            # the INSERT once more — this is the only path that can
+            # legitimately race twice in a row.
+            with self.transaction() as conn:
+                existing_id = _select_existing(conn)
+                if existing_id is not None:
+                    _apply_update(conn, existing_id)
+                    return existing_id
+                result = conn.execute(
+                    insert(messages),
+                    {
+                        "scope": scope,
+                        "type": type,
+                        "tier": tier,
+                        "recipient": recipient,
+                        "sender": sender,
+                        "state": "open",
+                        "parent_id": parent_id,
+                        "subject": stamped_subject,
+                        "body": body,
+                        "payload_json": payload_json,
+                        "labels": labels_json,
+                    },
+                )
+                inserted = result.inserted_primary_key
+            return int(inserted[0]) if inserted else 0
 
     def execute(self, stmt: Executable) -> CursorResult[Any]:
         """Execute an arbitrary SQLAlchemy Core statement in a write tx.
@@ -605,7 +703,44 @@ class SQLAlchemyStore:
         cockpit/alert readers can still filter by severity without a
         dedicated column. The subject is auto-tagged ``[Alert]`` by
         :func:`apply_title_contract`.
+
+        #1044 — increments a ``payload['occurrences']`` counter on every
+        re-emit so operators can tell a chronic alert from a one-shot.
+        The counter starts at 1 on first emit; each idempotent re-emit
+        bumps it. The bump is observed inside the same writer
+        transaction that ``upsert_message`` opens, so cross-process
+        races round-trip through the partial unique index instead of
+        producing two rows with ``occurrences=1`` each.
         """
+        # Look up any existing open row to compute the next occurrences
+        # value. This second read is cheap (the dedupe index covers it)
+        # and it lets us hand a fully-materialised payload to
+        # ``upsert_message`` without teaching that helper the alert-
+        # specific counter semantics.
+        with self._read_engine.connect() as conn:
+            existing_row = conn.execute(
+                select(messages.c.payload_json)
+                .where(
+                    and_(
+                        messages.c.type == "alert",
+                        messages.c.scope == session_name,
+                        messages.c.sender == alert_type,
+                        messages.c.state == "open",
+                    )
+                )
+                .order_by(messages.c.id.desc())
+                .limit(1)
+            ).fetchone()
+        prior_occurrences = 0
+        if existing_row is not None:
+            try:
+                prior_payload = json.loads(existing_row[0] or "{}")
+            except json.JSONDecodeError:
+                prior_payload = {}
+            if isinstance(prior_payload, dict):
+                raw = prior_payload.get("occurrences", 0)
+                if isinstance(raw, int) and raw > 0:
+                    prior_occurrences = raw
         self.upsert_message(
             type="alert",
             tier="immediate",
@@ -614,7 +749,11 @@ class SQLAlchemyStore:
             subject=message,
             body="",
             scope=session_name,
-            payload={"severity": severity, "session_name": session_name},
+            payload={
+                "severity": severity,
+                "session_name": session_name,
+                "occurrences": prior_occurrences + 1,
+            },
         )
 
     def clear_alert(

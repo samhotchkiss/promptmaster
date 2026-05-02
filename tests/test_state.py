@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from pollypm.storage.state import TokenUsageHourlyRecord
 from pollypm.storage.state import StateStore
 
@@ -184,6 +186,69 @@ def test_memory_entry_tags_survives_corrupt_non_list_value(tmp_path: Path) -> No
     assert fetched is not None
     # Without the fix this would have been ('oops',) — the dict's keys.
     assert fetched.tags == ()
+    store.close()
+
+
+def test_state_store_upsert_alert_is_idempotent_and_bumps_occurrences(
+    tmp_path: Path,
+) -> None:
+    """#1044 — repeating ``upsert_alert`` for the same ``(scope, sender)``
+    must produce one open row whose ``payload['occurrences']`` counts the
+    re-emits, and the partial unique index must reject any manual
+    duplicate INSERT that would otherwise leak two open rows.
+    """
+    import json
+    import sqlite3
+
+    db_path = tmp_path / "state.db"
+    store = StateStore(db_path)
+    store.upsert_session(
+        name="plan_gate-pollypm",
+        role="worker",
+        project="pollypm",
+        provider="codex",
+        account="codex_primary",
+        cwd=str(tmp_path),
+        window_name="plan_gate-pollypm",
+    )
+    for _ in range(3):
+        store.upsert_alert(
+            "plan_gate-pollypm",
+            "plan_missing",
+            "warn",
+            "Project 'pollypm' has no approved plan yet",
+        )
+    alerts = store.open_alerts()
+    assert len(alerts) == 1
+    # Fetch the payload_json directly to read the occurrences counter.
+    row = store.execute(
+        "SELECT payload_json FROM messages WHERE id = ?",
+        (alerts[0].alert_id,),
+    ).fetchone()
+    payload = json.loads(row[0])
+    assert payload["occurrences"] == 3
+
+    # The partial unique index must reject a hand-crafted duplicate.
+    with pytest.raises(sqlite3.IntegrityError):
+        store.execute(
+            """
+            INSERT INTO messages (
+                scope, type, tier, recipient, sender, state,
+                subject, body, payload_json, labels, created_at, updated_at
+            )
+            VALUES (?, 'alert', 'immediate', 'user', ?, 'open', ?, '', '{}', '[]', ?, ?)
+            """,
+            (
+                "plan_gate-pollypm",
+                "plan_missing",
+                "[Alert] dup",
+                store._now(),
+                store._now(),
+            ),
+        )
+    # Recover the connection from the failed INSERT so cleanup paths
+    # don't trip on a half-open transaction.
+    store._conn.rollback()
     store.close()
 
 

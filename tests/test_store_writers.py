@@ -288,6 +288,188 @@ class TestAlertWrappers:
 
 
 # ---------------------------------------------------------------------------
+# #1044 — alert-emit idempotency contract
+# ---------------------------------------------------------------------------
+
+
+class TestAlertIdempotency1044:
+    """The alert-emit path must produce exactly one open row per
+    ``(scope, sender)`` even under concurrent emitters. The contract has
+    three parts: the upsert path bumps an ``occurrences`` counter on the
+    surviving row, the partial unique index rejects manual duplicate
+    inserts, and the bootstrap backfill collapses pre-existing dupes
+    inherited from older builds.
+    """
+
+    def test_emit_twice_keeps_one_row_and_bumps_occurrences(
+        self, store: SQLAlchemyStore
+    ) -> None:
+        store.upsert_alert(
+            session_name="plan_gate-pollypm",
+            alert_type="plan_missing",
+            severity="warn",
+            message="Project 'pollypm' has no approved plan yet",
+        )
+        store.upsert_alert(
+            session_name="plan_gate-pollypm",
+            alert_type="plan_missing",
+            severity="warn",
+            message="Project 'pollypm' has no approved plan yet",
+        )
+
+        rows = store.query_messages(
+            type="alert", scope="plan_gate-pollypm", state="open",
+        )
+        assert len(rows) == 1, (
+            "second upsert_alert must not insert a second open row — "
+            f"got {len(rows)} open rows for plan_gate-pollypm/plan_missing"
+        )
+        assert rows[0]["payload"]["occurrences"] == 2
+
+    def test_partial_unique_index_rejects_manual_duplicate(
+        self, store: SQLAlchemyStore
+    ) -> None:
+        from sqlalchemy.exc import IntegrityError as _IntegrityError
+
+        store.upsert_alert(
+            session_name="plan_gate-polly_remote",
+            alert_type="plan_missing",
+            severity="warn",
+            message="seed",
+        )
+        # A direct INSERT (the exact shape that bypassed dedupe pre-#1044
+        # — see the test_activity_feed_panel ``_seed_alert`` helper) must
+        # fail loudly. The partial unique index converts the silent
+        # double-row bug into a hard error the upsert path can catch.
+        with pytest.raises(_IntegrityError):
+            with store.transaction() as conn:
+                conn.execute(
+                    insert(messages),
+                    {
+                        "scope": "plan_gate-polly_remote",
+                        "type": "alert",
+                        "tier": "immediate",
+                        "recipient": "user",
+                        "sender": "plan_missing",
+                        "state": "open",
+                        "subject": "[Alert] dup",
+                        "body": "",
+                        "payload_json": "{}",
+                        "labels": "[]",
+                    },
+                )
+
+    def test_partial_index_does_not_constrain_closed_rows(
+        self, store: SQLAlchemyStore
+    ) -> None:
+        # Closed rows are part of the audit trail and are intentionally
+        # not deduped — only ``state='open'`` rows compete for the
+        # uniqueness slot. Two closed rows for the same alert-key must
+        # coexist so historical replays survive.
+        for _ in range(3):
+            with store.transaction() as conn:
+                conn.execute(
+                    insert(messages),
+                    {
+                        "scope": "plan_gate-history",
+                        "type": "alert",
+                        "tier": "immediate",
+                        "recipient": "user",
+                        "sender": "plan_missing",
+                        "state": "closed",
+                        "subject": "[Alert] historical",
+                        "body": "",
+                        "payload_json": "{}",
+                        "labels": "[]",
+                    },
+                )
+        rows = store.query_messages(type="alert", scope="plan_gate-history")
+        assert len(rows) == 3
+
+    def test_backfill_collapses_existing_open_dupes_on_bootstrap(
+        self, tmp_path: Path,
+    ) -> None:
+        # Simulate the workspace-in-the-wild state from issue #1044:
+        # two open ``plan_gate-pollypm/plan_missing`` rows already exist
+        # before the migration runs. We have to construct that state
+        # without the partial index, so we open the DB raw, create the
+        # ``messages`` table without the index, seed the dupes, then let
+        # SQLAlchemyStore bootstrap on the pre-populated DB. Bootstrap
+        # must close all but the oldest id and only then install the
+        # partial index — otherwise the index DDL itself would fail.
+        import sqlite3
+
+        db_path = tmp_path / "preexisting.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    tier TEXT NOT NULL DEFAULT 'immediate',
+                    recipient TEXT NOT NULL,
+                    sender TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'open',
+                    parent_id INTEGER,
+                    subject TEXT NOT NULL,
+                    body TEXT NOT NULL DEFAULT '',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    labels TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    closed_at TEXT
+                )
+                """
+            )
+            for _ in range(3):
+                conn.execute(
+                    """
+                    INSERT INTO messages (
+                        scope, type, tier, recipient, sender, state,
+                        subject, body, payload_json, labels
+                    )
+                    VALUES (?, 'alert', 'immediate', 'user', ?, 'open', ?, '', '{}', '[]')
+                    """,
+                    (
+                        "plan_gate-pollypm",
+                        "plan_missing",
+                        "[Alert] Project 'pollypm' has no approved plan yet",
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Open through SQLAlchemyStore — this triggers the bootstrap
+        # backfill + index install.
+        store = SQLAlchemyStore(f"sqlite:///{db_path}")
+        try:
+            open_rows = store.query_messages(
+                type="alert", scope="plan_gate-pollypm", state="open",
+            )
+            assert len(open_rows) == 1, (
+                "backfill must collapse pre-existing duplicate open alerts "
+                f"down to one — saw {len(open_rows)}"
+            )
+            # The kept row is the oldest id.
+            kept = open_rows[0]
+            with store.read_engine.connect() as conn:
+                rows = conn.execute(
+                    select(messages.c.id, messages.c.state)
+                    .where(messages.c.scope == "plan_gate-pollypm")
+                    .order_by(messages.c.id.asc())
+                ).all()
+            assert kept["id"] == rows[0][0]
+            # Two of the three are now closed.
+            closed_count = sum(1 for _, state in rows if state == "closed")
+            assert closed_count == 2
+        finally:
+            store.close()
+
+
+# ---------------------------------------------------------------------------
 # execute() escape hatch
 # ---------------------------------------------------------------------------
 

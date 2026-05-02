@@ -845,6 +845,15 @@ class StateStore:
         # Move the remaining message-shaped rows into the unified
         # ``messages`` table, then retire the legacy tables outright.
         (15, "Retire legacy events / alerts / task_notifications tables", []),
+        # --- Migration 16 ----------------------------------------------
+        # #1044 — collapse duplicate open alerts and install the
+        # partial unique index that pins the dedupe contract. The
+        # migration body is empty; the dispatch block below handles
+        # backfill (UPDATE that closes the dupes) before the
+        # ``CREATE UNIQUE INDEX`` statement runs, so we don't trip the
+        # index creation on a workspace whose ``pm alerts`` already
+        # showed dupes.
+        (16, "Collapse duplicate open alerts + partial unique index (#1044)", []),
     ]
 
     def _migrate(self) -> None:
@@ -1068,6 +1077,46 @@ class StateStore:
                 self.execute("DROP TABLE IF EXISTS task_notifications")
                 self.execute("DROP TABLE IF EXISTS alerts")
                 self.execute("DROP TABLE IF EXISTS events")
+            elif version == 16:
+                # #1044 — backfill duplicates first, then install the
+                # partial unique index. The ``messages`` table only
+                # exists if migration 15 has run (or the schema was
+                # bootstrapped fresh after 15), but on fresh DBs the
+                # SQLAlchemyStore bootstrap creates the table via
+                # ``metadata.create_all`` before this migration runs,
+                # so we feature-detect the table to stay safe on the
+                # rare DB that opens StateStore without ever having
+                # opened SQLAlchemyStore.
+                if self.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+                ).fetchone():
+                    now = self._now()
+                    # Close every duplicate open alert row, keeping the
+                    # oldest id per ``(scope, sender, recipient)``
+                    # group. The index DDL below would fail on a DB
+                    # that still has dupes, so order matters.
+                    self.execute(
+                        """
+                        UPDATE messages
+                        SET state = 'closed', closed_at = ?, updated_at = ?
+                        WHERE type = 'alert'
+                          AND state = 'open'
+                          AND id NOT IN (
+                              SELECT MIN(id)
+                              FROM messages
+                              WHERE type = 'alert' AND state = 'open'
+                              GROUP BY scope, sender, recipient
+                          )
+                        """,
+                        (now, now),
+                    )
+                    self.execute(
+                        """
+                        CREATE UNIQUE INDEX IF NOT EXISTS messages_open_alert_uniq
+                        ON messages(scope, sender, recipient, type)
+                        WHERE state = 'open' AND type = 'alert'
+                        """
+                    )
             self.execute(
                 "INSERT INTO schema_version (version, description, applied_at) VALUES (?, ?, ?)",
                 (version, description, datetime.now(UTC).isoformat()),
@@ -1387,67 +1436,157 @@ class StateStore:
 
     def upsert_alert(self, session_name: str, alert_type: str, severity: str, message: str) -> None:
         now = self._now()
-        # Use INSERT OR IGNORE + UPDATE to avoid check-then-act race
+        # #1044 — race-resilient upsert. The single-process path is
+        # serialised by ``self._lock``, but cross-process (heartbeat
+        # process + per-project sweep) two writers can both SELECT, see
+        # no row, and both INSERT — that's how 4-row dupes leak into
+        # ``pm alerts``. The partial unique index ``messages_open_alert_uniq``
+        # (installed by :class:`SQLAlchemyStore` bootstrap) rejects the
+        # second INSERT with ``sqlite3.IntegrityError``; on that error
+        # we re-SELECT and update the row the other writer just
+        # committed, which folds the bump into the existing alert
+        # instead of producing a second open copy.
         with self._lock:
-            existing = self._conn.execute(
-                """
-                SELECT id
-                FROM messages
-                WHERE type = 'alert'
-                  AND scope = ?
-                  AND sender = ?
-                  AND state = 'open'
-                """,
-                (session_name, alert_type),
-            ).fetchone()
-            if existing is None:
-                self._conn.execute(
-                    """
-                    INSERT INTO messages (
-                        scope, type, tier, recipient, sender, state,
-                        subject, body, payload_json, labels, created_at, updated_at
+            row_id, prior_occurrences = self._select_open_alert(
+                session_name, alert_type
+            )
+            payload_json = json.dumps(
+                {
+                    "severity": severity,
+                    "session_name": session_name,
+                    "occurrences": prior_occurrences + 1,
+                }
+            )
+            try:
+                if row_id is None:
+                    self._conn.execute(
+                        """
+                        INSERT INTO messages (
+                            scope, type, tier, recipient, sender, state,
+                            subject, body, payload_json, labels, created_at, updated_at
+                        )
+                        VALUES (?, 'alert', 'immediate', 'user', ?, 'open', ?, '', ?, '[]', ?, ?)
+                        """,
+                        (
+                            session_name,
+                            alert_type,
+                            f"[Alert] {message}",
+                            payload_json,
+                            now,
+                            now,
+                        ),
                     )
-                    VALUES (?, 'alert', 'immediate', 'user', ?, 'open', ?, '', ?, '[]', ?, ?)
-                    """,
-                    (
-                        session_name,
-                        alert_type,
-                        f"[Alert] {message}",
-                        json.dumps(
-                            {
-                                "severity": severity,
-                                "session_name": session_name,
-                            }
+                else:
+                    self._conn.execute(
+                        """
+                        UPDATE messages
+                        SET subject = ?, payload_json = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            f"[Alert] {message}",
+                            payload_json,
+                            now,
+                            row_id,
                         ),
-                        now,
-                        now,
-                    ),
+                    )
+            except sqlite3.IntegrityError:
+                # Lost the race against another writer's INSERT. Roll
+                # back the partial transaction, re-read the now-visible
+                # row, and apply our bump as an UPDATE.
+                self._conn.rollback()
+                row_id, prior_occurrences = self._select_open_alert(
+                    session_name, alert_type
                 )
-            else:
-                self._conn.execute(
-                    """
-                    UPDATE messages
-                    SET subject = ?, payload_json = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        f"[Alert] {message}",
-                        json.dumps(
-                            {
-                                "severity": severity,
-                                "session_name": session_name,
-                            }
+                if row_id is None:
+                    # The other writer rolled back too. One more INSERT
+                    # attempt; if this one fails the IntegrityError
+                    # propagates because something is genuinely wrong.
+                    payload_json = json.dumps(
+                        {
+                            "severity": severity,
+                            "session_name": session_name,
+                            "occurrences": prior_occurrences + 1,
+                        }
+                    )
+                    self._conn.execute(
+                        """
+                        INSERT INTO messages (
+                            scope, type, tier, recipient, sender, state,
+                            subject, body, payload_json, labels, created_at, updated_at
+                        )
+                        VALUES (?, 'alert', 'immediate', 'user', ?, 'open', ?, '', ?, '[]', ?, ?)
+                        """,
+                        (
+                            session_name,
+                            alert_type,
+                            f"[Alert] {message}",
+                            payload_json,
+                            now,
+                            now,
                         ),
-                        now,
-                        existing[0],
-                    ),
-                )
+                    )
+                else:
+                    payload_json = json.dumps(
+                        {
+                            "severity": severity,
+                            "session_name": session_name,
+                            "occurrences": prior_occurrences + 1,
+                        }
+                    )
+                    self._conn.execute(
+                        """
+                        UPDATE messages
+                        SET subject = ?, payload_json = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            f"[Alert] {message}",
+                            payload_json,
+                            now,
+                            row_id,
+                        ),
+                    )
             self._conn.commit()
             try:
                 from pollypm.state_epoch import bump
                 bump()
             except Exception:  # noqa: BLE001
                 pass
+
+    def _select_open_alert(
+        self, session_name: str, alert_type: str
+    ) -> tuple[int | None, int]:
+        """Return ``(row_id, occurrences)`` for the open alert row, or ``(None, 0)``.
+
+        Helper for :meth:`upsert_alert`. Reads the current ``occurrences``
+        counter (#1044) so the next emit can bump it by one. The
+        counter rides in ``payload_json`` to avoid a schema change and
+        defaults to ``0`` when missing or malformed.
+        """
+        existing = self._conn.execute(
+            """
+            SELECT id, payload_json
+            FROM messages
+            WHERE type = 'alert'
+              AND scope = ?
+              AND sender = ?
+              AND state = 'open'
+            """,
+            (session_name, alert_type),
+        ).fetchone()
+        if existing is None:
+            return None, 0
+        try:
+            payload = json.loads(existing[1] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        prior = 0
+        if isinstance(payload, dict):
+            raw = payload.get("occurrences", 0)
+            if isinstance(raw, int) and raw > 0:
+                prior = raw
+        return int(existing[0]), prior
 
     def clear_alert(self, session_name: str, alert_type: str) -> None:
         self.execute(

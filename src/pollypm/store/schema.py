@@ -136,6 +136,23 @@ FTS_DDL_STATEMENTS: list[str] = [
         content_rowid='id'
     )
     """,
+    # #1044 — Partial unique index that pins down the alert-emit dedupe
+    # contract. The legacy upsert_message check-then-act path was racy
+    # across processes (heartbeat sweep + per-project sweep both writing
+    # to the same DB through separate writer pools), letting two open
+    # rows with the same (scope, sender, type='alert', recipient='user')
+    # coexist. This partial index converts that race into an
+    # IntegrityError that the upsert path catches and re-runs as an
+    # update. SQLite supports partial indexes with WHERE clauses; the
+    # index is keyed on the alert-dedupe tuple plus state='open' so it
+    # only constrains live alerts (closed rows are duplicate-allowed
+    # because their lifecycle has ended). The IF NOT EXISTS guard keeps
+    # bootstrap idempotent on already-migrated DBs.
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS messages_open_alert_uniq
+    ON messages(scope, sender, recipient, type)
+    WHERE state = 'open' AND type = 'alert'
+    """,
     # After-insert: project new row into the FTS shadow.
     """
     CREATE TRIGGER IF NOT EXISTS messages_ai

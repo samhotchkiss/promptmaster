@@ -359,9 +359,17 @@ def test_new_event_count_none_projector() -> None:
 
 def _seed_alert(
     state_db: Path, session: str, alert_type: str, message: str,
+    *, state: str = "open",
 ) -> None:
     """Insert one ``type='alert'`` row directly so we can prove the
-    projector dedupes repeats (#867) without relying on upsert semantics."""
+    projector dedupes repeats (#867) without relying on upsert semantics.
+
+    #1044 — the partial unique index ``messages_open_alert_uniq`` rejects
+    a second ``state='open'`` row for the same ``(scope, sender)``, so
+    callers that need multiple historical rows must pass ``state='closed'``
+    on every row past the first. The projector dedupe path inspects every
+    alert entry regardless of state, so the dedupe assertion stays valid.
+    """
     import json as _json
 
     from sqlalchemy import insert as _insert
@@ -380,7 +388,7 @@ def _seed_alert(
                     "tier": "immediate",
                     "recipient": "user",
                     "sender": alert_type,
-                    "state": "open",
+                    "state": state,
                     "subject": message,
                     "body": "",
                     "payload_json": _json.dumps({"severity": "warn"}),
@@ -392,16 +400,26 @@ def _seed_alert(
 
 
 def test_event_projector_dedupes_repeated_alerts(tmp_path: Path) -> None:
-    """The same plan_gate alert recurring N times collapses to one row (#867)."""
+    """The same plan_gate alert recurring N times collapses to one row (#867).
+
+    #1044 — the storage layer now enforces ``one open alert per
+    (scope, sender)`` via a partial unique index, so the only way to
+    get 5 historical rows for the same alert is to keep the first
+    ``open`` and seed the rest as ``closed``. The projector dedupe
+    contract this test guards is independent of state — every
+    ``type='alert'`` row enters the dedupe path — so the assertion
+    still proves the projector itself collapses repeats.
+    """
     state_db = tmp_path / "state.db"
     StateStore(state_db).close()
 
-    for _ in range(5):
+    for index in range(5):
         _seed_alert(
             state_db,
             "plan_gate-demo",
             "plan_missing",
             "Project 'demo' has no approved plan yet — press c to plan it.",
+            state="open" if index == 0 else "closed",
         )
 
     projector = EventProjector(state_db)
