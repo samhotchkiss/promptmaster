@@ -200,37 +200,90 @@ def register_maintenance_commands(app: typer.Typer) -> None:
 
     @app.command()
     def errors(
+        raw: bool = typer.Option(
+            False, "--raw",
+            help=(
+                "Stream the literal ~/.pollypm/errors.log file (the pre-#1040 "
+                "behavior). Implied by --tail/--follow/--grep."
+            ),
+        ),
         tail: int = typer.Option(
             50, "--tail", "-n",
-            help="Show only the last N lines (0 = whole file).",
+            help="Raw-mode only: show the last N lines (0 = whole file).",
         ),
         follow: bool = typer.Option(
             False, "--follow", "-f",
-            help="Follow the log as new records land (Ctrl-C to stop).",
+            help="Raw-mode only: follow the log as new records land.",
         ),
         grep: str = typer.Option(
             "", "--grep", "-g",
-            help="Filter lines to those containing this substring.",
+            help="Raw-mode only: filter lines to those containing this substring.",
+        ),
+        since: str = typer.Option(
+            "24h", "--since",
+            help=(
+                "Summary window for ERROR-source rollup (e.g. 1h, 24h, 7d). "
+                "Ignored in raw mode."
+            ),
+        ),
+        fingerprint: str = typer.Option(
+            "", "--fingerprint",
+            help=(
+                "Expand one fingerprint hash (12-char prefix from "
+                "`error_log/critical_error:<hash>`) to its full traceback."
+            ),
         ),
     ) -> None:
-        """Show the centralized ``~/.pollypm/errors.log`` stream.
+        """Triage view over ``~/.pollypm/errors.log``.
 
-        Every PollyPM process (rail daemon, cockpit TUI, ``pm`` CLI
-        calls) writes WARNING+ records here — plugin crashes, SQLite
-        failures, provider errors, tracebacks from
-        ``logger.exception``. One place to grep when something looks
-        wrong.
+        Default (no flags) prints a summary: top ERROR sources by
+        ``pollypm.<module>`` over the last ``--since`` window plus
+        active fingerprints (>= 3 occurrences in the last hour) so
+        the user can see "what's broken" without scanning 40k log
+        lines. ``--raw`` (or ``--tail/--follow/--grep``) restores the
+        literal file dump for ``grep``-style spelunking.
         """
         import subprocess as _sp
+        from datetime import datetime
         from pollypm.error_log import path as _error_log_path
+        from pollypm import error_log_summary as _els
 
         log_path = _error_log_path()
         if not log_path.exists():
             typer.echo(f"No error log yet at {log_path}. All quiet.")
             raise typer.Exit(code=0)
 
-        # Stream via shell tools so ``--follow`` works identically to
-        # ``tail -f`` without reimplementing rotation-aware follow.
+        # ``--tail/--follow/--grep`` are raw-mode features. If any of
+        # them are set, keep the legacy behavior even without ``--raw``
+        # so existing muscle memory keeps working.
+        raw_mode_requested = (
+            raw or follow or bool(grep) or tail != 50
+        )
+
+        if not raw_mode_requested and not fingerprint:
+            try:
+                window = _els.parse_duration(since)
+            except ValueError as exc:
+                typer.echo(f"Invalid --since value: {exc}", err=True)
+                raise typer.Exit(code=2)
+            records = _els.read_log(log_path)
+            now = datetime.now()
+            summary = _els.summarize(
+                records,
+                now=now,
+                since=window,
+                window_label=since,
+            )
+            typer.echo(_els.render_summary(summary, now=now))
+            raise typer.Exit(code=0)
+
+        if fingerprint:
+            records = _els.read_log(log_path)
+            matches = _els.find_fingerprint_records(records, fingerprint)
+            typer.echo(_els.render_fingerprint(matches, fingerprint))
+            raise typer.Exit(code=0 if matches else 1)
+
+        # Raw mode — preserve the original tail/follow/grep behavior.
         cmd: list[str] = ["tail"]
         if tail <= 0:
             cmd = ["cat", str(log_path)]
