@@ -78,8 +78,21 @@ def register_worker_commands(app: typer.Typer) -> None:
             raise typer.Exit(code=2)
         from pollypm import cli as cli_mod
 
+        # ``pm worker-start`` deliberately does NOT require the caller to
+        # be inside the ``pollypm`` tmux session. The actual spawn uses
+        # ``tmux new-window -t <pollypm-storage-closet>:...`` (see
+        # ``Supervisor.tmux_session_for_launch``), which targets the
+        # storage-closet session by name rather than the current
+        # session — so a tmux gate would just push users into ``pm up``
+        # for no functional reason. This matters for #1055: alerts emit
+        # ``Try: pm worker-start --role architect <project>`` as a hint
+        # the user is meant to copy-paste from any shell when triaging
+        # ``no_session`` faults; gating that command behind tmux makes
+        # the alert hint dead-on-arrival. If you reintroduce a tmux
+        # check here, also fix the alert hint in
+        # ``plugins_builtin/task_assignment_notify/resolver.py`` so the
+        # two stay in sync.
         supervisor = cli_mod._load_supervisor(config_path)
-        cli_mod._require_pollypm_session(supervisor)
         existing = next(
             (
                 session

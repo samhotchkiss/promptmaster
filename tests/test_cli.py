@@ -414,6 +414,95 @@ def test_worker_start_role_architect_still_works(monkeypatch, tmp_path: Path) ->
     assert "Managed architect architect_pollypm ready for project pollypm" in result.output
 
 
+def test_worker_start_role_architect_works_outside_tmux(monkeypatch, tmp_path: Path) -> None:
+    """Regression for #1055: ``pm worker-start --role architect <project>``
+    succeeds from a non-tmux shell.
+
+    ``no_session`` alerts emit the hint ``Try: pm worker-start --role
+    architect <project>`` for users to copy-paste straight into a
+    regular terminal while triaging. Before #1055 the command bailed
+    with ``This command must run inside tmux session 'pollypm'`` because
+    a defensive ``_require_pollypm_session`` gate ran first — which is
+    wrong, because the actual spawn uses ``tmux new-window -t
+    pollypm-storage-closet:...`` (targets a session by name, not the
+    current session). This test pins the post-fix behavior: the gate
+    is NOT consulted, and the command completes normally with the
+    caller's tmux state set to "no current session" (i.e. ``$TMUX``
+    unset and ``current_session_name`` returning ``None``). If a future
+    change re-introduces the gate, this test fails fast.
+    """
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text("[project]\nname = \"pollypm\"\n")
+    created: list[tuple[Path, str, str | None, str, str | None]] = []
+    launched: list[tuple[Path, str]] = []
+
+    class FakeTmux:
+        def current_session_name(self):
+            # Caller is NOT in any tmux session — the bug case from #1055.
+            return None
+
+    class FakeSupervisor:
+        def __init__(self) -> None:
+            self.tmux = FakeTmux()
+            self.config = type(
+                "Config",
+                (),
+                {
+                    "sessions": {},
+                    "project": type("Project", (), {"tmux_session": "pollypm"})(),
+                },
+            )()
+
+        def storage_closet_session_name(self) -> str:
+            return "pollypm-storage-closet"
+
+        def tmux_session_for_launch(self, launch) -> str:
+            return "pollypm-storage-closet"
+
+        def plan_launches(self):
+            session = type("Session", (), {"name": "architect_pollypm"})()
+            return [type("Launch", (), {"session": session, "window_name": "architect-pollypm"})()]
+
+    # Note: we deliberately do NOT monkeypatch ``_require_pollypm_session``
+    # here. The whole point of the test is that the gate is gone for
+    # ``worker-start``, so the command must succeed even when the fake
+    # supervisor reports "no current tmux session".
+    monkeypatch.setattr(cli, "_load_supervisor", lambda path: FakeSupervisor())
+    monkeypatch.setattr(
+        cli,
+        "create_worker_session",
+        lambda path, project_key, prompt=None, role="worker", agent_profile=None: (
+            created.append((path, project_key, prompt, role, agent_profile))
+            or type("Session", (), {"name": "architect_pollypm"})()
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "launch_worker_session",
+        lambda path, session_name: launched.append((path, session_name)),
+    )
+    # Belt-and-braces: the underlying ``current_session_name`` reads
+    # ``$TMUX`` in some implementations. Strip it so we are unambiguously
+    # outside tmux from the OS's perspective too.
+    monkeypatch.delenv("TMUX", raising=False)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["worker-start", "pollypm", "--role", "architect",
+         "--config", str(config_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    # The pre-fix failure mode: BadParameter raised by the gate. Pin
+    # the absence of that exact phrasing so a regression surfaces with
+    # an obvious message rather than a generic "exit_code != 0".
+    assert "must run inside tmux session" not in result.output
+    assert created == [(config_path, "pollypm", None, "architect", None)]
+    assert launched == [(config_path, "architect_pollypm")]
+    assert "Managed architect architect_pollypm ready for project pollypm" in result.output
+
+
 def test_help_lists_heartbeat_agent_commands() -> None:
     runner = CliRunner()
     result = runner.invoke(cli.app, ["--help"])

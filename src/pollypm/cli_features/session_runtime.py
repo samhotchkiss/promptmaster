@@ -258,8 +258,12 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
     def plan(
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
     ) -> None:
+        # Read-only inspection — runs from any shell. The tmux gate was
+        # removed for #1055 so the diagnostic flow ``pm alerts`` ->
+        # ``pm plan`` -> ``pm worker-start`` works end-to-end without an
+        # intervening ``pm up``. ``plan_launches`` only reads config; no
+        # tmux state is mutated here.
         supervisor = helpers._load_supervisor(config_path)
-        helpers._require_pollypm_session(supervisor)
         for launch in supervisor.plan_launches():
             typer.echo(f"[{launch.session.name}]")
             typer.echo(f"window = {launch.window_name}")
@@ -350,8 +354,11 @@ def register_session_runtime_commands(app: typer.Typer, *, helpers) -> None:
         config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."),
         limit: int = typer.Option(20, "--limit", min=1, max=200, help="Maximum number of events to show."),
     ) -> None:
+        # Read-only event log — runs from any shell. Gate removed for
+        # #1055 so triage-from-any-shell works (alerts hint ``pm events``
+        # as the next-step diagnostic; that hint must work without
+        # ``pm up``). ``recent_events`` is a pure DB read.
         supervisor = helpers._load_supervisor(config_path)
-        helpers._require_pollypm_session(supervisor)
         items = supervisor.store.recent_events(limit=limit)
         if not items:
             typer.echo("No events recorded.")
