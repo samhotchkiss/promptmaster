@@ -642,6 +642,236 @@ def _decode_review_pending_session_name(scope: str) -> tuple[str, int] | None:
     return head, task_number
 
 
+# ---------------------------------------------------------------------------
+# Worker-session-gap alerts (#1054)
+# ---------------------------------------------------------------------------
+#
+# Sister of #1053. The auto-claim sweep can emit ``no_session`` alerts
+# only when it actually visits a queued task and notify() reports
+# ``no_session`` for it — but that path is gated on the plan-presence
+# check, idle-session checks, the throttle, and a few other branches
+# that can each silently skip the per-task ping. The result observed
+# in #1054: ``polly_remote`` had four queued worker tasks but no
+# ``worker_<project>`` (or ``worker-<project>``) tmux session, and
+# nothing surfaced the gap to the user. The post-sweep pass below
+# walks the registered projects after the main sweep has run, counts
+# ``work_status='queued'`` rows per project, and emits a
+# ``worker_session_gap`` alert for any project whose worker session is
+# absent from the storage-closet's window list. Auto-clears when a
+# matching window appears (or when the project's queue empties).
+
+
+WORKER_SESSION_GAP_ALERT_TYPE = "worker_session_gap"
+
+
+def _worker_session_gap_session_name(project: str) -> str:
+    """Return the synthetic session name used for worker-gap alerts."""
+    return f"worker_session_gap-{project}"
+
+
+def _emit_worker_session_gap_alert(
+    services: Any,
+    *,
+    project: str,
+    n_queued: int,
+) -> None:
+    """Raise (or refresh) a ``worker_session_gap`` alert for ``project``.
+
+    #1054 — fires when a project has queued tasks but no
+    ``worker_<project>`` (or ``worker-<project>``) tmux window exists in
+    the storage-closet session. Keyed by ``(project, worker_session_gap)``
+    via the synthetic ``worker_session_gap-<project>`` session name so
+    the cockpit's per-session alert view groups it with the project's
+    other gap alerts. ``upsert_alert`` dedupes on ``(scope, alert_type,
+    status='open')`` so repeat ticks just refresh the existing row.
+    """
+    store = services.msg_store or services.state_store
+    if store is None:
+        return
+    session_name = _worker_session_gap_session_name(project)
+    message = (
+        f"Project {project} has {n_queued} queued tasks but no worker "
+        f"session is running.\n"
+        f"Run `pm worker-start {project}` to spawn one, or "
+        f"`pm task hold {project}/{{N}}` to pause the tasks."
+    )
+    try:
+        store.upsert_alert(
+            session_name,
+            WORKER_SESSION_GAP_ALERT_TYPE,
+            "warn",
+            message,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: upsert_alert(worker_session_gap) failed for %s",
+            session_name, exc_info=True,
+        )
+
+
+def _clear_worker_session_gap_alert(services: Any, *, project: str) -> None:
+    """Clear the open ``worker_session_gap`` alert for ``project``."""
+    store = services.msg_store or services.state_store
+    if store is None:
+        return
+    session_name = _worker_session_gap_session_name(project)
+    try:
+        store.clear_alert(session_name, WORKER_SESSION_GAP_ALERT_TYPE)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: clear_alert(worker_session_gap) failed for %s",
+            session_name, exc_info=True,
+        )
+
+
+def _storage_closet_window_names(services: Any) -> set[str] | None:
+    """Return the live window names in the storage-closet, or ``None``.
+
+    ``None`` means we couldn't enumerate (no session service, no tmux
+    client, query failed) — callers must treat that as "unknown" and
+    skip the gap check rather than emit a false-positive alert. An
+    empty set is a real answer ("the storage closet is empty") and is
+    returned as ``set()``.
+    """
+    session_svc = getattr(services, "session_service", None)
+    if session_svc is None:
+        return None
+    tmux = getattr(session_svc, "tmux", None)
+    if tmux is None:
+        return None
+    target_session = getattr(session_svc, "storage_closet_session_name", None)
+    if callable(target_session):
+        try:
+            session_name = target_session()
+        except Exception:  # noqa: BLE001
+            return None
+    else:
+        session_name = "pollypm-storage-closet"
+    try:
+        windows = tmux.list_windows(session_name)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: list_windows(%s) failed",
+            session_name, exc_info=True,
+        )
+        return None
+    names: set[str] = set()
+    for window in windows or []:
+        name = getattr(window, "name", "") or ""
+        if not name:
+            continue
+        if getattr(window, "pane_dead", False):
+            continue
+        names.add(name)
+    return names
+
+
+def _project_has_worker_session(
+    project: str,
+    window_names: set[str],
+) -> bool:
+    """Return True when a worker-flavoured window exists for ``project``.
+
+    Accepts both ``worker_<project>`` and ``worker-<project>`` naming
+    conventions (the underscore form is the shipping default; the
+    hyphen form ships in some legacy setups and in operator tooling).
+    Per-task ``task-<project>-<N>`` windows also count — when at least
+    one per-task worker exists for the project, the gap is closed
+    (something is actively working on the queue).
+    """
+    candidates = role_candidate_names("worker", project)
+    for name in candidates:
+        if name in window_names:
+            return True
+    task_prefix = f"task-{project}-"
+    for name in window_names:
+        if name.startswith(task_prefix):
+            suffix = name[len(task_prefix):]
+            if suffix.isdigit():
+                return True
+    return False
+
+
+def _count_queued_tasks_for_project(
+    services: Any,
+    project: Any,
+) -> int:
+    """Return the count of queued tasks for ``project``.
+
+    Sums queued rows across the per-project DB (``<path>/.pollypm/state.db``)
+    and the workspace-root DB if it exists — workspace tasks created via
+    ``pm work create`` from the workspace root land in the workspace DB
+    even when their ``project`` field points at a registered project.
+
+    Returns 0 on any error so the helper degrades closed (a transient
+    DB issue shouldn't fire a false-positive worker-session-gap alert).
+    """
+    project_key = getattr(project, "key", None)
+    if not project_key:
+        return 0
+    total = 0
+    project_work = _open_project_work_service(project, services)
+    if project_work is not None:
+        try:
+            tasks = project_work.list_tasks(work_status=WorkStatus.QUEUED.value)
+            total += len(list(tasks))
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_assignment sweep: list_tasks(queued) failed for %s",
+                project_key, exc_info=True,
+            )
+        finally:
+            _close_quietly(project_work)
+    workspace_work = services.work_service
+    if workspace_work is not None:
+        try:
+            tasks = workspace_work.list_tasks(
+                project=project_key,
+                work_status=WorkStatus.QUEUED.value,
+            )
+            total += len(list(tasks))
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_assignment sweep: workspace list_tasks(queued) "
+                "failed for %s",
+                project_key, exc_info=True,
+            )
+    return total
+
+
+def _sweep_worker_session_gaps(services: Any) -> dict[str, int]:
+    """Emit ``worker_session_gap`` alerts for projects with queued tasks
+    and no worker session. Auto-clears stale alerts.
+
+    Returns a small summary dict (``{"emitted": N, "cleared": M}``) for
+    the sweep's by-outcome tally.
+    """
+    summary = {"emitted": 0, "cleared": 0}
+    known = list(getattr(services, "known_projects", ()) or ())
+    if not known:
+        return summary
+    window_names = _storage_closet_window_names(services)
+    if window_names is None:
+        # Can't enumerate sessions — bail rather than emit false positives.
+        return summary
+    for project in known:
+        project_key = getattr(project, "key", None)
+        if not project_key:
+            continue
+        n_queued = _count_queued_tasks_for_project(services, project)
+        has_worker = _project_has_worker_session(project_key, window_names)
+        if n_queued > 0 and not has_worker:
+            _emit_worker_session_gap_alert(
+                services, project=project_key, n_queued=n_queued,
+            )
+            summary["emitted"] += 1
+        else:
+            # Auto-clear: queue drained or worker came online.
+            _clear_worker_session_gap_alert(services, project=project_key)
+            summary["cleared"] += 1
+    return summary
+
+
 def _sweep_ghost_project_alerts(services: Any) -> int:
     """Clear ``no_session*`` alerts whose project is no longer registered.
 
@@ -1781,6 +2011,19 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
             exc_info=True,
         )
 
+    # #1054: surface projects that have queued tasks but no
+    # ``worker_<project>`` (or ``worker-<project>``) tmux session — the
+    # invisible-failure case where queued work sits forever because no
+    # worker exists to claim it. Sister of #1053.
+    worker_gap_summary = {"emitted": 0, "cleared": 0}
+    try:
+        worker_gap_summary = _sweep_worker_session_gaps(services)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: worker_session_gap pass failed",
+            exc_info=True,
+        )
+
     return {
         "outcome": "swept",
         "considered": totals["considered"],
@@ -1792,4 +2035,5 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
         "review_pending_alerts": len(review_pending_tasks),
         "review_pending_cleared": review_pending_cleared,
         "no_session_auto_recovery": spawn_summary,
+        "worker_session_gap": worker_gap_summary,
     }
