@@ -747,6 +747,24 @@ class TestCliFlowValidate:
         assert result.exit_code == 0
         assert "Valid" in result.output
 
+    def test_cli_flow_validate_by_registered_name(self):
+        """#1041: `pm flow validate standard` should resolve via the registry."""
+        result = runner.invoke(flow_app, ["validate", "standard"])
+        assert result.exit_code == 0, result.output
+        assert "Valid" in result.output
+        # Source path should be reported when resolved via name.
+        assert "standard.yaml" in result.output
+
+    def test_cli_flow_validate_by_registered_name_json(self):
+        """JSON output for name-resolution should include the source path."""
+        result = runner.invoke(flow_app, ["validate", "standard", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["valid"] is True
+        assert data["name"] == "standard"
+        assert "source" in data
+        assert data["source"].endswith("standard.yaml")
+
     def test_cli_flow_validate_invalid(self, tmp_path):
         bad = tmp_path / "bad.yaml"
         bad.write_text("name: bad\n")  # Missing required fields
@@ -757,15 +775,25 @@ class TestCliFlowValidate:
         assert "Why:" in result.output
         assert f"Fix: edit {bad} to satisfy the reported constraint" in result.output
 
-    def test_cli_flow_validate_missing_file_includes_fix(self, tmp_path):
+    def test_cli_flow_validate_unknown_arg_fails(self, tmp_path):
+        """Unknown name/path: error mentions both fallback paths."""
         missing = tmp_path / "missing.yaml"
 
         result = runner.invoke(flow_app, ["validate", str(missing)])
 
         assert result.exit_code == 1
-        assert f"✗ Flow file {missing} not found." in result.output
-        assert "Why: `pm flow validate` reads a YAML file from disk." in result.output
-        assert "Fix: pass the path to an existing `.yaml` flow file." in result.output
+        assert f"✗ Flow '{missing}' not found." in result.output
+        # New error wording reflects dual-resolution behavior.
+        assert "registered flow name" in result.output
+        assert "path to a YAML file" in result.output
+
+    def test_cli_flow_validate_unknown_name_lists_known_flows(self):
+        """Unknown bare name should hint at registered alternatives."""
+        result = runner.invoke(flow_app, ["validate", "nope-not-a-flow"])
+        assert result.exit_code == 1
+        assert "✗ Flow 'nope-not-a-flow' not found." in result.output
+        # The known-flows hint should mention at least the built-in 'standard'.
+        assert "standard" in result.output
 
 
 # ---------------------------------------------------------------------------

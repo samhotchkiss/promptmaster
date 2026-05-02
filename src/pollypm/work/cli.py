@@ -1585,45 +1585,102 @@ def flow_list(
 
 @flow_app.command("validate")
 def flow_validate(
-    path: str = typer.Argument(..., help="Path to a flow YAML file"),
+    target: str = typer.Argument(
+        ...,
+        metavar="NAME_OR_PATH",
+        help="Registered flow name (e.g. 'standard') or path to a flow YAML file.",
+    ),
+    project: Optional[str] = _PROJECT_OPTION,
     output_json: bool = _JSON_OPTION,
 ) -> None:
-    """Validate a flow YAML file."""
-    from pollypm.work.flow_engine import FlowValidationError
+    """Validate a flow template by registered name or YAML file path.
 
-    p = Path(path)
-    if not p.is_file():
+    Resolution order:
+
+    1. If ``target`` matches a registered flow template (as listed by
+       ``pm flow list``), validate that template's source YAML in place.
+    2. Otherwise, treat ``target`` as a filesystem path to a YAML file.
+    """
+    from pollypm.work.flow_engine import FlowValidationError, available_flows
+
+    # Step 1: try resolving as a registered flow name first.
+    project_path = project if project else None
+    try:
+        registered = available_flows(project_path)
+    except Exception:  # pragma: no cover - defensive: never block path fallback
+        registered = {}
+
+    resolved_path: Path | None = None
+    resolved_via_name = False
+    if target in registered:
+        resolved_path = registered[target]
+        resolved_via_name = True
+    else:
+        # Step 2: fall back to filesystem path.
+        candidate = Path(target)
+        if candidate.is_file():
+            resolved_path = candidate
+
+    if resolved_path is None:
         if output_json:
-            typer.echo(json.dumps({"valid": False, "error": f"File not found: {path}"}))
+            typer.echo(
+                json.dumps(
+                    {
+                        "valid": False,
+                        "error": f"Flow '{target}' not found as a registered name or file path.",
+                    }
+                )
+            )
         else:
+            known = ", ".join(sorted(registered)) if registered else "(none)"
             typer.echo(
                 format_cli_error(
-                    f"Flow file {path} not found.",
-                    why="`pm flow validate` reads a YAML file from disk.",
-                    fix="pass the path to an existing `.yaml` flow file.",
+                    f"Flow '{target}' not found.",
+                    why=(
+                        "`pm flow validate` accepts either a registered flow name "
+                        "or a path to a YAML file on disk."
+                    ),
+                    fix=(
+                        f"pass a registered name (known: {known}) or the path to "
+                        "an existing `.yaml` flow file."
+                    ),
                 ),
                 err=True,
             )
         raise typer.Exit(1)
 
-    text = p.read_text(encoding="utf-8")
+    text = resolved_path.read_text(encoding="utf-8")
     try:
         from pollypm.work.flow_engine import parse_flow_yaml
 
         template = parse_flow_yaml(text)
         if output_json:
-            typer.echo(json.dumps({"valid": True, "name": template.name}))
+            payload: dict[str, object] = {"valid": True, "name": template.name}
+            if resolved_via_name:
+                payload["source"] = str(resolved_path)
+            typer.echo(json.dumps(payload))
         else:
-            typer.echo(f"Valid: {template.name} — {template.description}")
+            if resolved_via_name:
+                typer.echo(
+                    f"Valid: {template.name} — {template.description} "
+                    f"(source: {resolved_path})"
+                )
+            else:
+                typer.echo(f"Valid: {template.name} — {template.description}")
     except FlowValidationError as e:
+        display = target if resolved_via_name else str(resolved_path)
+        rerun_target = target if resolved_via_name else str(resolved_path)
         if output_json:
             typer.echo(json.dumps({"valid": False, "error": str(e)}))
         else:
             typer.echo(
                 format_cli_error(
-                    f"Flow {path} is invalid.",
+                    f"Flow {display} is invalid.",
                     why=str(e),
-                    fix=f"edit {path} to satisfy the reported constraint, then rerun `pm flow validate {path}`.",
+                    fix=(
+                        f"edit {resolved_path} to satisfy the reported constraint, "
+                        f"then rerun `pm flow validate {rerun_target}`."
+                    ),
                 ),
                 err=True,
             )
