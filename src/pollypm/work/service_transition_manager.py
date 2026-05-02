@@ -59,6 +59,36 @@ def _format_csv(values: tuple[str, ...] | list[str]) -> str:
     return ", ".join(values)
 
 
+# #1026 — phrases in a reject reason that signal a stale-base blocker
+# the PM can probably fix by merging main into the worker branch.
+_STALE_BASE_REASON_HINTS: tuple[str, ...] = (
+    "stale base",
+    "stale-base",
+    "behind main",
+    "rebase against main",
+    "rebase onto main",
+    "merge main",
+    "out of date with main",
+    "base is stale",
+    "needs rebase",
+    "out-of-date base",
+)
+
+
+def _looks_like_stale_base(reason: str) -> bool:
+    detail = (reason or "").lower()
+    return any(hint in detail for hint in _STALE_BASE_REASON_HINTS)
+
+
+@dataclass(slots=True)
+class _PMRepairCallSiteOutcome:
+    """Internal wrapper that the reject() call site consumes (#1026)."""
+
+    repaired: bool
+    recipe_name: str
+    diagnosis: str
+
+
 @dataclass(slots=True)
 class WorkTransitionManager:
     """Group the state-transition operations for ``SQLiteWorkService``."""
@@ -84,6 +114,97 @@ class WorkTransitionManager:
                 task.task_id,
                 exc,
             )
+
+    def _maybe_pm_auto_repair(
+        self, task: Task, reason: str
+    ) -> "_PMRepairCallSiteOutcome | None":
+        """Run PM auto-repair before a reject (#1026).
+
+        Returns ``None`` when repair is disabled or unavailable; an
+        outcome wrapper otherwise. The wrapper carries a ``repaired``
+        flag (caller short-circuits the reject) and a diagnosis +
+        recipe name (caller enriches the rejection reason).
+
+        Defensive: any exception in the repair scaffold is logged and
+        treated as "no repair attempted" so a buggy recipe never
+        blocks the reject path.
+        """
+
+        try:
+            from pollypm.pm_auto_repair import (
+                BlockerContext,
+                BlockerType,
+                RepairResult,
+                try_pm_repair,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pm_auto_repair unavailable: %s", exc)
+            return None
+        try:
+            worktree_path = self._lookup_worker_worktree_path(task)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "pm_auto_repair: worker worktree lookup failed for %s: %s",
+                task.task_id,
+                exc,
+            )
+            worktree_path = None
+        blocker_type = (
+            BlockerType.STALE_BASE
+            if _looks_like_stale_base(reason)
+            else BlockerType.UNKNOWN
+        )
+        ctx = BlockerContext(
+            project_key=task.project,
+            task_id=task.task_id,
+            worker_role=getattr(task, "assignee", "") or "worker",
+            blocker_type=blocker_type,
+            blocker_detail=reason or "",
+            worktree_path=worktree_path,
+        )
+        try:
+            outcome = try_pm_repair(ctx)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "pm_auto_repair: try_pm_repair raised for %s: %s",
+                task.task_id,
+                exc,
+            )
+            return None
+        if outcome.result == RepairResult.NOT_APPLICABLE:
+            return None
+        repaired = outcome.result == RepairResult.REPAIRED
+        if repaired:
+            logger.info(
+                "pm_auto_repair: %s repaired blocker on %s — short-circuiting reject",
+                outcome.recipe_name,
+                task.task_id,
+            )
+        return _PMRepairCallSiteOutcome(
+            repaired=repaired,
+            recipe_name=outcome.recipe_name,
+            diagnosis=outcome.diagnosis,
+        )
+
+    def _lookup_worker_worktree_path(self, task: Task):
+        """Return the worker session's worktree path, or ``None``."""
+
+        from pathlib import Path
+
+        try:
+            record = self.service.get_worker_session(
+                task_project=task.project,
+                task_number=task.task_number,
+                active_only=True,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if record is None:
+            return None
+        worktree = getattr(record, "worktree_path", None)
+        if not worktree:
+            return None
+        return Path(worktree)
 
     def _finish(
         self,
@@ -251,14 +372,10 @@ class WorkTransitionManager:
                     "completed structured critique output"
                 )
 
-        missing = [
-            role for role in _EXPECTED_CRITIC_PANEL_ROLES if role not in found
-        ]
+        missing = [role for role in _EXPECTED_CRITIC_PANEL_ROLES if role not in found]
         if missing:
             role_word = "role" if len(missing) == 1 else "roles"
-            problems.append(
-                f"missing critic {role_word}: {_format_csv(missing)}"
-            )
+            problems.append(f"missing critic {role_word}: {_format_csv(missing)}")
 
         if problems:
             raise ValidationError(
@@ -321,10 +438,14 @@ class WorkTransitionManager:
                     f"`pm task approve-human-review {task_id} --actor user`, "
                     "or have the operator use "
                     f"`pm task approve-human-review {task_id} --actor polly "
-                    "--fast-track-authorized --reason \"...\"`."
+                    '--fast-track-authorized --reason "..."`.'
                 )
 
-        if task.requires_human_review and skip_gates and not self.service.has_human_review_approval(task_id):
+        if (
+            task.requires_human_review
+            and skip_gates
+            and not self.service.has_human_review_approval(task_id)
+        ):
             self.service.add_context(
                 task_id,
                 actor,
@@ -458,8 +579,7 @@ class WorkTransitionManager:
             )
             if resume_blocked_execution:
                 self.service._conn.execute(
-                    "UPDATE work_node_executions SET status = ? "
-                    "WHERE id = ?",
+                    "UPDATE work_node_executions SET status = ? WHERE id = ?",
                     (
                         ExecutionStatus.ACTIVE.value,
                         latest_execution["id"],
@@ -626,7 +746,8 @@ class WorkTransitionManager:
             for status in active_statuses:
                 try:
                     siblings = self.service.list_tasks(
-                        project=task.project, work_status=status,
+                        project=task.project,
+                        work_status=status,
                     )
                 except Exception:  # noqa: BLE001
                     siblings = []
@@ -651,7 +772,8 @@ class WorkTransitionManager:
         except Exception:  # noqa: BLE001
             logger.debug(
                 "clear_alerts_for_cancelled_task failed for %s",
-                task.task_id, exc_info=True,
+                task.task_id,
+                exc_info=True,
             )
 
     def _clear_no_session_alert_after_approve(self, task: Task) -> None:
@@ -684,7 +806,8 @@ class WorkTransitionManager:
         except Exception:  # noqa: BLE001
             logger.debug(
                 "clear_no_session_alert_for_task failed for %s",
-                task.task_id, exc_info=True,
+                task.task_id,
+                exc_info=True,
             )
 
     @staticmethod
@@ -733,8 +856,10 @@ class WorkTransitionManager:
 
             reason_text = (reason or "").strip()
             if reason_text.startswith(_AUTO_HOLD_REASON_PREFIX):
-                notify_subject = reason_text[len(_AUTO_HOLD_REASON_PREFIX):].strip()
-                if notify_subject.startswith("[Action]") and not notify_requires_review_hold(
+                notify_subject = reason_text[len(_AUTO_HOLD_REASON_PREFIX) :].strip()
+                if notify_subject.startswith(
+                    "[Action]"
+                ) and not notify_requires_review_hold(
                     subject=notify_subject,
                     body="",
                 ):
@@ -883,10 +1008,10 @@ class WorkTransitionManager:
                 "\n"
                 "Fix: pass --output with a JSON object, e.g.:\n"
                 "    pm task done <id> --output '{\n"
-                "      \"type\": \"code_change\",\n"
-                "      \"summary\": \"<what you built>\",\n"
-                "      \"artifacts\": [{\"kind\": \"commit\", \"description\": "
-                "\"impl\", \"ref\": \"HEAD\"}]\n"
+                '      "type": "code_change",\n'
+                '      "summary": "<what you built>",\n'
+                '      "artifacts": [{"kind": "commit", "description": '
+                '"impl", "ref": "HEAD"}]\n'
                 "    }'"
             )
         self.service._validate_work_output(work_output)
@@ -1126,8 +1251,7 @@ class WorkTransitionManager:
 
         if node.type != NodeType.REVIEW:
             raise InvalidTransitionError(
-                f"Current node '{task.current_node_id}' is not a review "
-                f"node."
+                f"Current node '{task.current_node_id}' is not a review node."
             )
 
         self.service._validate_actor_role(task, node, actor)
@@ -1137,14 +1261,32 @@ class WorkTransitionManager:
 
         if node.reject_node_id is None:
             raise InvalidTransitionError(
-                f"Review node '{task.current_node_id}' has no reject_node "
-                f"defined."
+                f"Review node '{task.current_node_id}' has no reject_node defined."
             )
 
         reject_target = flow.nodes.get(node.reject_node_id)
         if reject_target is None:
             raise InvalidTransitionError(
                 f"Reject node '{node.reject_node_id}' not found in flow."
+            )
+
+        # #1026 — give the project PM a chance to auto-repair the
+        # blocker before we burn the worker's submission. If the PM
+        # repairs it (e.g. merges main into the worker branch on a
+        # stale-base rejection), we leave the task in REVIEW so the
+        # reviewer can re-evaluate against the fresh tree. If the PM
+        # tries and fails, we enrich the rejection reason with the
+        # diagnosis so the human gets richer context. If the PM has
+        # nothing to offer (no recipe matched), we fall through to
+        # the existing behavior unchanged.
+        repair_outcome = self._maybe_pm_auto_repair(task, reason)
+        if repair_outcome is not None and repair_outcome.repaired:
+            return self.service.get(task_id)
+        if repair_outcome is not None and repair_outcome.diagnosis:
+            reason = (
+                f"{reason.rstrip()}\n\n"
+                f"[pm_auto_repair:{repair_outcome.recipe_name}] "
+                f"{repair_outcome.diagnosis}"
             )
 
         now = _now()
