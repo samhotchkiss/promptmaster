@@ -334,6 +334,171 @@ class TestWorkerSettings:
 
 
 # ---------------------------------------------------------------------------
+# #1052 — dedupe_key on high-cadence sweep handlers + backlog purge
+# ---------------------------------------------------------------------------
+
+
+class TestCadenceDedupeKeys:
+    """Every parameter-free recurring sweep must register with a
+    ``dedupe_key`` so a slow worker pool can't accumulate identical
+    queued rows (issue #1052).
+    """
+
+    _EXPECTED_DEDUPED = {
+        "session.health_sweep",
+        "capacity.probe",
+        "account.usage_refresh",
+        "transcript.ingest",
+        "alerts.gc",
+        "work.progress_sweep",
+        "pane.classify",
+        "worktree.state_audit",
+        "stuck_claims.sweep",
+        "db.vacuum",
+        "memory.ttl_sweep",
+        "events.retention_sweep",
+        "notification_staging.prune",
+        "agent_worktree.prune",
+        "log.rotate",
+    }
+
+    def test_core_recurring_entries_have_dedupe_keys(self) -> None:
+        roster = Roster()
+        api = RosterAPI(roster, plugin_name="core_recurring")
+        assert core_plugin.register_roster is not None
+        core_plugin.register_roster(api)
+
+        entries = {entry.handler_name: entry for entry in roster.entries}
+        for handler in self._EXPECTED_DEDUPED:
+            assert handler in entries, handler
+            assert entries[handler].dedupe_key == handler, (
+                f"{handler} missing or mismatched dedupe_key: "
+                f"{entries[handler].dedupe_key!r}"
+            )
+
+    def test_task_assignment_sweep_has_dedupe_key(self) -> None:
+        from pollypm.plugins_builtin.task_assignment_notify.plugin import (
+            plugin as ta_plugin,
+        )
+
+        roster = Roster()
+        api = RosterAPI(roster, plugin_name="task_assignment_notify")
+        assert ta_plugin.register_roster is not None
+        ta_plugin.register_roster(api)
+        entries = {entry.handler_name: entry for entry in roster.entries}
+        assert entries["task_assignment.sweep"].dedupe_key == "task_assignment.sweep"
+
+    def test_itsalive_deploy_sweep_has_dedupe_key(self) -> None:
+        roster = Roster()
+        api = RosterAPI(roster, plugin_name="itsalive")
+        assert itsalive_plugin.register_roster is not None
+        itsalive_plugin.register_roster(api)
+        entries = {entry.handler_name: entry for entry in roster.entries}
+        assert entries["itsalive.deploy_sweep"].dedupe_key == "itsalive.deploy_sweep"
+
+
+class TestStaleCadencePurge:
+    """The alerts.gc handler drains the legacy un-keyed backlog (#1052)."""
+
+    def test_purge_drops_stale_queued_rows_for_deduped_handlers(
+        self, tmp_path: Path,
+    ) -> None:
+        from pollypm.jobs import JobQueue
+        from pollypm.plugins_builtin.core_recurring.plugin import (
+            _DEDUPED_CADENCE_HANDLERS,
+            _STALE_QUEUED_CUTOFF_SECONDS,
+            _prune_stale_cadence_jobs,
+        )
+
+        db_path = tmp_path / "state.db"
+        # Seed: stale queued rows for every deduped handler, plus a fresh
+        # row that must survive, plus a stale-but-not-queued row that
+        # must survive (terminal-state rows are untouched).
+        old_iso = (
+            datetime.now(UTC)
+            - timedelta(seconds=_STALE_QUEUED_CUTOFF_SECONDS + 600)
+        ).isoformat()
+        fresh_iso = datetime.now(UTC).isoformat()
+
+        with JobQueue(db_path=db_path) as q:
+            cur = q._conn  # noqa: SLF001 — direct seed for the maintenance test
+            for handler in _DEDUPED_CADENCE_HANDLERS:
+                cur.execute(
+                    """
+                    INSERT INTO work_jobs (
+                        handler_name, payload_json, status,
+                        enqueued_at, run_after
+                    ) VALUES (?, '{}', 'queued', ?, ?)
+                    """,
+                    (handler, old_iso, old_iso),
+                )
+            # Fresh queued row for one of the handlers — must survive.
+            cur.execute(
+                """
+                INSERT INTO work_jobs (
+                    handler_name, payload_json, status,
+                    enqueued_at, run_after
+                ) VALUES ('session.health_sweep', '{}', 'queued', ?, ?)
+                """,
+                (fresh_iso, fresh_iso),
+            )
+            # Stale claimed row — must survive (only queued rows are
+            # purged so we don't yank work in flight).
+            cur.execute(
+                """
+                INSERT INTO work_jobs (
+                    handler_name, payload_json, status,
+                    enqueued_at, run_after, claimed_at, claimed_by
+                ) VALUES (
+                    'session.health_sweep', '{}', 'claimed',
+                    ?, ?, ?, 'worker-1'
+                )
+                """,
+                (old_iso, old_iso, old_iso),
+            )
+            # Stale queued row for an *unknown* handler — must survive
+            # (we only sweep handlers we authored a dedupe_key for).
+            cur.execute(
+                """
+                INSERT INTO work_jobs (
+                    handler_name, payload_json, status,
+                    enqueued_at, run_after
+                ) VALUES ('user.custom_handler', '{}', 'queued', ?, ?)
+                """,
+                (old_iso, old_iso),
+            )
+
+        deleted = _prune_stale_cadence_jobs(db_path)
+        assert deleted == len(_DEDUPED_CADENCE_HANDLERS)
+
+        # Survivors: 1 fresh + 1 claimed + 1 unknown handler row = 3.
+        with JobQueue(db_path=db_path) as q:
+            survivors = q._conn.execute(  # noqa: SLF001
+                "SELECT handler_name, status FROM work_jobs "
+                "ORDER BY id ASC",
+            ).fetchall()
+        assert len(survivors) == 3
+        kinds = {(row[0], row[1]) for row in survivors}
+        assert ("session.health_sweep", "queued") in kinds
+        assert ("session.health_sweep", "claimed") in kinds
+        assert ("user.custom_handler", "queued") in kinds
+
+    def test_purge_is_noop_on_empty_db(self, tmp_path: Path) -> None:
+        from pollypm.plugins_builtin.core_recurring.plugin import (
+            _prune_stale_cadence_jobs,
+        )
+
+        db_path = tmp_path / "state.db"
+        # Force schema creation by opening + closing the queue once.
+        from pollypm.jobs import JobQueue
+
+        with JobQueue(db_path=db_path):
+            pass
+
+        assert _prune_stale_cadence_jobs(db_path) == 0
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

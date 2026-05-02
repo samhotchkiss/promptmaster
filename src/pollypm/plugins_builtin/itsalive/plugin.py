@@ -90,8 +90,12 @@ def _register_handlers(api: JobHandlerAPI) -> None:
 def _register_roster(api: RosterAPI) -> None:
     # Legacy registration path — kept for rail versions that still call
     # register_roster directly. The canonical registration now happens in
-    # ``_initialize`` below via the unified PluginAPI.
-    api.register_recurring("@every 60s", "itsalive.deploy_sweep", {})
+    # ``_initialize`` below via the unified PluginAPI. #1052 — dedupe_key
+    # keeps the queue from compounding parameter-free sweep rows.
+    api.register_recurring(
+        "@every 60s", "itsalive.deploy_sweep", {},
+        dedupe_key="itsalive.deploy_sweep",
+    )
 
 
 def _initialize(api: PluginAPI) -> None:
@@ -111,7 +115,10 @@ def _initialize(api: PluginAPI) -> None:
     # Gracefully skip if no roster is available (initialize may be
     # invoked in test harnesses that don't wire a heartbeat rail).
     try:
-        api.roster.register_recurring("@every 60s", "itsalive.deploy_sweep", {})
+        api.roster.register_recurring(
+            "@every 60s", "itsalive.deploy_sweep", {},
+            dedupe_key="itsalive.deploy_sweep",
+        )
     except RuntimeError:
         logger.debug("itsalive initialize skipped roster registration — no RosterAPI")
 

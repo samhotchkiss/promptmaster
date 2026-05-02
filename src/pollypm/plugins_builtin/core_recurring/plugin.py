@@ -77,6 +77,62 @@ def session_health_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+# #1052 — handlers whose roster registrations gained a dedupe_key. The
+# alerts.gc handler purges any pre-fix queued rows for these names that
+# pile up older than the cutoff below; once dedupe is in place the same
+# names cannot accumulate fresh queued rows, so the prune drains the
+# legacy backlog once and stays a cheap no-op afterward.
+_DEDUPED_CADENCE_HANDLERS: frozenset[str] = frozenset({
+    "session.health_sweep",
+    "capacity.probe",
+    "account.usage_refresh",
+    "transcript.ingest",
+    "alerts.gc",
+    "work.progress_sweep",
+    "pane.classify",
+    "worktree.state_audit",
+    "task_assignment.sweep",
+    "itsalive.deploy_sweep",
+})
+_STALE_QUEUED_CUTOFF_SECONDS: float = 3600.0
+
+
+def _prune_stale_cadence_jobs(state_db: Any) -> int:
+    """Delete ``queued`` work_jobs older than the cutoff for deduped handlers.
+
+    Backfills the post-#1052 dedupe semantics against the legacy pile —
+    pre-fix registrations had no ``dedupe_key`` so the same cadence tick
+    enqueued thousands of identical rows. After the fix, the freshest
+    dedupe-keyed enqueue will no-op when one is already queued, so
+    deleting old un-keyed rows simply lets the most-recent run win.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from pollypm.jobs import JobQueue
+
+    cutoff = datetime.now(UTC) - timedelta(seconds=_STALE_QUEUED_CUTOFF_SECONDS)
+    cutoff_iso = cutoff.isoformat()
+    placeholders = ",".join("?" for _ in _DEDUPED_CADENCE_HANDLERS)
+    params = (*sorted(_DEDUPED_CADENCE_HANDLERS), cutoff_iso)
+    try:
+        with JobQueue(db_path=state_db) as q:
+            cursor = q._conn.execute(  # noqa: SLF001 — internal maintenance path
+                f"""
+                DELETE FROM work_jobs
+                WHERE status = 'queued'
+                  AND handler_name IN ({placeholders})
+                  AND enqueued_at < ?
+                """,
+                params,
+            )
+            return int(cursor.rowcount or 0)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "alerts.gc: stale-cadence prune failed", exc_info=True,
+        )
+        return 0
+
+
 def alerts_gc_handler(payload: dict[str, Any]) -> dict[str, Any]:
     """Release expired leases and prune old heartbeat rows."""
     with _load_config_and_store(payload) as (config, store):
@@ -89,10 +145,15 @@ def alerts_gc_handler(payload: dict[str, Any]) -> dict[str, Any]:
         # large sentinel like ``10**6`` used to overflow ``datetime``
         # when subtracted from ``now()`` (#1047).
         pruned = store.prune_old_data(event_days=None)
+        # #1052 — drain pre-fix cadence-handler backlog. Idempotent and
+        # cheap once the legacy pile is gone (deduped enqueues prevent
+        # regrowth).
+        stale_jobs_pruned = _prune_stale_cadence_jobs(config.project.state_db)
         return {
             "leases_released": len(released),
             "events_pruned": int(pruned.get("events", 0)),
             "heartbeats_pruned": int(pruned.get("heartbeats", 0)),
+            "stale_cadence_jobs_pruned": stale_jobs_pruned,
         }
 
 
@@ -317,13 +378,38 @@ def _register_handlers(api: JobHandlerAPI) -> None:
 
 
 def _register_roster(api: RosterAPI) -> None:
-    api.register_recurring("@every 10s", "session.health_sweep", {})
-    api.register_recurring("@every 60s", "capacity.probe", {})
-    api.register_recurring("@every 5m", "account.usage_refresh", {})
-    api.register_recurring("@every 5m", "transcript.ingest", {})
-    api.register_recurring("@every 5m", "alerts.gc", {})
-    api.register_recurring("@every 5m", "work.progress_sweep", {})
-    api.register_recurring("@every 30s", "pane.classify", {})
+    # #1052 — high-cadence parameter-free sweepers all dedupe on their
+    # handler name. Without dedupe a 10 s tick under contention (#1030)
+    # accumulates thousands of identical queued rows and starves
+    # downstream maintenance handlers (e.g. stuck_claims.sweep, #1049).
+    api.register_recurring(
+        "@every 10s", "session.health_sweep", {},
+        dedupe_key="session.health_sweep",
+    )
+    api.register_recurring(
+        "@every 60s", "capacity.probe", {},
+        dedupe_key="capacity.probe",
+    )
+    api.register_recurring(
+        "@every 5m", "account.usage_refresh", {},
+        dedupe_key="account.usage_refresh",
+    )
+    api.register_recurring(
+        "@every 5m", "transcript.ingest", {},
+        dedupe_key="transcript.ingest",
+    )
+    api.register_recurring(
+        "@every 5m", "alerts.gc", {},
+        dedupe_key="alerts.gc",
+    )
+    api.register_recurring(
+        "@every 5m", "work.progress_sweep", {},
+        dedupe_key="work.progress_sweep",
+    )
+    api.register_recurring(
+        "@every 30s", "pane.classify", {},
+        dedupe_key="pane.classify",
+    )
     api.register_recurring("7 4 * * *", "db.vacuum", {}, dedupe_key="db.vacuum")
     api.register_recurring(
         "13 4 * * *", "memory.ttl_sweep", {}, dedupe_key="memory.ttl_sweep",
@@ -344,7 +430,10 @@ def _register_roster(api: RosterAPI) -> None:
         "31 * * * *", "log.rotate", {},
         dedupe_key="log.rotate",
     )
-    api.register_recurring("@every 10m", "worktree.state_audit", {})
+    api.register_recurring(
+        "@every 10m", "worktree.state_audit", {},
+        dedupe_key="worktree.state_audit",
+    )
     # #1049 — every 5 min sweep recovers jobs orphaned in 'claimed' state.
     api.register_recurring(
         "@every 5m", "stuck_claims.sweep", {},

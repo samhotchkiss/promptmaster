@@ -173,8 +173,13 @@ def _register_handlers(api: JobHandlerAPI) -> None:
 def _register_roster(api: RosterAPI) -> None:
     # 30-second sweep catches events dropped on restart, pre-existing
     # queued tasks at plugin install, and sessions that came online
-    # after the original transition.
-    api.register_recurring("@every 30s", "task_assignment.sweep", {})
+    # after the original transition. #1052 — dedupe_key prevents the
+    # @every 30s tick from compounding queued rows when the worker pool
+    # falls behind under contention.
+    api.register_recurring(
+        "@every 30s", "task_assignment.sweep", {},
+        dedupe_key="task_assignment.sweep",
+    )
 
 
 def _initialize(api: PluginAPI) -> None:
@@ -190,7 +195,10 @@ def _initialize(api: PluginAPI) -> None:
     # resume ping inside ~1s instead of on the next sweeper cycle.
     _session_bus.register_session_listener(_session_created_listener)
     try:
-        api.roster.register_recurring("@every 30s", "task_assignment.sweep", {})
+        api.roster.register_recurring(
+            "@every 30s", "task_assignment.sweep", {},
+            dedupe_key="task_assignment.sweep",
+        )
     except RuntimeError:
         # No roster rail in this context (some test harnesses skip it).
         logger.debug(
