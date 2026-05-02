@@ -2,6 +2,13 @@
 
 Maps work service tasks to markdown files in state-named subdirectories
 (00-not-ready through 05-completed).
+
+Issue #1022: each side-effect on ``issues/`` is auto-committed to the
+project's git repo so the working tree never accumulates uncommitted
+agent-generated state. Without this, every task transition (create,
+move between lifecycle folders, content rewrite) leaves the project
+root dirty, and the FIRST module task to reach ``code_review`` stalls
+because ``pm task approve --auto-merge`` refuses on a dirty root.
 """
 
 from __future__ import annotations
@@ -9,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 from pollypm.work.models import Task, WorkStatus
@@ -70,6 +78,100 @@ def _render_markdown(task: Task) -> str:
     return "\n".join(lines)
 
 
+def _autocommit_issues(project_root: Path, message: str) -> None:
+    """Stage ``issues/`` and commit if anything changed there.
+
+    Issue #1022. Best-effort; never raises. No-ops cleanly when:
+
+    - the project is not a git repo (tests use bare temp dirs);
+    - a merge is in progress (``.git/MERGE_HEAD`` exists) — committing
+      then would clobber the half-finished merge;
+    - ``issues/`` has no churn (``git diff --cached`` empty);
+    - any git invocation fails (filesystem race, permissions, etc.).
+
+    Uses inline ``-c user.name=...`` / ``-c user.email=...`` so the commit
+    works in CI / fresh-checkout environments where the user identity
+    isn't configured globally.
+    """
+    try:
+        git_dir = project_root / ".git"
+        if not git_dir.exists():
+            return
+        # `.git` may be a file (worktree pointer); both forms are valid
+        # repo markers. The MERGE_HEAD check below assumes a directory
+        # layout — if `.git` is a file, skip the merge-in-progress
+        # check and rely on the staging/commit no-oping when the index
+        # is in an inconsistent state.
+        if git_dir.is_dir() and (git_dir / "MERGE_HEAD").exists():
+            logger.debug(
+                "Skipping issues/ auto-commit: merge in progress at %s",
+                project_root,
+            )
+            return
+
+        issues_dir = project_root / "issues"
+        if not issues_dir.exists():
+            return
+
+        base_cmd = [
+            "git",
+            "-C",
+            str(project_root),
+            "-c",
+            "user.name=PollyPM",
+            "-c",
+            "user.email=pollypm@local",
+        ]
+
+        add = subprocess.run(
+            [*base_cmd, "add", "--", "issues"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if add.returncode != 0:
+            logger.debug(
+                "issues/ auto-commit: git add failed: %s",
+                add.stderr.strip() or add.stdout.strip(),
+            )
+            return
+
+        # If nothing is staged for issues/, skip the commit. Using
+        # ``--quiet`` means a non-zero exit means "there is something
+        # staged" — exactly what we want.
+        diff = subprocess.run(
+            [*base_cmd, "diff", "--cached", "--quiet", "--", "issues"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if diff.returncode == 0:
+            # No staged changes under issues/ — nothing to commit.
+            return
+
+        commit = subprocess.run(
+            [*base_cmd, "commit", "-m", message, "--only", "--", "issues"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if commit.returncode != 0:
+            logger.debug(
+                "issues/ auto-commit: git commit failed: %s",
+                commit.stderr.strip() or commit.stdout.strip(),
+            )
+            return
+        logger.info(
+            "issues/ auto-commit: %s (root=%s)",
+            message,
+            project_root,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Never let a sync-side commit propagate. Worst case: we log
+        # the failure and fall back to today's "dirty root" behaviour.
+        logger.debug("issues/ auto-commit suppressed: %s", exc)
+
+
 class FileSyncAdapter:
     """Sync adapter that maintains an issues/ folder structure."""
 
@@ -100,6 +202,10 @@ class FileSyncAdapter:
                         return f
         return None
 
+    def _project_root(self) -> Path:
+        """Return the directory containing ``issues/`` — the project root."""
+        return self._root.parent
+
     def on_create(self, task: Task) -> None:
         """Write a markdown file to the appropriate state directory."""
         folder = self._folder_for_status(task.work_status.value)
@@ -107,6 +213,10 @@ class FileSyncAdapter:
         filepath = dirpath / _filename(task)
         filepath.write_text(_render_markdown(task), encoding="utf-8")
         logger.info("File sync: created %s", filepath)
+        _autocommit_issues(
+            self._project_root(),
+            f"chore(issues): add {task.task_id} ({task.work_status.value})",
+        )
 
     def on_transition(self, task: Task, old_status: str, new_status: str) -> None:
         """Move the file between state directories based on new status."""
@@ -128,6 +238,10 @@ class FileSyncAdapter:
         # Rewrite content (e.g. to add [CANCELLED] prefix)
         new_path.write_text(_render_markdown(task), encoding="utf-8")
         logger.info("File sync: moved %s → %s", existing, new_path)
+        _autocommit_issues(
+            self._project_root(),
+            f"chore(issues): move {task.task_id} {old_status} -> {new_status}",
+        )
 
     def on_update(self, task: Task, changed_fields: list[str]) -> None:
         """Rewrite the markdown content."""
@@ -145,3 +259,7 @@ class FileSyncAdapter:
 
         existing.write_text(_render_markdown(task), encoding="utf-8")
         logger.info("File sync: updated %s", existing)
+        _autocommit_issues(
+            self._project_root(),
+            f"chore(issues): update {task.task_id}",
+        )

@@ -167,6 +167,124 @@ class TestFileSyncAdapter:
         assert len(files) == 1
 
 
+class TestFileSyncAutoCommit:
+    """#1022: every issues/ side-effect must auto-commit to the project repo
+    so the working tree never accumulates uncommitted agent state."""
+
+    @staticmethod
+    def _git(args, cwd):
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    @pytest.fixture
+    def project_repo(self, tmp_path):
+        """Real git repo with a single seed commit."""
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        self._git(["init", "-q", "-b", "main"], cwd=repo)
+        self._git(["config", "user.email", "seed@local"], cwd=repo)
+        self._git(["config", "user.name", "Seed"], cwd=repo)
+        (repo / "README.md").write_text("# project\n")
+        self._git(["add", "README.md"], cwd=repo)
+        self._git(["commit", "-q", "-m", "seed"], cwd=repo)
+        return repo
+
+    def _porcelain(self, repo):
+        return self._git(["status", "--porcelain"], cwd=repo).stdout
+
+    def _log_subjects(self, repo):
+        out = self._git(["log", "--format=%s"], cwd=repo).stdout
+        return [line for line in out.splitlines() if line]
+
+    def test_on_create_commits_issues(self, svc, project_repo):
+        adapter = FileSyncAdapter(issues_root=project_repo / "issues")
+        task = _make_task(svc, title="Auto commit task")
+        adapter.on_create(task)
+
+        # Working tree must be clean — issues/ was committed.
+        assert self._porcelain(project_repo) == ""
+        subjects = self._log_subjects(project_repo)
+        assert any("chore(issues): add" in s for s in subjects), subjects
+
+    def test_on_transition_commits_move(self, svc, project_repo):
+        adapter = FileSyncAdapter(issues_root=project_repo / "issues")
+        task = _make_task(svc)
+        adapter.on_create(task)
+
+        task = svc.queue(task.task_id, "tester")
+        adapter.on_transition(task, "draft", "queued")
+
+        assert self._porcelain(project_repo) == ""
+        subjects = self._log_subjects(project_repo)
+        assert any(
+            "draft -> queued" in s for s in subjects
+        ), subjects
+
+    def test_on_update_commits_changes(self, svc, project_repo):
+        adapter = FileSyncAdapter(issues_root=project_repo / "issues")
+        task = _make_task(svc)
+        adapter.on_create(task)
+
+        task = svc.update(task.task_id, description="Different description")
+        adapter.on_update(task, ["description"])
+
+        assert self._porcelain(project_repo) == ""
+        subjects = self._log_subjects(project_repo)
+        assert any("update " in s for s in subjects), subjects
+
+    def test_no_op_when_not_a_git_repo(self, svc, tmp_path):
+        """Bare directory (no .git) must not raise — tests rely on this."""
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        adapter = FileSyncAdapter(issues_root=plain / "issues")
+        task = _make_task(svc)
+        # Should not raise.
+        adapter.on_create(task)
+        adapter.on_transition(task, "draft", "queued")
+        adapter.on_update(task, ["description"])
+
+    def test_skips_when_merge_in_progress(self, svc, project_repo):
+        """A live MERGE_HEAD means committing would clobber the merge."""
+        adapter = FileSyncAdapter(issues_root=project_repo / "issues")
+        task = _make_task(svc)
+
+        # Simulate a live merge.
+        merge_head = project_repo / ".git" / "MERGE_HEAD"
+        merge_head.write_text("deadbeef\n")
+        try:
+            adapter.on_create(task)
+        finally:
+            merge_head.unlink()
+
+        # File written but NOT committed (merge in progress).
+        assert (project_repo / "issues").exists()
+        subjects = self._log_subjects(project_repo)
+        # Only the seed commit; no chore(issues) line.
+        assert not any("chore(issues)" in s for s in subjects), subjects
+
+    def test_uses_pollypm_identity(self, svc, project_repo):
+        """Commit should be attributed to PollyPM, not the seed user."""
+        # Drop the local user.email/user.name overrides to ensure the
+        # inline -c flags are what's actually being honored.
+        self._git(["config", "--unset", "user.email"], cwd=project_repo)
+        self._git(["config", "--unset", "user.name"], cwd=project_repo)
+
+        adapter = FileSyncAdapter(issues_root=project_repo / "issues")
+        task = _make_task(svc)
+        adapter.on_create(task)
+
+        # Repo is clean and the latest commit author is pollypm.
+        assert self._porcelain(project_repo) == ""
+        author = self._git(
+            ["log", "-1", "--format=%an <%ae>"], cwd=project_repo
+        ).stdout.strip()
+        assert "pollypm@local" in author
+
+
 # ---------------------------------------------------------------------------
 # GitHub Adapter Tests
 # ---------------------------------------------------------------------------
