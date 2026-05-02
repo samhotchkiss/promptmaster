@@ -168,23 +168,56 @@ def role_candidate_names(
     ``worker_<project>`` sessions remain accepted as fallbacks so a
     project that still runs a long-lived worker (e.g. booktalk's pre-
     existing setup) keeps working.
+
+    #1057 — the per-task window also fulfills NON-worker roles for that
+    specific task. When the planner spawns critic subtasks the task is
+    in_progress with assignee ``critic_simplicity`` (or similar planner-
+    emitted role) and a ``task-<project>-<N>`` window is doing the work.
+    The role-assignment resolver must accept that window as fulfillment
+    so the ``no_session_for_assignment`` alert doesn't fire spuriously.
+    The shape: when ``task_number`` is supplied for *any* role, prepend
+    ``task-<project>-<N>`` ahead of the role-specific candidates. The
+    long-lived ``<role>-<project>`` / ``<role>_<project>`` candidates
+    stay so workspaces that still run dedicated role sessions keep
+    resolving via the legacy fallback.
     """
     key = role.strip().lower()
+    # #1057 — per-task worker windows fulfill ANY role for their
+    # specific task. Compute the per-task candidate once and prepend
+    # below so it takes precedence over role-specific candidates.
+    # TODO(#1057): the simpler "per-task worker fulfills any role"
+    # semantics ships now. If we later decide a per-task pane should
+    # only fulfill the role it was spawned to handle (e.g. because the
+    # window's persona was overwritten), narrow this check by reading
+    # the task's ``assignee`` and matching it against ``role``.
+    per_task_candidate: str | None = None
+    if task_number is not None and project:
+        per_task_candidate = f"task-{project}-{int(task_number)}"
     if key in _PROJECT_SCOPED_ROLES:
         names: list[str] = []
-        if key == "worker" and task_number is not None:
+        if per_task_candidate is not None:
             # Per-task worker sessions take priority — that's the
             # post-#919 canonical form. ``task-<project>-<N>`` mirrors
             # :func:`pollypm.work.session_manager.task_window_name`.
-            names.append(f"task-{project}-{int(task_number)}")
+            names.append(per_task_candidate)
         names.extend([f"{key}-{project}", f"{key}_{project}"])
         return names
     if key.startswith("critic_") or key.startswith("critic-"):
         # Planner-spawned per-task critic sessions carry the role name
         # verbatim. Pass through so exact-name lookup picks them up.
+        # #1057 — also accept the per-task window when ``task_number``
+        # is supplied: critic subtasks run on the canonical ``task-<project>-<N>``
+        # pane, not a session named after the persona.
+        if per_task_candidate is not None:
+            return [per_task_candidate, role]
         return [role]
     static = list(_ROLE_STATIC_NAMES.get(key, ()))
     if not static:
+        # No static singleton mapping. If we have a per-task candidate
+        # (e.g. an unknown role on a specific task) still return it so
+        # the resolver can find the per-task worker.
+        if per_task_candidate is not None:
+            return [per_task_candidate]
         return static
     # #1011 — singleton-named control roles (reviewer/operator/triage/
     # heartbeat) can ALSO ship as per-project sessions when the auto-
@@ -196,6 +229,10 @@ def role_candidate_names(
     if not project_key:
         return static
     project_scoped = [f"{key}_{project_key}", f"{key}-{project_key}"]
+    # #1057 — per-task window also fulfills singleton-named control
+    # roles (reviewer/operator/triage/heartbeat) for that task.
+    if per_task_candidate is not None:
+        return [per_task_candidate, *project_scoped, *static]
     return project_scoped + static
 
 

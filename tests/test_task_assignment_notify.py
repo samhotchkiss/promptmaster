@@ -1769,6 +1769,149 @@ class TestPerTaskWorkerRecognition:
         assert handle is None
 
 
+class TestPerTaskWorkerFulfillsNonWorkerRoles:
+    """#1057 — per-task workers (``task-<project>-<N>``) fulfill ANY
+    role assignment for their specific task, not just ``worker``. When
+    the planner spawns a critic subtask the task lands in_progress with
+    assignee ``critic_simplicity`` and a ``task-<project>-<N>`` window
+    is doing the work; the role-assignment resolver must accept that
+    window or ``no_session_for_assignment`` fires spuriously while the
+    critic is actively running.
+    """
+
+    def test_critic_role_resolves_to_per_task_window(self):
+        # The exact symptom from #1057: task ``polly_remote/24`` has a
+        # critic_simplicity assignee and the per-task worker window
+        # ``task-polly_remote-24`` is alive. Resolution must succeed.
+        svc = FakeSessionService(handles=[
+            FakeHandle("task-polly_remote-24"),
+        ])
+        index = SessionRoleIndex(svc)
+        handle = index.resolve(
+            ActorType.ROLE, "critic_simplicity", "polly_remote", task_number=24,
+        )
+        assert handle is not None
+        assert handle.name == "task-polly_remote-24"
+
+    def test_role_candidates_for_critic_includes_per_task_window(self):
+        from pollypm.work.task_assignment import role_candidate_names
+
+        names = role_candidate_names(
+            "critic_simplicity", "polly_remote", task_number=24,
+        )
+        # Per-task window comes first; persona-named fallback retained.
+        assert names[0] == "task-polly_remote-24"
+        assert "critic_simplicity" in names
+
+    def test_long_running_role_session_still_resolves(self):
+        # If a workspace did run a session named after the persona
+        # (legacy / hand-spawned), the resolver still finds it via the
+        # exact-name fallback.
+        svc = FakeSessionService(handles=[FakeHandle("critic_simplicity")])
+        index = SessionRoleIndex(svc)
+        handle = index.resolve(
+            ActorType.ROLE, "critic_simplicity", "polly_remote", task_number=24,
+        )
+        assert handle is not None
+        assert handle.name == "critic_simplicity"
+
+    def test_no_worker_at_all_returns_none(self):
+        # No per-task window, no persona-named session — resolver
+        # returns None and the alert path fires correctly.
+        svc = FakeSessionService(handles=[FakeHandle("worker-other-project")])
+        index = SessionRoleIndex(svc)
+        handle = index.resolve(
+            ActorType.ROLE, "critic_simplicity", "polly_remote", task_number=24,
+        )
+        assert handle is None
+
+    def test_legacy_role_session_resolves_for_arbitrary_role(self):
+        # ``role_candidate_names`` for an unknown role with a
+        # task_number now returns the per-task candidate. Without one
+        # in tmux the resolver returns None.
+        svc = FakeSessionService(handles=[
+            FakeHandle("task-polly_remote-24"),
+        ])
+        index = SessionRoleIndex(svc)
+        handle = index.resolve(
+            ActorType.ROLE, "synthesizer", "polly_remote", task_number=24,
+        )
+        assert handle is not None
+        assert handle.name == "task-polly_remote-24"
+
+    def test_notify_no_alert_when_per_task_window_matches_critic(
+        self, state_store,
+    ):
+        # End-to-end: a critic-role assignment with a live per-task
+        # window should NOT raise the no_session_for_assignment alert.
+        svc = FakeSessionService(handles=[
+            FakeHandle("task-polly_remote-24"),
+        ])
+        services = _RuntimeServices(
+            session_service=svc, state_store=state_store,
+            work_service=None, project_root=Path("."),
+        )
+        event = TaskAssignmentEvent(
+            task_id="polly_remote/24",
+            project="polly_remote",
+            task_number=24,
+            title="Critic: simplicity review",
+            current_node="critique",
+            current_node_kind="work",
+            actor_type=ActorType.ROLE,
+            actor_name="critic_simplicity",
+            work_status="in_progress",
+            priority="normal",
+            transitioned_at=datetime.now(timezone.utc),
+            transitioned_by="tester",
+        )
+        outcome = notify(event, services=services)
+        assert outcome["outcome"] == "sent"
+        assert outcome["session"] == "task-polly_remote-24"
+        alerts = state_store.open_alerts()
+        per_task = [
+            a for a in alerts
+            if a.alert_type == "no_session_for_assignment:polly_remote/24"
+        ]
+        assert per_task == []
+
+    def test_notify_alert_fires_when_no_session_at_all(self, state_store):
+        # No live session of any kind → escalate to alert as before.
+        svc = FakeSessionService(handles=[])
+        services = _RuntimeServices(
+            session_service=svc, state_store=state_store,
+            work_service=None, project_root=Path("."),
+        )
+        event = TaskAssignmentEvent(
+            task_id="polly_remote/24",
+            project="polly_remote",
+            task_number=24,
+            title="Critic: simplicity review",
+            current_node="critique",
+            current_node_kind="work",
+            actor_type=ActorType.ROLE,
+            actor_name="critic_simplicity",
+            work_status="in_progress",
+            priority="normal",
+            transitioned_at=datetime.now(timezone.utc),
+            transitioned_by="tester",
+        )
+        outcome = notify(event, services=services)
+        assert outcome["outcome"] == "no_session"
+        alerts = state_store.open_alerts()
+        per_task = [
+            a for a in alerts
+            if a.alert_type == "no_session_for_assignment:polly_remote/24"
+        ]
+        assert len(per_task) == 1
+        # #1057 — alert hint should NOT suggest the bogus
+        # ``pm worker-start --role critic_simplicity`` command.
+        message = per_task[0].message
+        assert "pm worker-start --role critic_simplicity" not in message
+        # And it should reference the per-task worker explanation.
+        assert "task-polly_remote-24" in message or "#1057" in message
+
+
 class TestNotifyRoutesToPerTaskSession:
     """The work-push contract: when a task is in_progress with a fresh
     per-task session live, ``notify()`` sends the kickoff message to

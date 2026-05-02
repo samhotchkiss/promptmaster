@@ -724,13 +724,21 @@ def _escalate_no_session(
                 f"     (or pm task claim {event.task_id} for a per-task worker)"
             )
         else:
+            # #1057 — non-base roles (e.g. ``critic_simplicity``) don't
+            # have a ``pm worker-start --role <X>`` path; they ship via
+            # per-task workers (``task-<project>-<N>`` windows). The
+            # role-assignment resolver should already accept that
+            # window as fulfillment, so a no_session_for_assignment
+            # alert against a non-base role usually means the per-task
+            # worker isn't running yet (or has died).
             action_hint = (
-                f"Open project '{event.project}' and use Workers to start or "
-                f"recover the {event.actor_name} role."
+                f"Open the task in Tasks to inspect the per-task worker "
+                f"(``task-{event.project}-{event.task_number}``)."
             )
             cli_hint = (
-                f"Try: pm worker-start --role {event.actor_name} "
-                f"{event.project}"
+                f"If the task is in progress (check pm task get "
+                f"{event.task_id}), the per-task worker is fulfilling "
+                f"the role and this alert is spurious — see #1057."
             )
     else:
         actor_display = event.actor_name or event.actor_type.value
