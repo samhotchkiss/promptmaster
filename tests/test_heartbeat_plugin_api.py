@@ -352,6 +352,148 @@ def test_supervisor_heartbeat_api_lists_unmanaged_windows(tmp_path: Path, monkey
     ]
 
 
+def test_supervisor_heartbeat_api_skips_hyphen_underscore_drift(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1056 — ``pm worker-start --role architect <project>`` registers a
+    session named ``architect_<project>`` (underscore) and a tmux window
+    named ``architect-<project>`` (hyphen). The unmanaged-window check
+    must treat the two as equivalent so the live architect session
+    doesn't get false-flagged while ``pm status`` reports it healthy.
+    """
+    supervisor = Supervisor(_config(tmp_path))
+    supervisor.ensure_layout()
+    launch = supervisor.plan_launches()[0]
+    managed_window = TmuxWindow(
+        session=supervisor.storage_closet_session_name(),
+        index=1,
+        name=launch.window_name,
+        active=True,
+        pane_id="%1",
+        pane_current_command="claude",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+    )
+    console_window = TmuxWindow(
+        session=supervisor.config.project.tmux_session,
+        index=0,
+        name=supervisor.console_window_name(),
+        active=True,
+        pane_id="%2",
+        pane_current_command="python3",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+    )
+    # Architect session — hyphen-form window for an underscore-named
+    # session config. This is the canonical worker-start spawn shape:
+    #   session.name        = "architect_russell"
+    #   session.window_name = "architect-russell"
+    architect_session = SessionConfig(
+        name="architect_russell",
+        role="architect",
+        provider=ProviderKind.CLAUDE,
+        account="claude_controller",
+        cwd=tmp_path,
+        project="russell",
+        window_name="architect-russell",
+    )
+    supervisor.config.sessions["architect_russell"] = architect_session
+    supervisor.invalidate_launch_cache()
+    architect_window = TmuxWindow(
+        session=supervisor.storage_closet_session_name(),
+        index=2,
+        name="architect-russell",
+        active=False,
+        pane_id="%3",
+        pane_current_command="claude",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "window_map",
+        lambda: {
+            managed_window.name: managed_window,
+            console_window.name: console_window,
+            architect_window.name: architect_window,
+        },
+    )
+
+    api = SupervisorHeartbeatAPI(supervisor)
+    assert api.list_unmanaged_windows() == []
+
+
+def test_supervisor_heartbeat_api_normalizes_session_name_to_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1056 — even when a session config drops the explicit window_name
+    and the tmux window is named after the underscore session name with
+    a hyphen substitution (``architect-russell`` for session
+    ``architect_russell``), the normalized lookup must keep the live
+    window out of the unmanaged set.
+    """
+    supervisor = Supervisor(_config(tmp_path))
+    supervisor.ensure_layout()
+    launch = supervisor.plan_launches()[0]
+    managed_window = TmuxWindow(
+        session=supervisor.storage_closet_session_name(),
+        index=1,
+        name=launch.window_name,
+        active=True,
+        pane_id="%1",
+        pane_current_command="claude",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+    )
+    console_window = TmuxWindow(
+        session=supervisor.config.project.tmux_session,
+        index=0,
+        name=supervisor.console_window_name(),
+        active=True,
+        pane_id="%2",
+        pane_current_command="python3",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+    )
+    # Session has no explicit window_name — the planner falls back to
+    # session.name (``architect_russell``). The tmux window is named
+    # ``architect-russell`` (hyphen). Without normalization the live
+    # window would land in the unmanaged set.
+    architect_session = SessionConfig(
+        name="architect_russell",
+        role="architect",
+        provider=ProviderKind.CLAUDE,
+        account="claude_controller",
+        cwd=tmp_path,
+        project="russell",
+        window_name=None,
+    )
+    supervisor.config.sessions["architect_russell"] = architect_session
+    supervisor.invalidate_launch_cache()
+    architect_window = TmuxWindow(
+        session=supervisor.storage_closet_session_name(),
+        index=2,
+        name="architect-russell",
+        active=False,
+        pane_id="%3",
+        pane_current_command="claude",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "window_map",
+        lambda: {
+            managed_window.name: managed_window,
+            console_window.name: console_window,
+            architect_window.name: architect_window,
+        },
+    )
+
+    api = SupervisorHeartbeatAPI(supervisor)
+    assert api.list_unmanaged_windows() == []
+
+
 def test_supervisor_heartbeat_api_skips_pm_upgrade_window(tmp_path: Path, monkeypatch) -> None:
     """#1000 — the rail one-click upgrade opens a ``pm-upgrade`` window
     so the user can read upgrade output and the changelog. It's

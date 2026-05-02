@@ -30,12 +30,43 @@ class SupervisorHeartbeatAPI:
     # — see #1000 for the ``pm-upgrade`` orphan-alert context.
     _TRANSIENT_UTILITY_WINDOW_NAMES = frozenset({"pm-upgrade"})
 
+    @staticmethod
+    def _normalize_window_key(name: str) -> str:
+        """Return a hyphen/underscore-insensitive identity for ``name``.
+
+        #1056: ``pm worker-start --role architect <project>`` writes a
+        session config named ``architect_<project>`` (underscore) but
+        names the tmux window ``architect-<project>`` (hyphen). Some
+        callers — notably stale Supervisor instances served from a
+        long-running rail daemon, or cases where the launch plan
+        recomputes between a fresh-config edit and the heartbeat sweep
+        — surface ``expected_window_names`` based on the session name
+        rather than the recorded window_name. Normalising both sides
+        before comparison makes the unmanaged-window check tolerant of
+        either separator so the alert doesn't fire while ``pm status``
+        confirms the same session is healthy.
+        """
+        return name.replace("-", "_") if name else ""
+
     def list_unmanaged_windows(self) -> list[HeartbeatUnmanagedWindow]:
-        expected_window_names = {launch.window_name for launch in self.supervisor.plan_launches()}
+        expected_window_names: set[str] = set()
+        # Both the recorded window name AND the session name flow into
+        # the expected set so naming drift between them (e.g. session
+        # ``architect_russell`` with window ``architect-russell``) keeps
+        # the live window from being flagged as unmanaged.
+        for launch in self.supervisor.plan_launches():
+            expected_window_names.add(launch.window_name)
+            expected_window_names.add(launch.session.name)
         expected_window_names.add(self.supervisor.console_window_name())
+        # Hyphen/underscore-insensitive lookup set — see #1056.
+        expected_keys = {
+            self._normalize_window_key(name) for name in expected_window_names
+        }
         unmanaged: list[HeartbeatUnmanagedWindow] = []
         for window in self.supervisor.window_map().values():
             if window.name in expected_window_names:
+                continue
+            if self._normalize_window_key(window.name) in expected_keys:
                 continue
             # Per-task worker sessions (task-<project>-<number>) are managed
             # by the SessionManager, not the supervisor's launch plan.
