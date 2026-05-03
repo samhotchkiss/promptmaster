@@ -449,8 +449,12 @@ def _select_intervention(
 # Characters that comprise pure visual dividers / formatting leaders. A
 # transcript line composed solely of these (plus whitespace) carries no
 # information for the alert reader, so the snippet selector skips it.
-_DIVIDER_CHARS = frozenset("─━═-_=•└├")
-_LEADER_STRIP_CHARS = "•└├-*  \t"
+# #1068 — em-dash (U+2014) and en-dash (U+2013) added: Claude/Codex
+# transcripts frequently emit a long em-dash run as a section divider,
+# which previously survived ``_select_snippet`` and rendered as a
+# content-free ``Additional work remains — ——————…`` alert body.
+_DIVIDER_CHARS = frozenset("─━═—–-_=•└├")
+_LEADER_STRIP_CHARS = "•└├—–-*  \t"
 
 
 def _select_snippet(text: str, *, max_len: int = 120) -> str:

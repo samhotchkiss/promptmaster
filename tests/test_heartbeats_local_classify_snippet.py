@@ -79,6 +79,22 @@ LIVE_ALERT_FIXTURES: list[tuple[str, str]] = [
         "  └ No tasks available.\n",
         "No tasks available.",
     ),
+    # #1068 — em-dash (U+2014) divider tail. Workers (Claude/Codex)
+    # routinely emit a long em-dash run as a section divider. Without
+    # em-dash in ``_DIVIDER_CHARS`` the snippet returned a 120-char
+    # em-dash run, rendering as
+    # ``Additional work remains — ——————…`` with no actual content.
+    (
+        "Continuing the migration.\n"
+        "—" * 120,
+        "Continuing the migration.",
+    ),
+    # #1068 — en-dash (U+2013) variant of the same shape.
+    (
+        "Wrapping the previous turn.\n"
+        "–" * 100,
+        "Wrapping the previous turn.",
+    ),
 ]
 
 
@@ -92,9 +108,9 @@ def test_select_snippet_renders_clean_snippet(raw: str, expected: str) -> None:
     assert "[4" not in snippet
 
     # No pure divider runs. A short hyphen inside content (e.g. "follow-up")
-    # is fine; a run of 4+ box-drawing chars is not.
-    assert not re.search(r"[─━═]{2,}", snippet)
-    assert not re.fullmatch(r"[─━═\-_=\s]+", snippet)
+    # is fine; a run of 4+ box-drawing or em/en-dash chars is not.
+    assert not re.search(r"[─━═—–]{2,}", snippet)
+    assert not re.fullmatch(r"[─━═—–\-_=\s]+", snippet)
 
     # Leading bullets / box-drawing leaders are stripped.
     assert not snippet.startswith("•")
