@@ -396,6 +396,41 @@ class TestCadenceDedupeKeys:
         entries = {entry.handler_name: entry for entry in roster.entries}
         assert entries["itsalive.deploy_sweep"].dedupe_key == "itsalive.deploy_sweep"
 
+    def test_every_production_roster_entry_has_dedupe_key(
+        self, tmp_path: Path,
+    ) -> None:
+        """#1065 — guard against any cadence handler regressing to
+        ``dedupe_key=None``.
+
+        Per-handler tests above only cover the handlers we authored
+        explicitly. This walks the full plugin host (every builtin's
+        ``register_roster`` + ``initialize`` hook) and asserts every
+        registered roster entry carries a ``dedupe_key``. Any future
+        ``register_recurring`` callsite that forgets the kwarg fails
+        here — catching the gap that #1065 reported as a stale-daemon
+        symptom and matching the post-#1052 invariant: cadence-fired
+        handlers with empty/identical payloads must coalesce on
+        ``handler_name``.
+        """
+        from pollypm.plugin_host import extension_host_for_root
+
+        host = extension_host_for_root(str(tmp_path))
+        roster = host.build_roster()
+        host.initialize_plugins(
+            roster=roster, job_registry=host.job_handler_registry(),
+        )
+
+        missing = [
+            entry.handler_name
+            for entry in roster.entries
+            if entry.dedupe_key is None
+        ]
+        assert not missing, (
+            "Roster entries without dedupe_key (cadence ticks will "
+            "compound under contention — see #1052/#1065): "
+            f"{missing}"
+        )
+
 
 class TestStaleCadencePurge:
     """The alerts.gc handler drains the legacy un-keyed backlog (#1052)."""
