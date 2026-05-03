@@ -54,7 +54,6 @@ CURRENT_TMUX_BOUNDARY_ALLOWLIST: frozenset[str] = frozenset(
         "src/pollypm/cockpit_window_manager.py",
         "src/pollypm/core/console_window.py",
         "src/pollypm/job_runner.py",
-        "src/pollypm/plugins_builtin/core_rail_items/plugin.py",
         "src/pollypm/plugins_builtin/task_assignment_notify/handlers/sweep.py",
         "src/pollypm/session_services/tmux.py",
         "src/pollypm/supervisor.py",
