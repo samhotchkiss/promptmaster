@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from pollypm.plugin_api.v1 import Capability, JobHandlerAPI, PollyPMPlugin, RosterAPI
@@ -40,41 +41,67 @@ from pollypm.plugins_builtin.core_recurring.sweeps import (
 logger = logging.getLogger(__name__)
 
 
+# #1030 — cap concurrent ``session.health_sweep`` handler invocations.
+#
+# The cadence roster fires this handler every 10 s and the JobWorkerPool
+# spawns a fresh thread per claimed job (`pollypm-jobworker-handler-*`).
+# Under load (~340 sessions in the diagnostic snapshot) the per-handler
+# thread fan-out drove ~340 concurrent ``run_heartbeat`` invocations into
+# the SQLAlchemy engine which is configured with ``pool_size=1,
+# max_overflow=0``. Result: sustained QueuePool exhaustion, the retry
+# wrappers from #1018/#1021 cannot recover (contention is not transient),
+# rail_daemon pegs at 200%+ CPU, the work_jobs queue grows monotonically,
+# and read-only CLI commands stall behind the SQLite writer.
+#
+# Bounding fan-out at 4 lets a handful of legitimate sweeps run in
+# parallel while keeping pool_size=1 from being the bottleneck. Excess
+# claims block on the semaphore until earlier sweeps release; if they
+# block long enough they hit the JobWorkerPool's per-handler timeout and
+# get retried at the next cadence tick (#1052 dedupe prevents pile-up).
+_HEALTH_SWEEP_CONCURRENCY: int = 4
+_health_sweep_semaphore = threading.BoundedSemaphore(_HEALTH_SWEEP_CONCURRENCY)
+
+
 def session_health_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
     """Run one round of session health classification."""
-    with _load_config_and_store(payload) as (config, store):
-        from pollypm.supervisor import Supervisor
+    # #1030 — bound concurrent fan-out (see ``_HEALTH_SWEEP_CONCURRENCY``).
+    _health_sweep_semaphore.acquire()
+    try:
+        with _load_config_and_store(payload) as (config, store):
+            from pollypm.supervisor import Supervisor
 
-        supervisor = Supervisor(config)
-        alerts = supervisor.run_heartbeat(
-            snapshot_lines=int(payload.get("snapshot_lines", 200) or 200),
-        )
-
-        ephemeral_summary = {
-            "considered": 0,
-            "alerts_raised": 0,
-            "skipped_planned": 0,
-            "zombie_task_windows_killed": 0,
-        }
-        try:
-            msg_store = getattr(supervisor, "_msg_store", None)
-            ephemeral_summary = sweep_ephemeral_sessions(
-                supervisor, msg_store or store,
-            )
-        except Exception:  # noqa: BLE001
-            logger.debug(
-                "session.health_sweep: ephemeral pass failed", exc_info=True,
+            supervisor = Supervisor(config)
+            alerts = supervisor.run_heartbeat(
+                snapshot_lines=int(payload.get("snapshot_lines", 200) or 200),
             )
 
-        return {
-            "alerts_raised": len(alerts),
-            "ephemeral_considered": ephemeral_summary["considered"],
-            "ephemeral_alerts_raised": ephemeral_summary["alerts_raised"],
-            "ephemeral_skipped_planned": ephemeral_summary["skipped_planned"],
-            "ephemeral_zombie_task_windows_killed": (
-                ephemeral_summary.get("zombie_task_windows_killed", 0)
-            ),
-        }
+            ephemeral_summary = {
+                "considered": 0,
+                "alerts_raised": 0,
+                "skipped_planned": 0,
+                "zombie_task_windows_killed": 0,
+            }
+            try:
+                msg_store = getattr(supervisor, "_msg_store", None)
+                ephemeral_summary = sweep_ephemeral_sessions(
+                    supervisor, msg_store or store,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "session.health_sweep: ephemeral pass failed", exc_info=True,
+                )
+
+            return {
+                "alerts_raised": len(alerts),
+                "ephemeral_considered": ephemeral_summary["considered"],
+                "ephemeral_alerts_raised": ephemeral_summary["alerts_raised"],
+                "ephemeral_skipped_planned": ephemeral_summary["skipped_planned"],
+                "ephemeral_zombie_task_windows_killed": (
+                    ephemeral_summary.get("zombie_task_windows_killed", 0)
+                ),
+            }
+    finally:
+        _health_sweep_semaphore.release()
 
 
 # #1052 — handlers whose roster registrations gained a dedupe_key. The
