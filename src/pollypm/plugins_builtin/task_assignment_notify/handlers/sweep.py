@@ -877,6 +877,220 @@ def _sweep_worker_session_gaps(services: Any) -> dict[str, int]:
     return summary
 
 
+# #1070 — detection-only sweep for tasks whose per-task worker window
+# died without the task being reverted to a recoverable state. The
+# canonical trigger is ``pm reset --force`` killing the storage-closet
+# tmux session mid-flight: the per-task ``task-<project>-<N>`` window
+# disappears, but the task row still says ``in_progress`` / ``rework``.
+# ``_recover_dead_claims`` (above) handles the auto-recovery path, but
+# only for projects whose ``auto_claim`` flag is enabled AND only until
+# the circuit breaker (#1012/#1014) trips. Outside those windows the
+# task sits forever with a dead assignee, invisible from
+# ``pm task list``. This sweep surfaces that gap as a warn-level alert
+# so the operator notices and can intervene manually.
+
+MISSING_TASK_WORKER_ALERT_TYPE = "missing_task_worker"
+
+
+def _missing_task_worker_session_name(task_id: str) -> str:
+    """Return the synthetic alert scope for a missing-worker alert.
+
+    Keyed per task so the cockpit's per-session alert view groups the
+    row under the affected task's id. ``upsert_alert`` dedupes on
+    ``(scope, alert_type, status='open')`` so repeat ticks just
+    refresh the existing row instead of stacking duplicates.
+    """
+    return f"missing_task_worker-{task_id}"
+
+
+def _emit_missing_task_worker_alert(
+    services: Any,
+    *,
+    task_id: str,
+    project: str,
+    task_number: int,
+) -> None:
+    """Raise (or refresh) a ``missing_task_worker`` alert for ``task_id``.
+
+    Surfaces the invisible-failure case where a task is ``in_progress``
+    or ``rework`` with a per-task worker role bound, but the
+    corresponding ``task-<project>-<N>`` tmux window is missing from
+    the storage-closet (worker died, ``pm reset --force`` blew it away,
+    host reboot, etc.). DETECTION ONLY — recovery is the operator's
+    job once the alert fires. The wording points at the manual
+    recovery commands and the per-task log directory so the user can
+    investigate the underlying death cause before re-claiming.
+    """
+    store = getattr(services, "msg_store", None) or getattr(
+        services, "state_store", None,
+    )
+    if store is None:
+        return
+    scope = _missing_task_worker_session_name(task_id)
+    log_hint = f"~/.pollypm/logs/task_{project}_{task_number}/"
+    message = (
+        f"Task {task_id} is in_progress/rework but its per-task worker "
+        f"window (task-{project}-{task_number}) is missing from the "
+        f"storage-closet — the worker died (likely via "
+        f"`pm reset --force` or a crash) without the task being "
+        f"reverted.\n"
+        f"To recover: `pm task hold {task_id}` then "
+        f"`pm task claim {task_id}` to spawn a fresh per-task worker.\n"
+        f"To investigate the death cause first, check the task's tmux "
+        f"logs at {log_hint}."
+    )
+    try:
+        store.upsert_alert(
+            scope,
+            MISSING_TASK_WORKER_ALERT_TYPE,
+            "warn",
+            message,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: upsert_alert(missing_task_worker) "
+            "failed for %s",
+            scope, exc_info=True,
+        )
+
+
+def _clear_missing_task_worker_alert(services: Any, *, task_id: str) -> None:
+    """Clear the open ``missing_task_worker`` alert for ``task_id``."""
+    store = getattr(services, "msg_store", None) or getattr(
+        services, "state_store", None,
+    )
+    if store is None:
+        return
+    scope = _missing_task_worker_session_name(task_id)
+    try:
+        store.clear_alert(scope, MISSING_TASK_WORKER_ALERT_TYPE)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: clear_alert(missing_task_worker) "
+            "failed for %s",
+            scope, exc_info=True,
+        )
+
+
+def _list_active_worker_tasks(work: Any, project_key: str | None) -> list[Any]:
+    """Return ``in_progress`` + ``rework`` tasks for ``project_key``.
+
+    ``project_key=None`` means "list every active worker task in the DB"
+    (used for the workspace-root pass which holds tasks for many
+    projects). On any list_tasks error, returns whatever was collected
+    so far — degrading partial-closed beats raising mid-sweep.
+    """
+    out: list[Any] = []
+    for status in _ACTIVE_WORKER_STATUSES:
+        try:
+            if project_key is None:
+                tasks = work.list_tasks(work_status=status)
+            else:
+                tasks = work.list_tasks(
+                    project=project_key, work_status=status,
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_assignment sweep: list_tasks(%s) failed during "
+                "missing_task_worker pass",
+                status, exc_info=True,
+            )
+            continue
+        out.extend(tasks)
+    return out
+
+
+def _sweep_missing_task_workers(services: Any) -> dict[str, int]:
+    """Emit ``missing_task_worker`` alerts for stuck-with-no-worker tasks.
+
+    #1070 — detection-only counterpart to ``_recover_dead_claims``.
+    Walks every registered project's DB (and the workspace-root DB)
+    for tasks whose ``work_status`` is ``in_progress`` / ``rework`` and
+    whose ``roles`` dict declares a ``worker``. For each such task,
+    asserts the corresponding ``task-<project>-<N>`` tmux window
+    exists. If not, emits a warn-level alert pointing the operator at
+    the manual recovery flow. Cleared automatically when the window
+    reappears (operator manually re-claimed, supervisor respawned,
+    etc.) or the task transitions out of the active-worker statuses.
+
+    Returns ``{"emitted": N, "cleared": M, "considered": K}`` for the
+    sweep's by-outcome tally. Cheap — one ``list_tasks`` per (project,
+    status) plus one ``list_windows`` cached across the pass.
+    """
+    summary = {"emitted": 0, "cleared": 0, "considered": 0}
+    window_names = _storage_closet_window_names(services)
+    if window_names is None:
+        # Can't enumerate sessions — bail rather than emit false positives.
+        return summary
+
+    def _check_task(project_key: str, task: Any) -> None:
+        roles = getattr(task, "roles", {}) or {}
+        if "worker" not in roles:
+            return
+        task_number = getattr(task, "task_number", None)
+        if task_number is None:
+            return
+        try:
+            task_n_int = int(task_number)
+        except (TypeError, ValueError):
+            return
+        task_id = (
+            getattr(task, "task_id", None)
+            or f"{project_key}/{task_n_int}"
+        )
+        summary["considered"] += 1
+        expected_window = f"task-{project_key}-{task_n_int}"
+        if expected_window in window_names:
+            # Worker is alive — clear any stale alert from a prior tick.
+            _clear_missing_task_worker_alert(services, task_id=task_id)
+            summary["cleared"] += 1
+            return
+        _emit_missing_task_worker_alert(
+            services,
+            task_id=task_id,
+            project=project_key,
+            task_number=task_n_int,
+        )
+        summary["emitted"] += 1
+
+    # Pass 1: workspace-root DB (tasks created via ``pm work create``
+    # land here even when their ``project`` field points at a
+    # registered project). Filter by project key per registered project
+    # so we only consider tasks bound to a known project — synthetic
+    # workspace tasks without a project key have no per-task window
+    # naming convention to check against.
+    workspace_work = getattr(services, "work_service", None)
+    known = list(getattr(services, "known_projects", ()) or ())
+    if workspace_work is not None and known:
+        for project in known:
+            project_key = getattr(project, "key", None)
+            if not project_key:
+                continue
+            for task in _list_active_worker_tasks(workspace_work, project_key):
+                _check_task(project_key, task)
+
+    # Pass 2: per-project DBs. Each gets its own short-lived connection,
+    # closed inside the loop so we don't pile up file handles when many
+    # projects are registered. Mirrors the open/close pattern used by
+    # the main sweep body and ``_sweep_worker_session_gaps``.
+    for project in known:
+        project_key = getattr(project, "key", None)
+        if not project_key:
+            continue
+        project_work = _open_project_work_service(project, services)
+        if project_work is None:
+            continue
+        try:
+            # Per-project DB — list_tasks with no project filter
+            # returns all rows in that DB (which by definition belong
+            # to this project).
+            for task in _list_active_worker_tasks(project_work, None):
+                _check_task(project_key, task)
+        finally:
+            _close_quietly(project_work)
+    return summary
+
+
 def _sweep_ghost_project_alerts(services: Any) -> int:
     """Clear ``no_session*`` alerts whose project is no longer registered.
 
@@ -2063,6 +2277,22 @@ def _task_assignment_sweep_body(
             exc_info=True,
         )
 
+    # #1070: surface tasks that are ``in_progress`` / ``rework`` with a
+    # per-task worker role bound but whose ``task-<project>-<N>`` tmux
+    # window is missing from the storage-closet (worker died, daemon
+    # restart blew it away, etc.). Detection only — recovery is the
+    # operator's job once the alert fires. Independent of
+    # ``auto_claim`` so projects with auto-claim disabled (or with
+    # tripped circuit breakers) still surface the gap.
+    missing_worker_summary = {"emitted": 0, "cleared": 0, "considered": 0}
+    try:
+        missing_worker_summary = _sweep_missing_task_workers(services)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "task_assignment sweep: missing_task_worker pass failed",
+            exc_info=True,
+        )
+
     return {
         "outcome": "swept",
         "considered": totals["considered"],
@@ -2075,4 +2305,5 @@ def _task_assignment_sweep_body(
         "review_pending_cleared": review_pending_cleared,
         "no_session_auto_recovery": spawn_summary,
         "worker_session_gap": worker_gap_summary,
+        "missing_task_worker": missing_worker_summary,
     }
