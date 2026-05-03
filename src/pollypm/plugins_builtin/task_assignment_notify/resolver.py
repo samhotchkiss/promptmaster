@@ -704,10 +704,13 @@ def _escalate_no_session(
                 "Open the task in Tasks; Polly will claim it when worker "
                 "capacity is available, or use Workers to start capacity now."
             )
+            # #1059 — drop the ``pm worker-start --role worker`` fallback;
+            # that command is deprecated (per-task workers replaced the
+            # managed-worker pattern). ``pm task claim`` is the only
+            # supported per-task spawn path now.
             cli_hint = (
                 f"Try: pm task claim {event.task_id}\n"
-                f"     (or pm worker-start --role worker {event.project} "
-                "for a long-running session)"
+                f"     (a per-task worker auto-spawns on claim)"
             )
         elif event.actor_name == "reviewer":
             # #953 — human review is the canonical path; surface the

@@ -689,11 +689,16 @@ def _emit_worker_session_gap_alert(
     if store is None:
         return
     session_name = _worker_session_gap_session_name(project)
+    # #1059 — point at the per-task claim flow rather than the deprecated
+    # ``pm worker-start <project>`` (which defaults to ``--role worker``
+    # and now errors out). Per-task workers auto-spawn from ``pm task
+    # claim``; ``pm task next -p <project>`` surfaces the next queued id.
     message = (
-        f"Project {project} has {n_queued} queued tasks but no worker "
-        f"session is running.\n"
-        f"Run `pm worker-start {project}` to spawn one, or "
-        f"`pm task hold {project}/{{N}}` to pause the tasks."
+        f"Project {project} has {n_queued} queued tasks but no per-task "
+        f"workers have claimed them.\n"
+        f"Try: pm task next -p {project}     (highest-priority queued task)\n"
+        f"     pm task claim <task-id>        (per-task worker auto-spawns)\n"
+        f"Or `pm task hold {project}/{{N}}` to pause the tasks."
     )
     try:
         store.upsert_alert(

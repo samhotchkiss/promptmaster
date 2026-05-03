@@ -215,7 +215,11 @@ def test_emits_alert_when_queued_tasks_and_no_worker_session(
     assert severity == "warn"
     assert "polly_remote" in message
     assert "4 queued tasks" in message
-    assert "pm worker-start polly_remote" in message
+    # #1059 — hint must point at per-task claim flow, not the deprecated
+    # ``pm worker-start <project>`` (which defaults to ``--role worker``).
+    assert "pm task next -p polly_remote" in message
+    assert "pm task claim" in message
+    assert "pm worker-start" not in message
     assert "pm task hold" in message
 
 
