@@ -6448,6 +6448,15 @@ class PollyInboxApp(App[None]):
     #inbox-layout {
         height: 1fr;
     }
+    /* #1078 — stacked layout for narrow viewports. When the inbox
+       runs in the cockpit's right tmux pane on an 80x24 terminal,
+       only ~50 cols are available; the side-by-side list+detail split
+       drops detail to ~13 cols of readable text and wraps mid-word.
+       The ``-stacked`` class flips the layout to vertical (list on
+       top, detail below) so the detail pane gets the full width. */
+    #inbox-layout.-stacked {
+        layout: vertical;
+    }
     #inbox-list {
         /* #753 — responsive list width. Fixed 42-column list was
            fine on an iPad but left ~80% of a 34" monitor empty next
@@ -6463,6 +6472,17 @@ class PollyInboxApp(App[None]):
         padding: 0;
         scrollbar-size: 1 1;
         scrollbar-color: #2a3340;
+    }
+    #inbox-layout.-stacked > #inbox-list {
+        /* In stacked mode the list sits on top at full width and
+           takes ~40% of the vertical space; detail gets the rest. */
+        width: 1fr;
+        min-width: 0;
+        height: 40%;
+    }
+    #inbox-layout.-stacked > #inbox-detail-wrap {
+        width: 1fr;
+        height: 1fr;
     }
     #inbox-list > .inbox-row {
         height: 3;
@@ -6848,6 +6868,38 @@ class PollyInboxApp(App[None]):
         # Alert toast surface removed in #956 — alerts still appear in
         # this inbox via the message store; the floating toast cards
         # that used to mount on top of the list are gone.
+        # #1078 — apply stacked layout class up-front so the first
+        # paint on a narrow pane is already vertical (no flash of the
+        # unreadable side-by-side split before the first resize).
+        self._apply_stacked_layout()
+
+    # #1078 — switch to stacked (detail-below-list) layout when the
+    # detail column would otherwise drop below this many cols of usable
+    # text. With list min-width 32 + detail-wrap border + padding, the
+    # detail's readable area falls under 30 once the inbox app's own
+    # width is below ~62 cols (the cockpit's right tmux pane on an
+    # 80x24 terminal lands at ~50, which was the original repro).
+    _STACK_THRESHOLD: int = 62
+
+    def _apply_stacked_layout(self) -> None:
+        """Toggle the ``-stacked`` class on ``#inbox-layout`` based on width.
+
+        Tolerant of being called before mount completes: any failure to
+        resolve the layout container or read ``self.size`` is swallowed
+        — the resize event will retry once the tree is ready.
+        """
+        try:
+            layout = self.query_one("#inbox-layout")
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            width = self.size.width
+        except Exception:  # noqa: BLE001
+            return
+        layout.set_class(width < self._STACK_THRESHOLD, "-stacked")
+
+    def on_resize(self, _event: events.Resize) -> None:
+        self._apply_stacked_layout()
 
     # ------------------------------------------------------------------
     # Data loading
