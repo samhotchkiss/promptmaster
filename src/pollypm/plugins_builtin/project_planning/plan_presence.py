@@ -36,7 +36,12 @@ A plan is "acceptable" iff ALL of the following hold:
    (#281) The approval timestamp comes from a ``plan_approved`` context
    entry written when the user approves the user_approval node. For
    plans approved before this change shipped, the timestamp falls back
-   to the ``user_approval`` execution's ``completed_at``. File mtime
+   to the ``user_approval`` execution's ``completed_at``. (#1062) When
+   the plan_project task has a completed ``emit`` node, that node's
+   ``completed_at`` is used as the staleness upper bound instead — the
+   architect creates impl tasks *during* emit, so their ``created_at``
+   is always later than ``user_approval.completed_at`` and would
+   otherwise look stale against the plan that produced them. File mtime
    is **not** used — git operations, editor saves, and the planner's
    own stage-8 emit all perturb it, making the gate unstable.
 
@@ -85,6 +90,14 @@ _NON_BACKLOG_LABELS = frozenset({"review_feedback"})
 # Node name the plan_project flow uses for the single human approval
 # touchpoint. If the flow shape ever changes, update this constant.
 _APPROVAL_NODE = "user_approval"
+
+# Node name the plan_project flow runs after user_approval to materialise
+# implementation tasks (spec stage 8). Tasks the architect creates during
+# emit naturally have ``created_at`` strictly later than ``user_approval``
+# completion; the staleness check uses ``emit.completed_at`` as the
+# baseline upper bound when present so the plan's own output never
+# triggers a false-positive plan_missing alert (#1062).
+_EMIT_NODE = "emit"
 
 
 # Canonical relative paths to a project's plan file, in preference
@@ -271,6 +284,35 @@ def _plan_approved_at(work_service: Any, plan_task: Any) -> float | None:
     return None
 
 
+def _plan_emit_completed_at(plan_task: Any) -> float | None:
+    """Return the ``emit`` node's ``completed_at`` for ``plan_task``.
+
+    The plan_project flow runs ``emit`` after ``user_approval`` to
+    materialise implementation tasks (spec stage 8). The architect
+    creates each impl task with ``created_at`` between approval and
+    emit completion, so any task created up to ``emit.completed_at``
+    must be treated as the plan's own output, not drift evidence.
+
+    Returns None when the plan has no completed ``emit`` execution —
+    e.g. legacy plans authored before the flow had an explicit emit
+    node, or plans approved but still mid-emit. Callers fall back to
+    the approval timestamp in that case.
+    """
+    latest: float | None = None
+    for execution in getattr(plan_task, "executions", []) or []:
+        if execution.node_id != _EMIT_NODE:
+            continue
+        if execution.status is not ExecutionStatus.COMPLETED:
+            continue
+        completed = execution.completed_at
+        if completed is None:
+            continue
+        ts = completed.timestamp()
+        if latest is None or ts > latest:
+            latest = ts
+    return latest
+
+
 def _latest_backlog_created_at(work_service: Any, project_key: str) -> float | None:
     """Return the most recent ``created_at`` timestamp across non-planning tasks.
 
@@ -364,12 +406,26 @@ def has_acceptable_plan(
     # to be stale against. File mtime is intentionally NOT used —
     # it's perturbed by git checkouts, editor saves, and the
     # planner's own stage-8 emit.
+    #
+    # #1062 — when the plan has a completed ``emit`` node, the staleness
+    # baseline extends from approval to ``emit.completed_at``. Without
+    # this, every project the architect successfully emitted from looks
+    # stale against its own output: the architect creates impl tasks
+    # *during* emit, so their ``created_at`` is necessarily later than
+    # ``user_approval.completed_at``. Re-plan history (e.g. polly_remote
+    # cancelled #2 → done #23, plus follow-up R-task emits) compounded
+    # the false-positive into a sticky plan_missing alert on projects
+    # that were genuinely mid-implementation.
     latest_backlog = _latest_backlog_created_at(work_service, project_key)
     if latest_backlog is not None:
         plan_approved_ts = _plan_approved_at(work_service, plan_task)
         if plan_approved_ts is None:
             return False
-        if plan_approved_ts < latest_backlog:
+        baseline_ts = plan_approved_ts
+        emit_ts = _plan_emit_completed_at(plan_task)
+        if emit_ts is not None and emit_ts > baseline_ts:
+            baseline_ts = emit_ts
+        if baseline_ts < latest_backlog:
             return False
     return True
 

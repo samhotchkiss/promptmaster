@@ -181,6 +181,7 @@ def _create_done_approved_plan_task(
     decision: Decision = Decision.APPROVED,
     approved_at: datetime | None = None,
     write_plan_approved_entry: bool = True,
+    emit_completed_at: datetime | None = None,
 ) -> None:
     """Stamp a plan_project task as done + approved via direct SQL.
 
@@ -201,6 +202,12 @@ def _create_done_approved_plan_task(
     ``plan_approved`` context entry is written. Pass ``False`` to
     simulate a project that was approved *before* issue #281 shipped,
     so the gate must fall back to the execution's ``completed_at``.
+
+    ``emit_completed_at`` optionally stamps a completed ``emit`` node
+    execution at the given time. Pass a datetime > approval to model a
+    plan whose architect successfully ran stage 8 — the staleness
+    baseline (#1062) extends to ``emit.completed_at`` so impl tasks
+    created during emit don't look stale against their own plan.
     """
     db_path = project_path / ".pollypm" / "state.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,6 +268,25 @@ def _create_done_approved_plan_task(
                     "plan approved",
                     stamp_iso,
                     "plan_approved",
+                ),
+            )
+        # Optionally stamp the emit execution so the test models a
+        # plan whose stage-8 emit completed (#1062 staleness baseline).
+        if emit_completed_at is not None:
+            emit_iso = emit_completed_at.isoformat()
+            work._conn.execute(
+                "INSERT INTO work_node_executions "
+                "(task_project, task_number, node_id, visit, status, "
+                "decision, started_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
+                (
+                    project_key,
+                    task.task_number,
+                    "emit",
+                    1,
+                    ExecutionStatus.COMPLETED.value,
+                    emit_iso,
+                    emit_iso,
                 ),
             )
         work._conn.commit()
@@ -705,6 +731,102 @@ class TestPlanApprovedAtTimestamp:
             old = time.time() - 7200
             os.utime(plan_path, (old, old))
             assert has_acceptable_plan("proj", proj, work) is True
+        finally:
+            work.close()
+
+    def test_emit_completed_extends_staleness_baseline(self, tmp_path):
+        """#1062: tasks created during stage-8 emit don't make the plan stale.
+
+        Mirrors the polly_remote / russell / smoketest false-positive:
+        the architect parks at user_approval, the user approves, and
+        emit then materialises impl tasks. Each impl's ``created_at``
+        is strictly later than ``user_approval.completed_at``, so the
+        original #281 baseline flagged the plan stale against its own
+        output. The fix extends the staleness baseline to
+        ``emit.completed_at`` whenever the plan_project task has a
+        completed emit execution.
+        """
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _write_plan(proj)
+
+        # Approve in the past, emit a few seconds later — same shape
+        # the plan_project flow produces in real projects.
+        approved_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        emit_completed = approved_at + timedelta(minutes=3)
+        _create_done_approved_plan_task(
+            proj,
+            project_key="proj",
+            approved_at=approved_at,
+            emit_completed_at=emit_completed,
+        )
+
+        # Queue an impl task whose created_at sits *between* approval
+        # and emit completion — the architect's emit-burst pattern.
+        # ``_create_queued_impl_task`` stamps ``created_at = now`` via
+        # the work-service default; for the staleness check we just
+        # need it strictly later than approval and earlier-or-equal
+        # than emit completion. ``now`` is later than both since the
+        # test stamped them in the past, so we instead force the
+        # impl's ``created_at`` to an explicit value via direct SQL.
+        impl_created_at = approved_at + timedelta(minutes=1)
+        _create_queued_impl_task(proj, project_key="proj")
+        db_path = proj / ".pollypm" / "state.db"
+        work = SQLiteWorkService(db_path=db_path, project_path=proj)
+        try:
+            work._conn.execute(
+                "UPDATE work_tasks SET created_at = ? "
+                "WHERE project = ? AND flow_template_id = 'standard'",
+                (impl_created_at.isoformat(), "proj"),
+            )
+            work._conn.commit()
+
+            # Baseline = max(approval, emit_completed) = emit_completed
+            # (5 minutes - 3 minutes = 2 minutes ago) which is still
+            # strictly later than impl_created_at (4 minutes ago).
+            assert has_acceptable_plan("proj", proj, work) is True
+        finally:
+            work.close()
+
+    def test_user_added_task_after_emit_completes_still_marks_plan_stale(
+        self, tmp_path,
+    ):
+        """Drift detection survives #1062: tasks created strictly after
+        ``emit.completed_at`` still trigger the staleness check.
+
+        The point of #281 is to surface plans that no longer cover the
+        backlog. A user adding fresh requirements days after the plan
+        wraps up should fail the gate; the #1062 fix only widens the
+        baseline to cover the architect's own emit output, not all
+        future work.
+        """
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _write_plan(proj)
+
+        approved_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        emit_completed = approved_at + timedelta(minutes=5)
+        _create_done_approved_plan_task(
+            proj,
+            project_key="proj",
+            approved_at=approved_at,
+            emit_completed_at=emit_completed,
+        )
+
+        # Impl task created an hour after emit completed — drift.
+        _create_queued_impl_task(proj, project_key="proj")
+        db_path = proj / ".pollypm" / "state.db"
+        work = SQLiteWorkService(db_path=db_path, project_path=proj)
+        try:
+            drift_at = emit_completed + timedelta(hours=1)
+            work._conn.execute(
+                "UPDATE work_tasks SET created_at = ? "
+                "WHERE project = ? AND flow_template_id = 'standard'",
+                (drift_at.isoformat(), "proj"),
+            )
+            work._conn.commit()
+
+            assert has_acceptable_plan("proj", proj, work) is False
         finally:
             work.close()
 
