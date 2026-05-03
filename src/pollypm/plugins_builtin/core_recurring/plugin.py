@@ -70,36 +70,53 @@ def session_health_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
         with _load_config_and_store(payload) as (config, store):
             from pollypm.supervisor import Supervisor
 
+            # #1067 — close the Supervisor on exit. ``Supervisor(config)``
+            # opens its own ``StateStore`` (supervisor.py line 349) which
+            # in WAL mode allocates db + -wal file descriptors per
+            # invocation. Without ``stop()`` each 10s health sweep leaked
+            # one sqlite connection (≈12 fds/min once WAL handles are
+            # counted), driving the rail_daemon past macOS's 256 FD soft
+            # limit within hours and surfacing as Errno 24 against
+            # whichever ``open()`` crossed the line.
             supervisor = Supervisor(config)
-            alerts = supervisor.run_heartbeat(
-                snapshot_lines=int(payload.get("snapshot_lines", 200) or 200),
-            )
-
-            ephemeral_summary = {
-                "considered": 0,
-                "alerts_raised": 0,
-                "skipped_planned": 0,
-                "zombie_task_windows_killed": 0,
-            }
             try:
-                msg_store = getattr(supervisor, "_msg_store", None)
-                ephemeral_summary = sweep_ephemeral_sessions(
-                    supervisor, msg_store or store,
-                )
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "session.health_sweep: ephemeral pass failed", exc_info=True,
+                alerts = supervisor.run_heartbeat(
+                    snapshot_lines=int(payload.get("snapshot_lines", 200) or 200),
                 )
 
-            return {
-                "alerts_raised": len(alerts),
-                "ephemeral_considered": ephemeral_summary["considered"],
-                "ephemeral_alerts_raised": ephemeral_summary["alerts_raised"],
-                "ephemeral_skipped_planned": ephemeral_summary["skipped_planned"],
-                "ephemeral_zombie_task_windows_killed": (
-                    ephemeral_summary.get("zombie_task_windows_killed", 0)
-                ),
-            }
+                ephemeral_summary = {
+                    "considered": 0,
+                    "alerts_raised": 0,
+                    "skipped_planned": 0,
+                    "zombie_task_windows_killed": 0,
+                }
+                try:
+                    msg_store = getattr(supervisor, "_msg_store", None)
+                    ephemeral_summary = sweep_ephemeral_sessions(
+                        supervisor, msg_store or store,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "session.health_sweep: ephemeral pass failed", exc_info=True,
+                    )
+
+                return {
+                    "alerts_raised": len(alerts),
+                    "ephemeral_considered": ephemeral_summary["considered"],
+                    "ephemeral_alerts_raised": ephemeral_summary["alerts_raised"],
+                    "ephemeral_skipped_planned": ephemeral_summary["skipped_planned"],
+                    "ephemeral_zombie_task_windows_killed": (
+                        ephemeral_summary.get("zombie_task_windows_killed", 0)
+                    ),
+                }
+            finally:
+                try:
+                    supervisor.stop()
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "session.health_sweep: supervisor.stop raised",
+                        exc_info=True,
+                    )
     finally:
         _health_sweep_semaphore.release()
 
@@ -165,23 +182,35 @@ def alerts_gc_handler(payload: dict[str, Any]) -> dict[str, Any]:
     with _load_config_and_store(payload) as (config, store):
         from pollypm.supervisor import Supervisor
 
+        # #1067 — close the Supervisor on exit. Same leak pattern as
+        # ``session_health_sweep_handler``: ``Supervisor(config)`` opens
+        # its own ``StateStore`` and we must release the connection
+        # explicitly or it accumulates as the cadence fires.
         supervisor = Supervisor(config)
-        released = supervisor.release_expired_leases()
-        # ``event_days=None`` skips the events prune — tiered retention
-        # is handled by ``events_retention_sweep_handler``. Passing a
-        # large sentinel like ``10**6`` used to overflow ``datetime``
-        # when subtracted from ``now()`` (#1047).
-        pruned = store.prune_old_data(event_days=None)
-        # #1052 — drain pre-fix cadence-handler backlog. Idempotent and
-        # cheap once the legacy pile is gone (deduped enqueues prevent
-        # regrowth).
-        stale_jobs_pruned = _prune_stale_cadence_jobs(config.project.state_db)
-        return {
-            "leases_released": len(released),
-            "events_pruned": int(pruned.get("events", 0)),
-            "heartbeats_pruned": int(pruned.get("heartbeats", 0)),
-            "stale_cadence_jobs_pruned": stale_jobs_pruned,
-        }
+        try:
+            released = supervisor.release_expired_leases()
+            # ``event_days=None`` skips the events prune — tiered retention
+            # is handled by ``events_retention_sweep_handler``. Passing a
+            # large sentinel like ``10**6`` used to overflow ``datetime``
+            # when subtracted from ``now()`` (#1047).
+            pruned = store.prune_old_data(event_days=None)
+            # #1052 — drain pre-fix cadence-handler backlog. Idempotent and
+            # cheap once the legacy pile is gone (deduped enqueues prevent
+            # regrowth).
+            stale_jobs_pruned = _prune_stale_cadence_jobs(config.project.state_db)
+            return {
+                "leases_released": len(released),
+                "events_pruned": int(pruned.get("events", 0)),
+                "heartbeats_pruned": int(pruned.get("heartbeats", 0)),
+                "stale_cadence_jobs_pruned": stale_jobs_pruned,
+            }
+        finally:
+            try:
+                supervisor.stop()
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "alerts.gc: supervisor.stop raised", exc_info=True,
+                )
 
 
 def events_retention_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
