@@ -31,6 +31,9 @@ from pollypm.plugins_builtin.core_recurring.shared import (  # noqa: F401
     is_ephemeral_session_name,
     sweep_ephemeral_sessions,
 )
+from pollypm.plugins_builtin.core_recurring.blocked_chain import (
+    blocked_chain_sweep_handler,
+)
 from pollypm.plugins_builtin.core_recurring.sweeps import (
     pane_text_classify_handler,
     work_progress_sweep_handler,
@@ -137,6 +140,7 @@ _DEDUPED_CADENCE_HANDLERS: frozenset[str] = frozenset({
     "worktree.state_audit",
     "task_assignment.sweep",
     "itsalive.deploy_sweep",
+    "blocked_chain.sweep",
 })
 _STALE_QUEUED_CUTOFF_SECONDS: float = 3600.0
 
@@ -431,6 +435,14 @@ def _register_handlers(api: JobHandlerAPI) -> None:
         "stuck_claims.sweep", stuck_claims_sweep_handler,
         max_attempts=1, timeout_seconds=120.0,
     )
+    # #1073 — auto-escalate tasks blocked on un-implemented dependencies.
+    # Walks each project's blocker graph and emits ``blocked_dead_end``
+    # alerts so the architect / operator can re-plan instead of letting
+    # stuck chains sit silently.
+    api.register_handler(
+        "blocked_chain.sweep", blocked_chain_sweep_handler,
+        max_attempts=1, timeout_seconds=120.0,
+    )
 
 
 def _register_roster(api: RosterAPI) -> None:
@@ -495,6 +507,13 @@ def _register_roster(api: RosterAPI) -> None:
         "@every 5m", "stuck_claims.sweep", {},
         dedupe_key="stuck_claims.sweep",
     )
+    # #1073 — every 10 min, escalate blocked tasks whose dependency
+    # chain has no in-flight work. ``upsert_alert`` dedupes per task
+    # so repeat ticks just refresh the existing row.
+    api.register_recurring(
+        "@every 10m", "blocked_chain.sweep", {},
+        dedupe_key="blocked_chain.sweep",
+    )
 
 
 plugin = PollyPMPlugin(
@@ -523,6 +542,7 @@ plugin = PollyPMPlugin(
         Capability(kind="job_handler", name="log.rotate"),
         Capability(kind="job_handler", name="worktree.state_audit"),
         Capability(kind="job_handler", name="stuck_claims.sweep"),
+        Capability(kind="job_handler", name="blocked_chain.sweep"),
         Capability(kind="roster_entry", name="core_recurring"),
     ),
     register_handlers=_register_handlers,

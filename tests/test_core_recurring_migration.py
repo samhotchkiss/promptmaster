@@ -54,6 +54,8 @@ class TestCoreRecurringPlugin:
             "worktree.state_audit",
             # #1049 — periodic stuck-claim recovery.
             "stuck_claims.sweep",
+            # #1073 — auto-escalate blocked-chain dead ends.
+            "blocked_chain.sweep",
         }
         assert expected.issubset(set(registry.names()))
         # inbox.sweep was retired with the legacy inbox subsystem (iv04).
@@ -92,6 +94,8 @@ class TestCoreRecurringPlugin:
             "worktree.state_audit",
             # #1049 — stuck-claim recovery, @every 5m.
             "stuck_claims.sweep",
+            # #1073 — blocked-chain dead-end escalation, @every 10m.
+            "blocked_chain.sweep",
         }
 
         # Cadences per issue #164 / #249.
@@ -132,6 +136,8 @@ class TestCoreRecurringPlugin:
         assert _interval_seconds(entries["worktree.state_audit"]) == 600
         # #1049 — stuck-claim recovery sweep, @every 5m.
         assert _interval_seconds(entries["stuck_claims.sweep"]) == 300
+        # #1073 — blocked-chain escalation sweep, @every 10m.
+        assert _interval_seconds(entries["blocked_chain.sweep"]) == 600
 
     def test_plugin_declares_expected_capabilities(self) -> None:
         kinds = {cap.kind for cap in core_plugin.capabilities}
