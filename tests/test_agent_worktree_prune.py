@@ -198,3 +198,74 @@ def test_idempotent_on_clean_tree(tmp_path: Path) -> None:
         "warned_stale": 0,
         "errors": 0,
     }
+
+
+def test_prunes_squash_merged_branch(tmp_path: Path) -> None:
+    """#1066 — squash-merged branches must prune.
+
+    Real PollyPM branches land via squash-merge or cherry-pick: the
+    branch's commit is no longer an ancestor of main, so
+    ``git branch --merged main`` doesn't list it. Detection must fall
+    back to ``git cherry main <branch>`` (per-patch identity), which
+    sees that the patch already exists in main.
+    """
+    repo = _make_repo(tmp_path / "repo")
+    worktrees_dir = repo / ".claude" / "worktrees"
+    worktrees_dir.mkdir(parents=True, exist_ok=True)
+    wt_path = worktrees_dir / "agent-squashed"
+    branch = "worktree-agent-squashed"
+
+    # Create a worktree branch with one commit.
+    _run("git", "-C", str(repo), "worktree", "add", "-b", branch, str(wt_path))
+    (wt_path / "feature.txt").write_text("feature work\n")
+    _run("git", "-C", str(wt_path), "add", "feature.txt")
+    _run("git", "-C", str(wt_path), "commit", "-m", "feature commit")
+
+    # Squash-merge into main (using merge --squash leaves the branch
+    # not in --merged main, but the patch IS in main).
+    _run("git", "-C", str(repo), "merge", "--squash", branch)
+    _run("git", "-C", str(repo), "commit", "-m", "squashed feature")
+
+    # Confirm the prerequisite: --merged main does NOT list the branch,
+    # but git cherry does mark it as content-applied.
+    merged_out = _run("git", "-C", str(repo), "branch", "--merged", "main").stdout
+    assert branch not in merged_out
+    cherry_out = _run("git", "-C", str(repo), "cherry", "main", branch).stdout
+    assert cherry_out.strip().startswith("-")
+
+    # Age the worktree past the 1h "active" guard.
+    target = time.time() - 2 * 3600
+    os.utime(wt_path, (target, target))
+
+    result = agent_worktree_prune_handler({"project_root": str(repo)})
+
+    assert result["pruned"] == 1, result
+    assert result["errors"] == 0
+    assert not wt_path.exists()
+    branches = _run("git", "-C", str(repo), "branch").stdout
+    assert branch not in branches
+
+
+def test_prunes_locked_merged_worktree(tmp_path: Path) -> None:
+    """#1066 — locked worktrees still prune when merged.
+
+    The Claude Code harness locks every agent worktree it spawns. By
+    the time the hourly handler runs, the locking pid is long gone,
+    but ``git worktree remove --force`` still refuses on a locked
+    worktree. The handler must unlock + retry.
+    """
+    repo = _make_repo(tmp_path / "repo")
+    wt = _make_agent_worktree(
+        repo, "locked-merged", merge_to_main=True, age_seconds=2 * 3600,
+    )
+    # Lock the worktree the way the Claude harness does.
+    _run(
+        "git", "-C", str(repo), "worktree", "lock",
+        "--reason", "claude agent test", str(wt),
+    )
+
+    result = agent_worktree_prune_handler({"project_root": str(repo)})
+
+    assert result["pruned"] == 1, result
+    assert result["errors"] == 0
+    assert not wt.exists()

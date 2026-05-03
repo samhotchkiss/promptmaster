@@ -446,6 +446,45 @@ def agent_worktree_prune_handler(payload: dict[str, Any]) -> dict[str, Any]:
                 name = name[len("origin/"):]
             merged_names.add(name)
 
+    def _branch_content_in_main(branch: str) -> bool:
+        """Return True when every commit on ``branch`` already exists in
+        ``main`` by patch — covers squash-merged and cherry-picked
+        branches that ``--merged main`` misses (#1066).
+        """
+        proc = _git(repo_root, "cherry", "main", branch)
+        if proc.returncode != 0:
+            return False
+        # ``git cherry`` prefixes lines with ``+`` (commit not in upstream)
+        # or ``-`` (already applied). All ``-`` (or empty output) means the
+        # branch is fully content-merged.
+        for raw in proc.stdout.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("+"):
+                return False
+        return True
+
+    def _remove_worktree(wt_path: Path) -> bool:
+        """Remove a worktree, unlocking first if it's locked (#1066).
+
+        Claude Code harness leaves agent worktrees locked with a pid
+        reason; the locking pid is long gone by the time the hourly
+        prune fires, but ``git worktree remove --force`` still refuses.
+        Unlock + force is the documented escape hatch.
+        """
+        proc = _git(repo_root, "worktree", "remove", "--force", str(wt_path))
+        if proc.returncode == 0:
+            return True
+        # Try unlock + retry once. Locked worktrees emit
+        # "fatal: cannot remove a locked working tree" on stderr.
+        if "locked" in (proc.stderr or "").lower():
+            _git(repo_root, "worktree", "unlock", str(wt_path))
+            retry = _git(repo_root, "worktree", "remove", "--force", str(wt_path))
+            if retry.returncode == 0:
+                return True
+        return False
+
     pruned = 0
     skipped_active = 0
     warned_stale = 0
@@ -470,11 +509,12 @@ def agent_worktree_prune_handler(payload: dict[str, Any]) -> dict[str, Any]:
                 errors += 1
                 continue
 
-            if branch in merged_names:
-                remove_proc = _git(
-                    repo_root, "worktree", "remove", "--force", str(wt),
-                )
-                if remove_proc.returncode != 0:
+            is_merged = (
+                branch in merged_names
+                or _branch_content_in_main(branch)
+            )
+            if is_merged:
+                if not _remove_worktree(wt):
                     errors += 1
                     continue
                 _git(repo_root, "branch", "-D", branch)
@@ -539,7 +579,11 @@ def log_rotate_handler(payload: dict[str, Any]) -> dict[str, Any]:
     errors = 0
     rotation_re = re.compile(r"^(?P<base>.+)\.log\.(?P<ts>\d+)\.gz$")
 
-    for log_path in sorted(logs_dir.glob("*.log")):
+    # #1066: walk subdirectories too. PollyPM tmux pipe-pane targets land
+    # under ``<logs_dir>/<session_slug>/<window>.log`` — a flat glob over
+    # ``logs_dir/*.log`` never sees them, so rotation silently no-ops
+    # while subdir log files balloon to hundreds of MB.
+    for log_path in sorted(logs_dir.rglob("*.log")):
         if not log_path.is_file():
             continue
         try:
@@ -577,8 +621,12 @@ def log_rotate_handler(payload: dict[str, Any]) -> dict[str, Any]:
             errors += 1
             continue
 
-    by_base: dict[str, list[tuple[int, Path]]] = {}
-    for gz in logs_dir.glob("*.log.*.gz"):
+    # Group existing rotations by parent dir + base name so retention
+    # applies per-log-stream (don't mix worker-foo and worker-bar even if
+    # they sit in the same directory, and treat per-session subdirs
+    # independently).
+    by_base: dict[tuple[Path, str], list[tuple[int, Path]]] = {}
+    for gz in logs_dir.rglob("*.log.*.gz"):
         m = rotation_re.match(gz.name)
         if not m:
             continue
@@ -586,9 +634,9 @@ def log_rotate_handler(payload: dict[str, Any]) -> dict[str, Any]:
             ts_val = int(m.group("ts"))
         except ValueError:
             continue
-        by_base.setdefault(m.group("base"), []).append((ts_val, gz))
+        by_base.setdefault((gz.parent, m.group("base")), []).append((ts_val, gz))
 
-    for _base, entries in by_base.items():
+    for _key, entries in by_base.items():
         entries.sort(key=lambda item: item[0], reverse=True)
         for _ts_val, gz_path in entries[rotate_keep:]:
             try:

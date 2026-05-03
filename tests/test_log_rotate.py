@@ -224,3 +224,63 @@ def test_multiple_rotations_then_retention(tmp_path: Path) -> None:
     remaining = sorted(p.name for p in logs.glob("roll.log.*.gz"))
     assert len(remaining) == 2
     assert "roll.log.1000.gz" not in remaining
+
+
+def test_rotates_logs_in_subdirectories(tmp_path: Path) -> None:
+    """#1066 — handler walks ``<logs_dir>/<session>/<window>.log``.
+
+    PollyPM tmux pipe-pane targets land under per-session subdirectories
+    (``logs/worker_camptown/worker-camptown.log``). A flat
+    ``logs_dir.glob("*.log")`` never finds them, so rotation silently
+    no-ops while subdir log files balloon to hundreds of MB. The
+    handler must recurse.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # Two oversize logs nested under per-session subdirectories — the
+    # production layout PollyPM creates for tmux pipe-pane captures.
+    sub_a = logs / "worker_camptown"
+    sub_b = logs / "architect_bikepath"
+    big_a = sub_a / "worker-camptown.log"
+    big_b = sub_b / "architect-bikepath.log"
+    _write_bytes(big_a, 3 * 1024 * 1024)
+    _write_bytes(big_b, 3 * 1024 * 1024)
+
+    result = log_rotate_handler(
+        {"logs_dir": str(logs), "rotate_size_mb": 1, "rotate_keep": 3},
+    )
+
+    assert result["rotated"] == 2
+    assert result["errors"] == 0
+    # Originals were truncated, gzipped rotations sit alongside them.
+    assert big_a.stat().st_size == 0
+    assert big_b.stat().st_size == 0
+    assert len(list(sub_a.glob("worker-camptown.log.*.gz"))) == 1
+    assert len(list(sub_b.glob("architect-bikepath.log.*.gz"))) == 1
+
+
+def test_retention_per_subdirectory(tmp_path: Path) -> None:
+    """Retention applies independently to each subdirectory's rotation
+    history — a worker's old gzips don't compete with another session's.
+    """
+    logs = tmp_path / "logs"
+    sub_a = logs / "worker_a"
+    sub_b = logs / "worker_b"
+    sub_a.mkdir(parents=True)
+    sub_b.mkdir(parents=True)
+    # Five rotations in each subdir; keep=2 → 3 deleted per subdir = 6 total.
+    for sub in (sub_a, sub_b):
+        for ts in (1000, 2000, 3000, 4000, 5000):
+            _make_gz_rotation(sub, "worker", ts)
+
+    result = log_rotate_handler(
+        {"logs_dir": str(logs), "rotate_size_mb": 1, "rotate_keep": 2},
+    )
+
+    assert result["rotated"] == 0
+    assert result["deleted"] == 6
+    assert result["errors"] == 0
+    surviving_a = sorted(p.name for p in sub_a.glob("worker.log.*.gz"))
+    surviving_b = sorted(p.name for p in sub_b.glob("worker.log.*.gz"))
+    assert surviving_a == ["worker.log.4000.gz", "worker.log.5000.gz"]
+    assert surviving_b == ["worker.log.4000.gz", "worker.log.5000.gz"]
