@@ -245,18 +245,18 @@ class HeartbeatRail:
             # uses that key (e.g. ``task_assignment.sweep``,
             # ``session.health_sweep``, ``stuck_claims.sweep`` itself).
             try:
-                recovered = self.queue.recover_orphaned_claims()
+                recovered, pruned = self.queue.recover_orphaned_claims()
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "HeartbeatRail.start(): orphaned-claim recovery failed",
                 )
             else:
-                if recovered:
+                if recovered or pruned:
                     logger.info(
-                        "HeartbeatRail.start(): recovered %d orphaned "
-                        "claimed job(s) from a prior process — dedupe "
-                        "slots freed",
-                        recovered,
+                        "HeartbeatRail.start(): requeued %d orphaned "
+                        "claimed job(s) and pruned %d duplicate queued "
+                        "row(s) from a prior process — dedupe slots freed",
+                        recovered, pruned,
                     )
             # Log the cadence-handler roster so operators can verify
             # at a glance that registration landed all entries (#1071).

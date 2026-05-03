@@ -432,7 +432,7 @@ class JobQueue:
 
         retry_on_database_locked(_do_fail, label="JobQueue.fail")
 
-    def recover_orphaned_claims(self) -> int:
+    def recover_orphaned_claims(self) -> tuple[int, int]:
         """Reset every ``claimed`` row back to ``queued`` (#1071).
 
         Called once at rail-daemon startup. The new daemon owns no
@@ -448,24 +448,66 @@ class JobQueue:
         ``dedupe_key``, so a single orphaned ``stuck_claims.sweep`` row
         is enough to disable the recovery loop entirely.
 
-        Returns the number of rows recovered. We rewind ``attempt`` by
-        one so the recovered job gets the same attempt budget it had
-        before — the previous claim never ran a handler body, so it
-        shouldn't count against the retry limit.
+        Two-step recovery:
+          1. UPDATE every ``claimed`` row back to ``queued`` with
+             ``run_after = now()`` (don't replay the original schedule
+             — the orphan was already overdue) and rewind attempt by 1
+             since no handler body ever ran.
+          2. DELETE duplicate queued rows per dedupe_key, keeping only
+             the newest. Pre-#1052 rows had no dedupe_key so the
+             previous daemon's cadence ticks accumulated thousands of
+             identical session.health_sweep / task_assignment.sweep
+             rows in ``claimed``; without this dedupe pass the worker
+             pool would spend hours grinding through the legacy pile
+             before it could fire the freshly-scheduled handlers
+             (e.g. ``stuck_claims.sweep``, ``alerts.gc``) that prune
+             the rest.
+
+        Returns ``(recovered, pruned)`` — the count of orphaned-claim
+        rows we requeued, and the count of duplicate queued rows we
+        dropped during the same boot pass.
         """
-        def _do_recover() -> int:
+        def _do_recover() -> tuple[int, int]:
+            now_iso = _now_iso()
             with self._lock:
+                # 1. Recover claimed → queued, reset run_after to now so
+                # they enter the queue at current cadence priority
+                # rather than re-running the original (long-stale)
+                # schedule.
                 cursor = self._conn.execute(
                     """
                     UPDATE work_jobs
                     SET status = 'queued',
                         claimed_at = NULL,
                         claimed_by = NULL,
+                        run_after = ?,
                         attempt = CASE WHEN attempt > 0 THEN attempt - 1 ELSE 0 END
                     WHERE status = 'claimed'
                     """,
+                    (now_iso,),
                 )
-                return int(cursor.rowcount or 0)
+                recovered = int(cursor.rowcount or 0)
+
+                # 2. Collapse the legacy pile: for any handler with
+                # multiple ``queued`` rows, keep only the newest id and
+                # drop the rest. Sub-second cadence handlers
+                # (session.health_sweep) accumulate the most. The
+                # cadence will re-enqueue a fresh row on the next tick,
+                # so dropping the duplicates costs nothing and frees
+                # the worker pool to drain the rest of the system.
+                cursor = self._conn.execute(
+                    """
+                    DELETE FROM work_jobs
+                    WHERE status = 'queued'
+                      AND id NOT IN (
+                        SELECT MAX(id) FROM work_jobs
+                        WHERE status = 'queued'
+                        GROUP BY handler_name
+                      )
+                    """,
+                )
+                pruned = int(cursor.rowcount or 0)
+                return recovered, pruned
 
         return retry_on_database_locked(_do_recover, label="JobQueue.recover_orphaned_claims")
 

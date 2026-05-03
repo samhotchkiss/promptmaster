@@ -166,8 +166,9 @@ def test_recover_orphaned_claims_resets_status_and_frees_dedupe(
     assert jid2 == jid1
 
     # Recover orphaned claims (simulates rail_daemon startup).
-    recovered = q.recover_orphaned_claims()
+    recovered, pruned = q.recover_orphaned_claims()
     assert recovered == 1
+    assert pruned == 0
 
     stored = q.get(jid1)
     assert stored is not None
@@ -190,7 +191,44 @@ def test_recover_orphaned_claims_returns_zero_when_none_claimed(
 ) -> None:
     q = JobQueue(db_path=tmp_path / "q.db")
     q.enqueue("sweep")
-    assert q.recover_orphaned_claims() == 0
+    assert q.recover_orphaned_claims() == (0, 0)
+
+
+def test_recover_orphaned_claims_collapses_legacy_duplicates(
+    tmp_path: Path,
+) -> None:
+    """#1071 — pre-#1052 cadence ticks accumulated thousands of identical
+    rows in ``claimed`` (no dedupe_key). After requeueing them all, the
+    worker pool would grind through the legacy pile for hours before
+    firing freshly-scheduled handlers like ``stuck_claims.sweep`` that
+    are supposed to drain the backlog. Recovery collapses duplicates
+    per handler_name to the newest id.
+    """
+    q = JobQueue(db_path=tmp_path / "q.db")
+    # Three orphaned session.health_sweep rows from a prior daemon
+    # (dedupe_key=None, all claimed at restart time).
+    a = q.enqueue("session.health_sweep")
+    q.claim("crashed-1")
+    b = q.enqueue("session.health_sweep")
+    q.claim("crashed-1")
+    c = q.enqueue("session.health_sweep")
+    q.claim("crashed-1")
+    # One unrelated handler — must survive.
+    other = q.enqueue("pane.classify")
+    q.claim("crashed-1")
+
+    recovered, pruned = q.recover_orphaned_claims()
+    assert recovered == 4  # all four rows requeued
+    assert pruned == 2  # two duplicate session.health_sweep rows dropped
+
+    # Newest session.health_sweep id (c) survives; older ones gone.
+    assert q.get(a) is None
+    assert q.get(b) is None
+    assert q.get(c) is not None
+    assert q.get(c).status is JobStatus.QUEUED
+    # The unrelated handler is untouched.
+    assert q.get(other) is not None
+    assert q.get(other).status is JobStatus.QUEUED
 
 
 def test_null_dedupe_key_does_not_deduplicate(tmp_path: Path) -> None:
