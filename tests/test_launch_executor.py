@@ -88,6 +88,11 @@ class _FakeSupervisor:
     def console_command(self) -> str:
         return "/bin/bash"
 
+    def start_cockpit_tui(self, session_name: str) -> None:
+        # #1075 — fakes must honour the cockpit hook surface so the
+        # before_attach path is exercised without AttributeError.
+        self.calls.append(("start_cockpit_tui", (session_name,), {}))
+
 
 def _probe(**kwargs: Any) -> LaunchProbe:
     base = dict(

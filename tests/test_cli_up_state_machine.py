@@ -128,6 +128,11 @@ def test_up_echoes_named_launch_state(monkeypatch, tmp_path: Path) -> None:
         def focus_console(self) -> None:
             return None
 
+        def start_cockpit_tui(self, _session_name: str) -> None:
+            # #1075 — fakes must honour the cockpit hook surface so the
+            # before_attach path is exercised without AttributeError.
+            return None
+
     monkeypatch.setattr(cli, "_load_supervisor", lambda _path: _FakeSupervisor())
 
     runner = CliRunner()
