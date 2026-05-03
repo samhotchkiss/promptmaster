@@ -1852,7 +1852,41 @@ def task_assignment_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
     config_path_hint = payload.get("config_path")
     config_path = Path(config_path_hint) if config_path_hint else None
     services = load_runtime_services(config_path=config_path)
+    # #1069 — release services.state_store at the end of every code
+    # path. ``load_runtime_services`` opens a fresh ``StateStore`` on
+    # every call (resolver.py L96); without this finally the @every
+    # 30s sweep cadence leaked one sqlite connection per tick (≈4
+    # fds/min once WAL handles are counted) under live activity.
+    # ``services.work_service`` is closed by the existing
+    # ``_close_quietly(workspace_work)`` site below; ``services.close()``
+    # only re-runs the (idempotent) state_store close after that, so
+    # a double-close is benign — we still call it for symmetry.
+    try:
+        return _task_assignment_sweep_body(
+            services=services,
+            payload=payload,
+            config_path=config_path,
+        )
+    finally:
+        try:
+            services.close()
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_assignment sweep: services.close raised", exc_info=True,
+            )
 
+
+def _task_assignment_sweep_body(
+    *,
+    services: Any,
+    payload: dict[str, Any],
+    config_path: Path | None,
+) -> dict[str, Any]:
+    """Inner body of :func:`task_assignment_sweep_handler`.
+
+    Split out so the outer handler can guarantee
+    :meth:`_RuntimeServices.close` runs on every return path (#1069).
+    """
     # The sweeper uses a shorter throttle so pre-existing queued tasks
     # get re-pinged every 5 min if they stay unclaimed — that's the
     # "session came online late" recovery path from the spec.

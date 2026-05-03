@@ -431,16 +431,44 @@ def pane_text_classify_handler(payload: dict[str, Any]) -> dict[str, Any]:
     from pollypm.plugins_builtin.task_assignment_notify.api import (
         load_runtime_services,
     )
+
+    config_path_hint = payload.get("config_path")
+    config_path = Path(config_path_hint) if config_path_hint else None
+    services = load_runtime_services(config_path=config_path)
+    # #1069 — release the StateStore + work-service connections that
+    # ``load_runtime_services`` opens on every call. Without this
+    # finally the @every 30s ``pane.classify`` cadence leaked sqlite
+    # connections at the same rate as ``task_assignment.sweep``.
+    try:
+        return _pane_text_classify_body(
+            services=services,
+            payload=payload,
+        )
+    finally:
+        try:
+            services.close()
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "pane_text_classify: services.close raised", exc_info=True,
+            )
+
+
+def _pane_text_classify_body(
+    *,
+    services: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Inner body of :func:`pane_text_classify_handler`.
+
+    Split out so the outer handler can guarantee
+    :meth:`_RuntimeServices.close` runs on every return path (#1069).
+    """
     from pollypm.recovery.pane_patterns import (
         RULES,
         USER_VISIBLE_RULES,
         classify_pane,
         rule_by_name,
     )
-
-    config_path_hint = payload.get("config_path")
-    config_path = Path(config_path_hint) if config_path_hint else None
-    services = load_runtime_services(config_path=config_path)
 
     session_svc = services.session_service
     state_store = services.state_store

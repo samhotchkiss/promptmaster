@@ -65,6 +65,61 @@ class _RuntimeServices:
     # #768 auto-claim — global default + per-project caps
     auto_claim: bool = True
     max_concurrent_per_project: int = 2
+    # #1069 — only ``load_runtime_services`` flips this to True. Test
+    # doubles construct ``_RuntimeServices`` directly with a shared
+    # store/work_service they still want to use after the handler
+    # returns; for those callers ``close()`` is a no-op.
+    _owns_connections: bool = False
+
+    def close(self) -> None:
+        """Release every owned sqlite connection.
+
+        #1069 — ``load_runtime_services`` opens a fresh ``StateStore``
+        (line ~96 of this module) plus a per-call ``SQLiteWorkService``
+        (line ~137) on every invocation. The ``task_assignment.sweep``
+        handler (every 30s) and ``task_assignment.notify`` handler
+        (every state transition incl. rework/reject) used to close
+        only the work service, leaking the state-store sqlite fd +
+        WAL handles per tick. Under live activity that drove
+        ~9.5 sqlite fds/min in addition to the leaks fixed by #1067.
+
+        ``msg_store`` is the cached singleton from
+        :func:`pollypm.store.registry.get_store` and **must not** be
+        closed here (other callers still use it process-wide). The
+        registry handles disposal at shutdown via ``reset_store_cache``.
+
+        ``session_service`` doesn't open its own connection — it holds
+        a reference to ``state_store`` — so closing the state store is
+        sufficient for that branch.
+
+        Only no-ops unless ``_owns_connections`` is True. Test doubles
+        that construct this dataclass directly share their store with
+        the test body and shouldn't have it closed under them.
+        """
+        if not self._owns_connections:
+            return
+        store = self.state_store
+        if store is not None:
+            close = getattr(store, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "task_assignment_notify: state_store close raised",
+                        exc_info=True,
+                    )
+        work = self.work_service
+        if work is not None:
+            close = getattr(work, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "task_assignment_notify: work_service close raised",
+                        exc_info=True,
+                    )
 
 
 def load_runtime_services(
@@ -157,6 +212,7 @@ def load_runtime_services(
         msg_store=msg_store,
         auto_claim=config.planner.auto_claim,
         max_concurrent_per_project=config.planner.max_concurrent_per_project,
+        _owns_connections=True,
     )
 
 

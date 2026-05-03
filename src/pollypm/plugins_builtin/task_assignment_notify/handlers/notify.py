@@ -88,12 +88,16 @@ def task_assignment_notify_handler(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         outcome = notify(event, services=services)
     finally:
-        # Close the work service DB connection we opened (no-op if it
-        # doesn't have a close()).
-        closer = getattr(services.work_service, "close", None)
-        if callable(closer):
-            try:
-                closer()
-            except Exception:  # noqa: BLE001
-                pass
+        # #1069 — release every owned sqlite connection. The pre-fix
+        # version closed only ``services.work_service`` and leaked the
+        # fresh ``StateStore`` opened by ``load_runtime_services`` on
+        # each call. Under live state-transition activity (rework /
+        # notify_rejection / approve) that was a major contributor to
+        # the post-#1067 fd growth.
+        try:
+            services.close()
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "task_assignment_notify: services.close raised", exc_info=True,
+            )
     return outcome
