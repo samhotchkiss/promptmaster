@@ -56,13 +56,31 @@ def set_backend_factory(factory) -> None:
 
 
 def build_backend_for_config(config_path: Path) -> FileMemoryBackend:
-    """Default factory: resolve the config, open a backend against the project."""
+    """Default factory: resolve the config, open a backend against the project.
+
+    Post-#339 the system writes memory entries (checkpoints, knowledge
+    extracts) against ``<workspace_root>/.pollypm/state.db`` because the
+    writer codepath resolves the backend via the session's ``cwd`` —
+    which for control sessions is ``workspace_root``. The CLI used to
+    resolve via ``config.project.root_dir`` instead, which on global
+    configs (``~/.pollypm/pollypm.toml``) is the config dir itself,
+    not the workspace. That divergence is the root cause of #1038 —
+    ``pm memory list`` reading an empty DB while the workspace DB had
+    159k rows. Prefer the workspace-rooted backend whenever its
+    ``.pollypm/state.db`` exists; fall back to ``root_dir`` so
+    per-project configs (where the two coincide) keep working.
+    """
     resolved = resolve_config_path(config_path)
     if not resolved.exists():
         from pollypm.errors import format_config_not_found_error
 
         raise typer.BadParameter(format_config_not_found_error(resolved))
     config = load_config(resolved)
+    workspace_root = getattr(config.project, "workspace_root", None)
+    if workspace_root is not None:
+        workspace_state_db = Path(workspace_root) / ".pollypm" / "state.db"
+        if workspace_state_db.exists():
+            return get_memory_backend(Path(workspace_root), "file")  # type: ignore[return-value]
     project_root = config.project.root_dir
     return get_memory_backend(project_root, "file")  # type: ignore[return-value]
 
