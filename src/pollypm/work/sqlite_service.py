@@ -412,6 +412,113 @@ def _union_merge_text(ours: str, theirs: str) -> str:
     return text
 
 
+def _resolve_disjoint_addition_conflicts(text: str) -> str | None:
+    """Resolve diff3 conflict markers when every hunk is a pure disjoint
+    addition.
+
+    Expects ``text`` to contain ``<<<<<<<`` / ``|||||||`` / ``=======``
+    / ``>>>>>>>`` markers (i.e. ``--diff3`` style). For each conflict
+    hunk, the function only auto-resolves when the BASE section is
+    empty — meaning neither side modified existing content, both
+    independently added new code in the same region (the issue's
+    case 1: "disjoint new code in the same region"). The resolution
+    is ``ours_lines + theirs_lines``.
+
+    Returns ``None`` (= bounce to operator) when:
+    - any hunk has a non-empty base section (both sides modified a
+      shared line — case 3, "needs human / worker judgement")
+    - markers are malformed or text has no conflict markers at all
+      (e.g. pure add/add with no textual base, or binary conflict)
+
+    #1072: parallel task branches frequently produce exactly this
+    shape (polly_remote/13 repro: HEAD added new commands, /13 added
+    different new commands, both at EOF of the same file with no base
+    content disturbed). This helper lets approve self-heal that case
+    instead of bouncing to the operator.
+    """
+    if "<<<<<<<" not in text or "|||||||" not in text:
+        # Either no conflict at all, or not in diff3 format — bounce.
+        return None
+    out: list[str] = []
+    ours: list[str] | None = None
+    base: list[str] | None = None
+    theirs: list[str] | None = None
+    state = "outside"  # outside | ours | base | theirs
+    for line in text.splitlines(keepends=True):
+        stripped = line.rstrip("\r\n")
+        if state == "outside":
+            if stripped.startswith("<<<<<<<"):
+                ours = []
+                base = None
+                theirs = None
+                state = "ours"
+                continue
+            out.append(line)
+            continue
+        if state == "ours":
+            if stripped.startswith("|||||||"):
+                base = []
+                state = "base"
+                continue
+            if stripped.startswith("======="):
+                # No base section — not diff3, bail.
+                return None
+            if stripped.startswith("<<<<<<<") or stripped.startswith(">>>>>>>"):
+                return None
+            assert ours is not None
+            ours.append(line)
+            continue
+        if state == "base":
+            if stripped.startswith("======="):
+                theirs = []
+                state = "theirs"
+                continue
+            if stripped.startswith("<<<<<<<") or stripped.startswith(">>>>>>>"):
+                return None
+            assert base is not None
+            base.append(line)
+            continue
+        if state == "theirs":
+            if stripped.startswith(">>>>>>>"):
+                assert ours is not None and theirs is not None and base is not None
+                # The "disjoint addition" rule: empty base means the
+                # region was untouched in the merge ancestor and both
+                # sides are pure additions there. If the base has any
+                # content, both sides modified shared lines and a
+                # human / worker should review.
+                if base:
+                    return None
+                # Even with empty base, if ours and theirs share any
+                # non-blank line, naive concat would duplicate it.
+                # That's a signal of a pure add/add where both sides
+                # independently wrote the same boilerplate (e.g. the
+                # README.md headers in the unsafe-addadd test): the
+                # textual answer is ambiguous, so bounce.
+                ours_nonblank = {
+                    line.strip() for line in ours if line.strip()
+                }
+                theirs_nonblank = {
+                    line.strip() for line in theirs if line.strip()
+                }
+                if ours_nonblank & theirs_nonblank:
+                    return None
+                out.extend(ours)
+                out.extend(theirs)
+                ours = None
+                base = None
+                theirs = None
+                state = "outside"
+                continue
+            if stripped.startswith("<<<<<<<") or stripped.startswith("======="):
+                return None
+            assert theirs is not None
+            theirs.append(line)
+            continue
+    if state != "outside":
+        return None
+    return "".join(out)
+
+
 def mark_first_shipped(
     *,
     path: Path | None = None,
@@ -2947,7 +3054,16 @@ class SQLiteWorkService:
         if ff_only.returncode == 0:
             return
 
-        merge = self._git_run(project_path, "merge", "--no-ff", "--no-edit", task_branch)
+        # Use ``merge.conflictStyle=diff3`` so any conflict markers in the
+        # working tree carry the merge base section. The disjoint-addition
+        # auto-resolver (#1072) needs the base to distinguish "both sides
+        # added new code" (case 1, auto-resolvable) from "both sides
+        # modified the same shared line" (case 3, bounce to operator).
+        merge = self._git_run(
+            project_path,
+            "-c", "merge.conflictStyle=diff3",
+            "merge", "--no-ff", "--no-edit", task_branch,
+        )
         if merge.returncode == 0:
             return
 
@@ -3002,6 +3118,44 @@ class SQLiteWorkService:
                 f"{', '.join(conflicted_files)} via line union. "
                 f"Git said: {detail}"
             )
+
+        # At least one conflict is on a non-safelist file. Before bouncing
+        # to the operator, try the disjoint-addition resolver: parallel
+        # task branches frequently produce conflicts whose every hunk is
+        # "both sides added new code, base region was empty" (#1072). That
+        # shape is textually unambiguous — we can auto-resolve by including
+        # both sides. Anything more complex (overlapping edits to shared
+        # base content) still surfaces to the operator.
+        if conflicted_files:
+            # Conflict markers are already in diff3 form (see merge
+            # invocation above). Walk each file's hunks; auto-resolve
+            # iff every hunk has an empty base section (= pure addition).
+            resolved_paths: list[str] = []
+            for rel_path in conflicted_files:
+                target = project_path / rel_path
+                try:
+                    current_text = target.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    resolved_paths = []
+                    break
+                merged = _resolve_disjoint_addition_conflicts(current_text)
+                if merged is None:
+                    resolved_paths = []
+                    break
+                target.write_text(merged, encoding="utf-8")
+                add = self._git_run(project_path, "add", "--", rel_path)
+                if add.returncode != 0:
+                    resolved_paths = []
+                    break
+                resolved_paths.append(rel_path)
+            if resolved_paths and len(resolved_paths) == len(conflicted_files):
+                commit = self._git_run(
+                    project_path, "commit", "--no-edit",
+                )
+                if commit.returncode == 0:
+                    return
+                # Commit failed even after textual resolution — fall through
+                # and let ``git merge --abort`` below clean the worktree.
 
         # At least one conflict is on a non-safelist file. Abort the merge
         # cleanly and tell the user how to recover.

@@ -406,6 +406,88 @@ class TestApprove:
         # Task is still in review since approve raised before mutation.
         assert svc.get(task.task_id).work_status == WorkStatus.REVIEW
 
+    def test_approve_auto_resolves_disjoint_addition_conflict(self, tmp_path):
+        """#1072: when parallel task branches add non-overlapping code in
+        the same region of a non-safelist file (the polly_remote/13
+        repro shape), approve must self-heal via textual union rather
+        than bouncing to the operator. Only "one side empty per hunk"
+        conflicts are auto-resolved; overlapping non-empty hunks still
+        bounce."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "t@example.com"], cwd=repo, check=True
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=repo, check=True
+        )
+        subprocess.run(
+            ["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True
+        )
+        # Common base: a Python module with one stable function.
+        base_text = (
+            "def existing():\n"
+            "    return 1\n"
+        )
+        (repo / "module.py").write_text(base_text, encoding="utf-8")
+        subprocess.run(["git", "add", "module.py"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+        svc = SQLiteWorkService(db_path=tmp_path / "work.db", project_path=repo)
+        task = _create_task(svc)
+        _claim_task(svc, task)
+        current_branch = _git_stdout(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        task_branch = f"task/{task.project}-{task.task_number}"
+
+        # Worker branch: append a worker-side function.
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", "-q", "-b", task_branch],
+            check=True,
+        )
+        worker_text = base_text + "\n\ndef worker_added():\n    return 2\n"
+        (repo / "module.py").write_text(worker_text, encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "module.py"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "feat: worker"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", "-q", current_branch],
+            check=True,
+        )
+
+        # Main branch: append a different function in the same trailing
+        # region. Both additions are at EOF — git's 3-way merge will
+        # produce a conflict where one side of every hunk is empty.
+        main_text = base_text + "\n\ndef main_added():\n    return 3\n"
+        (repo / "module.py").write_text(main_text, encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "module.py"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "feat: main"],
+            check=True,
+        )
+
+        svc.node_done(task.task_id, "pete", _valid_work_output())
+
+        result = svc.approve(task.task_id, "polly")
+
+        assert result.work_status == WorkStatus.DONE
+        merged_text = (repo / "module.py").read_text(encoding="utf-8")
+        # Both function definitions survive; no conflict markers remain.
+        assert "def worker_added()" in merged_text
+        assert "def main_added()" in merged_text
+        assert "<<<<<<<" not in merged_text
+        assert ">>>>>>>" not in merged_text
+        assert not (repo / ".git" / "MERGE_HEAD").exists()
+        merged = subprocess.run(
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", task_branch, "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert merged.returncode == 0
+
     def test_approve_resume_after_manual_merge(self, tmp_path):
         """If the user hand-merges + commits the task branch, then runs
         approve --resume, approval proceeds without re-attempting the merge."""
