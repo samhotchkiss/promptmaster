@@ -1197,13 +1197,19 @@ def test_exit_code_one_when_any_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_fix_runs_registered_fixers(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Issue #1063: --fix verifies via re-running the check, so the
+    # fixture must actually flip fail -> pass when the fixer runs.
     invoked = {"count": 0}
+    state = {"healed": False}
 
     def _fixer() -> tuple[bool, str]:
         invoked["count"] += 1
+        state["healed"] = True
         return (True, "fixed")
 
     def _check() -> doctor.CheckResult:
+        if state["healed"]:
+            return doctor._ok("now ok")
         return doctor._fail(
             "broken", why="w", fix="f",
             fixable=True, fix_fn=_fixer, severity="warning",
@@ -1577,10 +1583,21 @@ def test_fix_dry_run_pluralisation() -> None:
 
 def test_fix_cli_prints_summary_footer(monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI emits the summary footer after --fix completes."""
+    # Issue #1063: --fix reports "Applied" only after re-running the
+    # check and confirming it now passes. So our fixable fixture has to
+    # actually transition fail -> pass when the fix_fn runs.
+    state = {"healed": False}
+
+    def _do_fix() -> tuple[bool, str]:
+        state["healed"] = True
+        return (True, "done")
+
     def _fixable() -> doctor.CheckResult:
+        if state["healed"]:
+            return doctor._ok("now ok")
         return doctor._fail(
             "bad", why="w", fix="run a thing",
-            fixable=True, fix_fn=lambda: (True, "done"),
+            fixable=True, fix_fn=_do_fix,
             severity="warning",
         )
 
@@ -1607,6 +1624,44 @@ def test_fix_cli_prints_summary_footer(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "auto" in result.stdout
     assert "1 issue remains" in result.stdout
     assert "byhand" in result.stdout
+
+
+def test_fix_cli_does_not_lie_when_handler_noops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1063: --fix must NOT report 'Applied' for fixes whose
+    handler ran but whose check still fails on a follow-up run.
+
+    Repro: a fix_fn returns (True, "done") while the underlying check
+    keeps reporting failure. Pre-fix, the CLI claimed "Applied 1 fix"
+    and walked away. Post-fix, the CLI must surface "ran but check
+    still failing" so the user knows manual intervention is needed.
+    """
+    def _liar_fix() -> tuple[bool, str]:
+        # Handler claims success but check stays failed (the bug).
+        return (True, "did nothing")
+
+    def _stuck_check() -> doctor.CheckResult:
+        return doctor._fail(
+            "still broken", why="w", fix="run a thing",
+            fixable=True, fix_fn=_liar_fix, severity="warning",
+        )
+
+    monkeypatch.setattr(
+        doctor, "_registered_checks",
+        lambda: [doctor.Check("liar", _stuck_check, "resources", severity="warning")],
+    )
+    import pollypm.cli as cli_mod
+
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.app, ["doctor", "--fix"])
+    assert result.exit_code == 0
+    # The footer must NOT lie about applying the fix.
+    assert "Applied 1 fix" not in result.stdout
+    assert "Applied 0 fixes" in result.stdout
+    # And it MUST surface that the handler ran but the check is unfixed.
+    assert "ran but check" in result.stdout
+    assert "liar" in result.stdout
 
 
 def test_manual_fixes_excludes_skipped_and_passing() -> None:

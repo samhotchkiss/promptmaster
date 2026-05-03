@@ -3369,9 +3369,58 @@ def _issue_word(n: int) -> str:
     return "issue" if n == 1 else "issues"
 
 
+def verify_fix_results(
+    fix_results: list[tuple[str, bool, str]],
+    post_report: DoctorReport,
+) -> list[tuple[str, bool, str]]:
+    """Cross-check ``fix_results`` against a re-run report.
+
+    Issue #1063: ``--fix`` was reporting "Applied N fixes" purely on the
+    return value of each ``fix_fn``. Several handlers no-op (or write to
+    a path the doctor doesn't read), so the user-facing summary lied
+    about what actually landed.
+
+    This helper returns a new list with the success flag overridden by
+    the *post-fix* check outcome:
+
+    - If the fix's check now passes → ``(name, True, original_message)``
+    - If the fix's check still fails → ``(name, False, "fix ran but
+      check still failing: <original message>")``
+    - If the check is no longer present in the post-report (rare —
+      registered checks shouldn't disappear mid-run), the original
+      ``fix_fn`` verdict is preserved.
+    """
+    post_results: dict[str, CheckResult] = {
+        check.name: result for check, result in post_report.results
+    }
+    verified: list[tuple[str, bool, str]] = []
+    for name, ok, message in fix_results:
+        post = post_results.get(name)
+        if post is None:
+            verified.append((name, ok, message))
+            continue
+        if post.passed or post.skipped:
+            verified.append((name, True, message))
+            continue
+        # Fix handler claimed success (or failure); the check still
+        # fails. Mark as not-actually-applied and surface the new check
+        # status so the operator knows what's still wrong.
+        suffix = post.status or "check still failing"
+        if ok:
+            verified.append(
+                (name, False, f"fix ran but check still failing: {suffix}")
+            )
+        else:
+            # fix_fn already reported failure — keep its message.
+            verified.append((name, False, message))
+    return verified
+
+
 def render_fix_summary(
     fix_results: list[tuple[str, bool, str]],
     manual: list[tuple[str, str]],
+    *,
+    unverified: list[tuple[str, str]] | None = None,
 ) -> str:
     """Render the post-``--fix`` summary footer.
 
@@ -3381,9 +3430,24 @@ def render_fix_summary(
     When every fix succeeds and nothing manual is pending, the footer
     collapses to a single ``Applied N fix(es)`` line, with ``fix`` /
     ``fixes`` picked per count.
+
+    ``unverified`` is the list of ``(name, message)`` for fixes whose
+    handler ran but whose check still fails on a follow-up run. When
+    provided, those names are reported as
+    ``N fixes ran but checks still failing`` rather than collapsed into
+    the generic "fix failed" bucket — so users know the difference
+    between "handler raised" and "handler claimed success but didn't
+    actually fix it" (issue #1063).
     """
     applied = [name for name, ok, _ in fix_results if ok]
     failed = [name for name, ok, _ in fix_results if not ok]
+    unverified_names = [name for name, _ in (unverified or [])]
+    # Avoid double-counting: if a name is in unverified, drop it from
+    # the failed bucket (the unverified bucket is the more specific
+    # explanation for that failure mode).
+    if unverified_names:
+        unverified_set = set(unverified_names)
+        failed = [n for n in failed if n not in unverified_set]
     parts: list[str] = []
     if applied:
         parts.append(
@@ -3392,6 +3456,12 @@ def render_fix_summary(
         )
     else:
         parts.append("Applied 0 fixes")
+    if unverified_names:
+        verb = "ran but check" if len(unverified_names) == 1 else "ran but checks"
+        parts.append(
+            f"{len(unverified_names)} {_fix_word(len(unverified_names))} "
+            f"{verb} still failing: [{', '.join(unverified_names)}]"
+        )
     if failed:
         parts.append(
             f"{len(failed)} {_fix_word(len(failed))} failed: "

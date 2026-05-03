@@ -283,6 +283,7 @@ def register_maintenance_commands(app: typer.Typer) -> None:
             render_json,
             run_checks,
             setup_tag_line,
+            verify_fix_results,
         )
 
         report = run_checks()
@@ -293,15 +294,32 @@ def register_maintenance_commands(app: typer.Typer) -> None:
             raise typer.Exit(code=0 if report.ok else 1)
         fix_summary: str | None = None
         if fix:
-            fix_results = apply_fixes(report)
+            raw_fix_results = apply_fixes(report)
+            manual_before_rerun = manual_fixes(report)
+            # Issue #1063: re-run checks BEFORE rendering so we can mark
+            # any "fix succeeded according to fix_fn but check still
+            # failing" entries honestly. Without this, --fix used to
+            # confidently announce "Applied N fixes" while the same
+            # warnings persisted on the next pm doctor run.
+            if raw_fix_results:
+                report = run_checks()
+                fix_results = verify_fix_results(raw_fix_results, report)
+            else:
+                fix_results = raw_fix_results
             if fix_results:
                 for name, success, message in fix_results:
                     glyph = "fixed" if success else "fix failed"
                     typer.echo(f"  [{glyph}] {name}: {message}")
-            manual_before_rerun = manual_fixes(report)
-            fix_summary = render_fix_summary(fix_results, manual_before_rerun)
-            if fix_results:
-                report = run_checks()
+            unverified = [
+                (name, message)
+                for (name, ok, message), (_, raw_ok, _) in zip(
+                    fix_results, raw_fix_results, strict=False
+                )
+                if raw_ok and not ok
+            ]
+            fix_summary = render_fix_summary(
+                fix_results, manual_before_rerun, unverified=unverified
+            )
         if json_output:
             typer.echo(render_json(report))
         else:
