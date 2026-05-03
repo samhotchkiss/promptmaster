@@ -58,6 +58,7 @@ from pollypm.cli_features.migrate import register_migrate_commands
 from pollypm.cli_features.projects import register_project_commands
 from pollypm.cli_features.session_runtime import register_session_runtime_commands
 from pollypm.cli_features.ui import register_ui_commands
+from pollypm.cli_features.update import register_update_commands
 from pollypm.cli_features.upgrade import register_upgrade_commands
 from pollypm.cli_features.workers import register_worker_commands
 
@@ -184,6 +185,7 @@ app.add_typer(downtime_app, name="downtime")
 register_ui_commands(app)
 register_project_commands(app)
 register_maintenance_commands(app)
+register_update_commands(app)
 register_upgrade_commands(app)
 register_migrate_commands(app)
 register_worker_commands(app)
