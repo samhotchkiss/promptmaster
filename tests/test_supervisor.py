@@ -252,7 +252,11 @@ def test_send_input_targets_mounted_cockpit_pane_when_window_not_in_storage(monk
             )
         ],
     )
-    # Mock list_panes to validate the cockpit pane exists
+    # Mock list_panes to validate the cockpit pane exists. The window_name
+    # must match the launch's ``window_name`` (#1086): cockpit_state's
+    # cached ``right_pane_id`` is only trusted when the pane currently
+    # lives in the expected window. Operator's launch.window_name is
+    # ``pm-operator`` (see ``_config``).
     monkeypatch.setattr(
         supervisor.tmux,
         "list_panes",
@@ -260,7 +264,7 @@ def test_send_input_targets_mounted_cockpit_pane_when_window_not_in_storage(monk
             TmuxPane(
                 session="pollypm",
                 window_index=0,
-                window_name="PollyPM",
+                window_name="pm-operator",
                 pane_index=1,
                 pane_id="%42",
                 active=True,
@@ -278,6 +282,62 @@ def test_send_input_targets_mounted_cockpit_pane_when_window_not_in_storage(monk
     supervisor.send_input("operator", "hello", owner="human")
 
     assert sent == [("%42", "hello")]
+
+
+def test_send_input_refuses_stale_cockpit_pane_when_window_name_mismatches(
+    monkeypatch, tmp_path: Path, caplog
+) -> None:
+    """#1086 — if cockpit_state ``right_pane_id`` lives in a window other
+    than the launch's expected window (tmux re-mount, persona swap), the
+    cached pane MUST NOT be returned. We refuse the stale value, log a
+    WARNING, and let downstream resolution surface the missing session.
+    """
+    import logging
+    import pytest
+
+    config = _config(tmp_path)
+    supervisor = Supervisor(config)
+    supervisor.ensure_layout()
+    state_path = config.project.base_dir / "cockpit_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps({"mounted_session": "operator", "right_pane_id": "%42"})
+    )
+
+    monkeypatch.setattr(supervisor.tmux, "has_session", lambda name: True)
+    monkeypatch.setattr(supervisor.tmux, "list_windows", lambda name: [])
+    # Pane %42 still exists, but tmux now reports it lives in ``pm-heartbeat``
+    # (the cross-window scenario from issue #1086) — not ``pm-operator``.
+    monkeypatch.setattr(
+        supervisor.tmux,
+        "list_panes",
+        lambda target: [
+            TmuxPane(
+                session="pollypm",
+                window_index=0,
+                window_name="pm-heartbeat",
+                pane_index=1,
+                pane_id="%42",
+                active=True,
+                pane_current_command="claude",
+                pane_current_path=str(tmp_path),
+                pane_dead=False,
+                pane_left=0,
+                pane_width=80,
+            )
+        ],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="pollypm.supervisor"):
+        with pytest.raises(RuntimeError, match="not found"):
+            supervisor.send_input("operator", "hello", owner="human")
+
+    assert any(
+        "right_pane_id stale" in record.getMessage()
+        and "expected_window='pm-operator'" in record.getMessage()
+        and "observed_window='pm-heartbeat'" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_send_input_raises_when_session_not_found(monkeypatch, tmp_path: Path) -> None:

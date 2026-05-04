@@ -1853,14 +1853,46 @@ class Supervisor:
                 if state.get("mounted_session") == launch.session.name:
                     right_pane = state.get("right_pane_id")
                     if right_pane:
-                        # Validate the pane still exists in tmux
+                        # Validate the pane still exists in tmux AND that its
+                        # current window_name matches the launch's expected
+                        # window. tmux can reassign a pane_id to a different
+                        # window (rename, re-mount, persona swap), and
+                        # cockpit_state.json can lag behind that mutation.
+                        # Trusting a stale ``right_pane_id`` against a window
+                        # hosting a different persona is exactly the
+                        # crossed-wiring scenario the upstream guards
+                        # (#1086) catch downstream — refuse it here so we
+                        # never hand a wrong-persona target to send_input.
+                        matched_pane = None
                         try:
                             cockpit_window = f"{cockpit_session}:{self._CONSOLE_WINDOW}"
                             panes = self.session_service.tmux.list_panes(cockpit_window)
-                            if any(p.pane_id == right_pane for p in panes):
-                                return right_pane
+                            for p in panes:
+                                if p.pane_id == right_pane:
+                                    matched_pane = p
+                                    break
                         except Exception:  # noqa: BLE001
-                            pass
+                            matched_pane = None
+                        if matched_pane is not None:
+                            observed_window = getattr(matched_pane, "window_name", "") or ""
+                            if observed_window == launch.window_name:
+                                return right_pane
+                            # Pane exists but lives in a different window
+                            # than the launch expects — invalidate the cache
+                            # and fall through. Do NOT mutate state to
+                            # "recover"; just refuse the stale value and let
+                            # downstream resolution find the right pane.
+                            logger.warning(
+                                "cockpit_state right_pane_id stale: "
+                                "session_name=%r right_pane=%r "
+                                "expected_window=%r observed_window=%r — "
+                                "refusing cached pane and falling through to "
+                                "downstream resolution",
+                                launch.session.name,
+                                right_pane,
+                                launch.window_name,
+                                observed_window,
+                            )
                         # Stale pane — clear state
                         state.pop("right_pane_id", None)
                         state.pop("mounted_session", None)
