@@ -512,6 +512,79 @@ def test_filter_approved_plan_reviews_no_op_without_project_paths() -> None:
     assert kept == [item]
 
 
+def test_filter_approved_plan_reviews_falls_back_to_workspace_db(
+    monkeypatch,
+) -> None:
+    """When the referenced project has no per-project DB, fall back to workspace.
+
+    Many users keep all task state in the workspace-root state.db
+    rather than per-project ones — the original #1103 fix only consulted
+    per-project DBs and missed every phantom row in this layout. The
+    workspace-root entry is keyed by the ``__workspace__`` sentinel so
+    the filter knows where to look.
+    """
+    from datetime import datetime
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from pollypm.cockpit_inbox_items import (
+        InboxEntry,
+        _WORKSPACE_DB_KEY,
+        _filter_approved_plan_reviews,
+    )
+    from pollypm.work.models import Decision, ExecutionStatus
+
+    approved_msg = InboxEntry(
+        task_id="msg:smoketest:7",
+        title="[Action] Plan ready for review: smoketest",
+        project="smoketest",
+        labels=["plan_review", "project:smoketest", "plan_task:smoketest/1"],
+        created_at=datetime(2026, 4, 30, 10, 0, 0),
+        updated_at=datetime(2026, 4, 30, 10, 0, 0),
+    )
+
+    approved_exec = SimpleNamespace(
+        node_id="user_approval",
+        status=ExecutionStatus.COMPLETED,
+        decision=Decision.APPROVED,
+    )
+    tasks_by_id = {
+        "smoketest/1": SimpleNamespace(
+            task_id="smoketest/1", executions=[approved_exec],
+        ),
+    }
+    opened_with: list[Path] = []
+
+    class FakeSvc:
+        def __init__(self, *, db_path, project_path):
+            opened_with.append(db_path)
+
+        def get(self, task_id):
+            return tasks_by_id[task_id]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "pollypm.cockpit_inbox_items.SQLiteWorkService",
+        FakeSvc,
+    )
+
+    # No per-project DB for ``smoketest``; only the workspace-root db
+    # is registered. The filter must still resolve smoketest/1 there.
+    project_db_paths = {
+        _WORKSPACE_DB_KEY: (
+            Path("/tmp/workspace.db"), Path("/tmp/workspace"),
+        ),
+    }
+    kept = _filter_approved_plan_reviews(
+        [approved_msg],
+        project_db_paths=project_db_paths,
+    )
+    assert kept == []
+    assert opened_with == [Path("/tmp/workspace.db")]
+
+
 def test_inbox_lists_seeded_messages(inbox_env, inbox_app) -> None:
     """On mount, every seeded inbox task shows up in the left list."""
     async def body() -> None:

@@ -519,6 +519,15 @@ def _is_plan_task_approved(svc, project: str, task_number: int) -> bool:
     return False
 
 
+# Sentinel key for the workspace-root state.db inside ``project_db_paths``.
+# The root db is the fallback DB for any project whose own
+# ``<project_path>/.pollypm/state.db`` doesn't exist on disk — in many
+# real workspaces every project shares the workspace-root db, so the
+# per-project ``plan_task:<project/number>`` ref must resolve there
+# (#1103 follow-up).
+_WORKSPACE_DB_KEY = "__workspace__"
+
+
 def _filter_approved_plan_reviews(
     items: list[InboxEntry],
     *,
@@ -534,12 +543,24 @@ def _filter_approved_plan_reviews(
 
     Logs the number of phantom rows filtered so we can measure inbox
     cleanup and decide when the proper sweeper is needed.
+
+    DB resolution: ``project_db_paths`` may carry both per-project
+    entries (``project_key -> (db, project_path)``) AND a workspace-root
+    entry under the ``__workspace__`` sentinel key. When a plan_review's
+    referenced project has no per-project DB, the workspace-root DB is
+    consulted as a fallback — most users keep all task state in the
+    workspace-root db rather than per-project ones (#1103 tick-5
+    follow-up: filter previously found zero phantoms because the
+    smoketest ref's project had no per-project db).
     """
     if not items or not project_db_paths:
         return items
-    # Group plan_task refs by project so each project's svc is opened
-    # at most once per render.
-    refs_by_project: dict[str, set[int]] = {}
+    workspace_db = project_db_paths.get(_WORKSPACE_DB_KEY)
+    # Group plan_task refs by the DB we'll consult so each db's svc is
+    # opened at most once per render. ``db_key`` is either the project
+    # key (when a per-project db exists) or ``__workspace__`` (fallback).
+    refs_by_db: dict[str, set[tuple[str, int]]] = {}
+    considered = 0
     for item in items:
         labels = {str(lbl) for lbl in (getattr(item, "labels", []) or [])}
         if "plan_review" not in labels:
@@ -552,25 +573,30 @@ def _filter_approved_plan_reviews(
             number = int(number_text)
         except (TypeError, ValueError):
             continue
-        if project not in project_db_paths:
+        if project in project_db_paths:
+            db_key = project
+        elif workspace_db is not None:
+            db_key = _WORKSPACE_DB_KEY
+        else:
             continue
-        refs_by_project.setdefault(project, set()).add(number)
-    if not refs_by_project:
+        refs_by_db.setdefault(db_key, set()).add((project, number))
+        considered += 1
+    if not refs_by_db:
         return items
     approved_refs: set[str] = set()
-    for project, numbers in refs_by_project.items():
-        db_path, project_path = project_db_paths[project]
+    for db_key, refs in refs_by_db.items():
+        db_path, project_path = project_db_paths[db_key]
         try:
             svc = SQLiteWorkService(db_path=db_path, project_path=project_path)
         except Exception:  # noqa: BLE001
             logger.debug(
-                "inbox: open svc failed for project %s during plan-review check",
-                project,
+                "inbox: open svc failed for db %s during plan-review check",
+                db_key,
                 exc_info=True,
             )
             continue
         try:
-            for number in numbers:
+            for project, number in refs:
                 if _is_plan_task_approved(svc, project, number):
                     approved_refs.add(f"{project}/{number}")
         finally:
@@ -578,8 +604,6 @@ def _filter_approved_plan_reviews(
                 svc.close()
             except Exception:  # noqa: BLE001
                 pass
-    if not approved_refs:
-        return items
     kept: list[InboxEntry] = []
     dropped = 0
     for item in items:
@@ -590,10 +614,14 @@ def _filter_approved_plan_reviews(
                 dropped += 1
                 continue
         kept.append(item)
-    if dropped:
+    # Always log "considered N, dropped M" when we examined any rows so a
+    # future regression (filter wired but nothing dropped) is obvious in
+    # the cockpit debug log instead of silently surfacing phantom rows.
+    if considered:
         logger.info(
-            "inbox: filtered %d phantom plan_review row(s) "
-            "(user_approval already APPROVED) across %d project(s)",
+            "inbox: plan_review filter considered %d row(s), dropped %d "
+            "(user_approval APPROVED) across %d ref(s)",
+            considered,
             dropped,
             len(approved_refs),
         )
@@ -614,14 +642,19 @@ def load_inbox_entries(
     known_projects = set(getattr(config, "projects", {}).keys())
     # ``plan_task:<project/number>`` refs may point at a project other
     # than the one that hosts the notify message — collect db paths for
-    # every project so the approval filter can resolve any ref.
+    # every project so the approval filter can resolve any ref. The
+    # workspace-root db lands under the ``__workspace__`` sentinel so
+    # the filter can fall back to it when a referenced project has no
+    # per-project state.db (#1103 follow-up).
     project_db_paths: dict[str, tuple[Path, Path]] = {}
     for project_key, db_path, project_path in _inbox_db_sources(config):
         if not db_path.exists():
             continue
-        source_key = project_key or "__workspace__"
+        source_key = project_key or _WORKSPACE_DB_KEY
         if project_key:
             project_db_paths[project_key] = (db_path, project_path)
+        else:
+            project_db_paths[_WORKSPACE_DB_KEY] = (db_path, project_path)
         try:
             store = SQLAlchemyStore(f"sqlite:///{db_path}")
         except Exception:  # noqa: BLE001
