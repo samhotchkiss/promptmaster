@@ -8321,8 +8321,39 @@ class PollyInboxApp(App[None]):
             return
         svc = self._svc_for_task(task_id)
         if svc is None:
-            self.notify("Could not open project database.", severity="error")
-            return
+            # Workspace-scoped task entries (project sentinel "inbox" or
+            # task IDs whose project is not a registered project) have
+            # no per-project database. Fall back to opening the
+            # work-service directly at the entry's source ``db_path``
+            # (which load_inbox_entries set to the workspace-root
+            # state.db for these items) instead of stranding the user
+            # on a red error toast (#1087, mirroring #855's detail-pane
+            # fallback).
+            project_key = task_id.split("/", 1)[0] if "/" in task_id else None
+            is_workspace = (
+                project_key is None
+                or project_key in {"inbox", "workspace", "[workspace]", "root"}
+                or self._project_key_is_unknown(project_key)
+            )
+            db_path = getattr(item, "db_path", None)
+            if is_workspace and db_path is not None:
+                try:
+                    from pollypm.work.sqlite_service import SQLiteWorkService
+                    svc = SQLiteWorkService(
+                        db_path=db_path, project_path=db_path.parent.parent,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.notify(
+                        f"Archive failed: {exc}", severity="error",
+                    )
+                    return
+            else:
+                self.notify(
+                    "Could not open project database "
+                    "(workspace-scoped item — try `pm inbox archive`).",
+                    severity="error",
+                )
+                return
         try:
             svc.archive_task(task_id, actor="user")
         except Exception as exc:  # noqa: BLE001
