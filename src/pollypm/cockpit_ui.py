@@ -22,6 +22,7 @@ from __future__ import annotations
 import gc
 import asyncio
 import json
+import logging
 import os
 import resource
 from pathlib import Path
@@ -7852,13 +7853,48 @@ class PollyInboxApp(App[None]):
             if is_workspace:
                 self._render_message_detail(item)
                 return
-            self.detail.update(
-                "[#f0c45a]This task lives in a project that is not "
-                "currently registered with PollyPM. Add the project from "
-                "the project picker to load its details here.[/#f0c45a]"
-            )
-            self._clear_rollup_items()
-            return
+            # #1099: the task's project is registered (per the rail) but
+            # ``_svc_for_task`` couldn't open the per-project DB — usually
+            # because the project key in the task row (e.g.
+            # ``polly_remote``) doesn't match the registered project key
+            # (``polly-remote``). The inbox loader stamped the entry with
+            # the actual ``db_path`` it was read from (see
+            # ``task_to_inbox_entry`` / ``_inbox_db_sources``); reuse it
+            # the same way ``action_archive_selected`` does post-#1087
+            # instead of stranding the user on the yellow fallback.
+            db_path = getattr(item, "db_path", None)
+            if db_path is not None:
+                try:
+                    from pollypm.work.sqlite_service import SQLiteWorkService
+
+                    svc = SQLiteWorkService(
+                        db_path=db_path, project_path=db_path.parent.parent,
+                    )
+                except Exception:  # noqa: BLE001
+                    svc = None
+            if svc is None:
+                # Residual unresolved branch — log identifying fields so a
+                # future regression has a clear signal instead of a silent
+                # yellow fallback (per #1099 plan).
+                try:  # noqa: SIM105
+                    log = logging.getLogger(__name__)
+                    log.warning(
+                        "cockpit inbox detail: svc unresolved for task_id=%s "
+                        "project_name=%r session_name=%r db_path=%r",
+                        task_id,
+                        getattr(item, "project", None),
+                        getattr(item, "scope", None),
+                        getattr(item, "db_path", None),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                self.detail.update(
+                    "[#f0c45a]This task lives in a project that is not "
+                    "currently registered with PollyPM. Add the project from "
+                    "the project picker to load its details here.[/#f0c45a]"
+                )
+                self._clear_rollup_items()
+                return
         try:
             task = svc.get(task_id)
             replies = svc.list_replies(task_id)
