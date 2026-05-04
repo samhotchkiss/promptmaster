@@ -561,17 +561,21 @@ def _filter_approved_plan_reviews(
     # key (when a per-project db exists) or ``__workspace__`` (fallback).
     refs_by_db: dict[str, set[tuple[str, int]]] = {}
     considered = 0
+    refs_unparsed = 0
     for item in items:
         labels = {str(lbl) for lbl in (getattr(item, "labels", []) or [])}
         if "plan_review" not in labels:
             continue
+        considered += 1
         ref = _plan_task_ref(item)
         if not ref or "/" not in ref:
+            refs_unparsed += 1
             continue
         project, _, number_text = ref.partition("/")
         try:
             number = int(number_text)
         except (TypeError, ValueError):
+            refs_unparsed += 1
             continue
         if project in project_db_paths:
             db_key = project
@@ -580,8 +584,18 @@ def _filter_approved_plan_reviews(
         else:
             continue
         refs_by_db.setdefault(db_key, set()).add((project, number))
-        considered += 1
     if not refs_by_db:
+        if considered:
+            # Log even when no refs resolved, so a producer-side
+            # regression (plan_review rows missing the plan_task label)
+            # is visible in cockpit_debug.log instead of silently
+            # piling phantoms in the action lens.
+            logger.info(
+                "inbox: plan_review filter considered %d row(s), dropped 0 "
+                "(no resolvable plan_task refs), refs_unparsed=%d",
+                considered,
+                refs_unparsed,
+            )
         return items
     approved_refs: set[str] = set()
     for db_key, refs in refs_by_db.items():
@@ -620,10 +634,11 @@ def _filter_approved_plan_reviews(
     if considered:
         logger.info(
             "inbox: plan_review filter considered %d row(s), dropped %d "
-            "(user_approval APPROVED) across %d ref(s)",
+            "(user_approval APPROVED) across %d ref(s), refs_unparsed=%d",
             considered,
             dropped,
             len(approved_refs),
+            refs_unparsed,
         )
     return kept
 

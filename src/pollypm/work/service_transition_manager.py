@@ -776,6 +776,77 @@ class WorkTransitionManager:
                 exc_info=True,
             )
 
+    def _close_plan_review_notify_after_approve(self, task: Task) -> None:
+        """Close any open ``plan_review`` notify message for this plan_task.
+
+        Belt-and-suspenders for #1103: when the user approves a
+        ``plan_project``/``user_approval`` task, also close the
+        architect's ``[Action] Plan ready for review: ...`` notify
+        message that points at this task via the
+        ``plan_task:<project>/<number>`` label. The cockpit inbox has
+        a per-render filter that hides such phantom rows, but closing
+        the underlying row here keeps the source clean too — anyone
+        querying open ``notify`` messages directly sees the right
+        state, not just cockpit users.
+
+        Fire-and-forget; any error is swallowed.
+        """
+        if task.flow_template_id != "plan_project":
+            return
+        try:
+            store = self._resolve_alert_store()
+            if store is None:
+                return
+            target_label = f"plan_task:{task.task_id}"
+            try:
+                rows = store.query_messages(
+                    recipient="user",
+                    state="open",
+                    type=["notify"],
+                )
+            except Exception:  # noqa: BLE001
+                return
+            closed = 0
+            for row in rows or []:
+                labels_raw = row.get("labels") or []
+                labels: list[str] = []
+                if isinstance(labels_raw, list):
+                    labels = [str(x) for x in labels_raw]
+                elif isinstance(labels_raw, str) and labels_raw:
+                    import json as _json
+
+                    try:
+                        parsed = _json.loads(labels_raw)
+                        if isinstance(parsed, list):
+                            labels = [str(x) for x in parsed]
+                    except ValueError:
+                        labels = []
+                if "plan_review" not in labels:
+                    continue
+                if target_label not in labels:
+                    continue
+                msg_id = row.get("id")
+                if msg_id is None:
+                    continue
+                try:
+                    store.close_message(int(msg_id))
+                    closed += 1
+                except Exception:  # noqa: BLE001
+                    continue
+            if closed:
+                logger.info(
+                    "approve(%s): closed %d phantom plan_review notify "
+                    "row(s)",
+                    task.task_id,
+                    closed,
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "_close_plan_review_notify_after_approve failed for %s",
+                task.task_id,
+                exc_info=True,
+            )
+
     def _clear_no_session_alert_after_approve(self, task: Task) -> None:
         """Clear the per-task no_session alert after an approve transition.
 
@@ -1226,6 +1297,12 @@ class WorkTransitionManager:
             # — any error is swallowed so a misconfigured alert store
             # can't block the approve transition.
             self._clear_no_session_alert_after_approve(task)
+            # #1103: close any open plan_review notify message that
+            # points at this just-approved plan_task. Cockpit already
+            # filters phantom rows at render-time, but closing the
+            # underlying row keeps the message store honest for any
+            # other consumer. Best-effort — any error is swallowed.
+            self._close_plan_review_notify_after_approve(task)
 
         return self._finish(
             task_id,
