@@ -553,6 +553,16 @@ def _filter_approved_plan_reviews(
     follow-up: filter previously found zero phantoms because the
     smoketest ref's project had no per-project db).
     """
+    # #1103 tick-8 diagnostic: emit a WARNING (not INFO) so we can confirm
+    # the filter is even being called from the cockpit's render path. If
+    # this never appears in cockpit_debug.log after activation, the loader
+    # invoked by the cockpit isn't ``load_inbox_entries`` and the filter
+    # is misplaced.
+    logger.warning(
+        "FILTER_CALLED rows=%d project_db_paths=%d",
+        len(items),
+        len(project_db_paths),
+    )
     if not items or not project_db_paths:
         return items
     workspace_db = project_db_paths.get(_WORKSPACE_DB_KEY)
