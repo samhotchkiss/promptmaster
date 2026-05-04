@@ -5133,6 +5133,35 @@ def _make_rail_app_with_settings(
     return app, nav
 
 
+def test_cockpit_down_starts_from_visible_project_subtab_after_pane_swap() -> None:
+    """#1138: a stale hidden nav cursor must not make Down look like a no-op.
+
+    A right-pane route can update ``selected_key`` to the PM sub-tab while
+    the ListView cursor still points at Dashboard. The next Down should
+    start from the visible PM marker and land on Tasks in one press.
+    """
+    items = [
+        _StubItem("project:demo"),
+        _StubItem("project:demo:dashboard"),
+        _StubItem("project:demo:session"),
+        _StubItem("project:demo:issues"),
+        _StubItem("project:demo:settings"),
+    ]
+    keys = [item.cockpit_key for item in items if item.cockpit_key is not None]
+    app, nav = _make_rail_app_with_settings(
+        items,
+        items_keys=keys,
+        selected_key="project:demo:session",
+    )
+    app._suspend_selection_events = False
+    nav.index = 1  # stale Dashboard cursor; visible marker is PM Chat.
+
+    app.action_cursor_down()
+
+    assert nav.index == 3
+    assert app.selected_key == "project:demo:issues"
+
+
 def test_cockpit_j_at_last_nav_row_steps_onto_settings() -> None:
     """j on the last nav row (Activity) lands on Settings when the gear
     row is visible — the blank gap between Activity and Settings must

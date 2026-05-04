@@ -2285,6 +2285,35 @@ class PollyCockpitApp(App[None]):
                 return i
         return None
 
+    def _nav_index_for_key(self, key: str) -> int | None:
+        try:
+            children = list(self.nav.children)
+        except AttributeError:
+            return None
+        for i, child in enumerate(children):
+            if getattr(child, "disabled", False):
+                continue
+            if isinstance(child, RailItem):
+                child_key = child.cockpit_key
+            else:
+                child_key = getattr(child, "cockpit_key", None)
+            if child_key == key:
+                return i
+        return None
+
+    def _align_nav_cursor_to_selected_key(self) -> None:
+        """Make the hidden ListView cursor match the visible rail marker."""
+        if not isinstance(self.selected_key, str) or self.selected_key == "settings":
+            return
+        index = self._nav_index_for_key(self.selected_key)
+        if index is None or self.nav.index == index:
+            return
+        self._suspend_selection_events = True
+        try:
+            self.nav.index = index
+        finally:
+            self._suspend_selection_events = False
+
     def _select_settings_row(self) -> None:
         self._cancel_pending_route_selection()
         self.selected_key = "settings"
@@ -2295,6 +2324,7 @@ class PollyCockpitApp(App[None]):
         if self.selected_key == "settings":
             self._send_key_to_settings_pane("j")
             return
+        self._align_nav_cursor_to_selected_key()
         last_idx = self._last_nav_index()
         # On the last selectable nav row + Settings is visible → step
         # down onto Settings instead of stalling at Activity (#1080).
@@ -2315,6 +2345,7 @@ class PollyCockpitApp(App[None]):
         if self.selected_key == "settings":
             self._send_key_to_settings_pane("k")
             return
+        self._align_nav_cursor_to_selected_key()
         # Step up off the virtual Settings row onto the last
         # selectable nav row (#1080).
         if self.nav.index is None:
