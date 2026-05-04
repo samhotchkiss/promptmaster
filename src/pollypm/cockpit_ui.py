@@ -8845,13 +8845,22 @@ class PollyInboxApp(App[None]):
     # Improvement proposals (#275) — Accept / Reject
     # ------------------------------------------------------------------
 
+    # #1097 \u2014 ``A approve`` is included in every default-context hint so
+    # plan-review items (which sit in the inbox 1-3 days waiting for the
+    # user) always document the approval gesture. The plan-review-specific
+    # variants below still win when a plan-review row is selected, but
+    # this guarantees the approve key is discoverable even before the
+    # context-aware swap happens (e.g. on first paint, on a paused item,
+    # or if label-detection misclassifies the row). Pressing ``A`` on a
+    # non-acceptable item is harmless \u2014 ``action_accept_proposal`` shows
+    # a "only applies to proposal items" notice and no-ops.
     _DEFAULT_HINT = (
-        "j/k move \u00b7 \u21b5 open \u00b7 r reply \u00b7 a archive "
-        "\u00b7 d discuss \u00b7 / filter \u00b7 n notifications "
-        "\u00b7 m all \u00b7 c clear \u00b7 q close"
+        "j/k move \u00b7 \u21b5 open \u00b7 r reply \u00b7 A approve "
+        "\u00b7 a archive \u00b7 d discuss \u00b7 / filter "
+        "\u00b7 n notifications \u00b7 m all \u00b7 c clear \u00b7 q close"
     )
     _MESSAGE_HINT = (
-        "j/k move \u00b7 \u21b5 open \u00b7 a archive "
+        "j/k move \u00b7 \u21b5 open \u00b7 A approve \u00b7 a archive "
         "\u00b7 d discuss \u00b7 / filter \u00b7 n notifications "
         "\u00b7 m all \u00b7 c clear \u00b7 q close"
     )
