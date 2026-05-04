@@ -34,6 +34,14 @@ class TranscriptUsageEvent:
 
 
 @dataclass(slots=True)
+class TokenCostSummary:
+    project_key: str
+    tokens_used: int
+    cache_read_tokens: int
+    days_active: int
+
+
+@dataclass(slots=True)
 class TranscriptScanResult:
     final_sample: TranscriptTokenSample
     usage_events: list[TranscriptUsageEvent]
@@ -370,3 +378,48 @@ def recent_token_usage(config_path: Path, *, limit: int = 24) -> list[TokenUsage
             store.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def token_usage_costs(
+    config_path: Path,
+    *,
+    project: str | None = None,
+    days: int = 7,
+) -> list[TokenCostSummary]:
+    """Return token usage aggregated by normalized project key."""
+    config = load_config(config_path)
+    store = StateStore(config.project.state_db)
+    try:
+        rows = store.execute(
+            """
+            SELECT LOWER(project_key) AS project_key,
+                   SUM(tokens_used) as total,
+                   SUM(cache_read_tokens) as cache_total,
+                   COUNT(DISTINCT substr(hour_bucket, 1, 10)) as days_active
+            FROM token_usage_hourly
+            WHERE hour_bucket >= date('now', ?)
+            GROUP BY LOWER(project_key)
+            ORDER BY total DESC
+            """,
+            (f"-{days} days",),
+        ).fetchall()
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001
+            pass
+    project_filter = project.lower() if project else None
+    out: list[TokenCostSummary] = []
+    for row in rows:
+        project_key = str(row[0])
+        if project_filter and project_key != project_filter:
+            continue
+        out.append(
+            TokenCostSummary(
+                project_key=project_key,
+                tokens_used=int(row[1]),
+                cache_read_tokens=int(row[2] or 0),
+                days_active=int(row[3]),
+            )
+        )
+    return out

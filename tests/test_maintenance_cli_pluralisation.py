@@ -116,10 +116,10 @@ def test_costs_pluralises_lookback_window(tmp_path: Path) -> None:
     )
 
     with patch(
-        "pollypm.cli_features.maintenance.load_config",
+        "pollypm.transcript_ledger.load_config",
         lambda _p: fake_config,
     ), patch(
-        "pollypm.cli_features.maintenance.StateStore",
+        "pollypm.transcript_ledger.StateStore",
         lambda _db: _FakeStore(),
     ):
         out = runner.invoke(app, ["costs", "--days", "1", "--config", str(cfg)])
@@ -184,7 +184,7 @@ def test_costs_collapses_case_variant_project_keys(tmp_path: Path) -> None:
     )
 
     with patch(
-        "pollypm.cli_features.maintenance.load_config",
+        "pollypm.transcript_ledger.load_config",
         lambda _p: fake_config,
     ):
         out = runner.invoke(app, ["costs", "--days", "7", "--config", str(cfg)])
@@ -200,7 +200,7 @@ def test_costs_collapses_case_variant_project_keys(tmp_path: Path) -> None:
     # ``--project`` filter should canonicalize too: passing the
     # capitalized form must still match the lowercased aggregate row.
     with patch(
-        "pollypm.cli_features.maintenance.load_config",
+        "pollypm.transcript_ledger.load_config",
         lambda _p: fake_config,
     ):
         filtered = runner.invoke(
