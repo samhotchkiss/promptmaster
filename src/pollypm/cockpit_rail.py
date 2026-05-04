@@ -1625,12 +1625,33 @@ class CockpitRouter:
         db_path = project_path / ".pollypm" / "state.db"
         if not db_path.exists():
             return [], False
+        from pollypm.cockpit_ui import _project_storage_aliases
         from pollypm.plugins_builtin.project_planning.plan_presence import has_acceptable_plan
         from pollypm.work.sqlite_service import SQLiteWorkService
 
         work = SQLiteWorkService(db_path, project_path=project_path)
         try:
-            tasks = list(work.list_tasks(project=project_key))
+            # #1092 — match the dashboard's alias-aware lookup. The work
+            # DB stores tasks under the display name (``booktalk``) while
+            # the rollup receives the slugified config key, so a single
+            # ``list_tasks(project=project_key)`` silently returned zero
+            # tasks for projects whose key and display name diverge.
+            # The dashboard correctly counts ``on_hold`` via the alias
+            # union — without it here, the rail rollup falls through to
+            # ``ProjectRailState.NONE`` and the held-task project shows
+            # up in the rail with the idle ``♥·`` glyph (no marker)
+            # instead of the ``◆`` "needs attention" indicator.
+            aliases = _project_storage_aliases(config, project_key)
+            seen_ids: set[str] = set()
+            tasks: list = []
+            for alias in aliases:
+                for task in work.list_tasks(project=alias):
+                    tid = getattr(task, "task_id", None)
+                    if tid and tid in seen_ids:
+                        continue
+                    if tid:
+                        seen_ids.add(tid)
+                    tasks.append(task)
             planner = getattr(config, "planner", None)
             plan_dir = str(getattr(planner, "plan_dir", "docs/plan") or "docs/plan")
             global_enforce = bool(getattr(planner, "enforce_plan", True))
@@ -3925,7 +3946,11 @@ class PollyCockpitRail:
                 )
                 return "\u25b2", color
             if item.state == "project-yellow":
-                return "\u2022", PALETTE["inbox_has"]
+                # #1092 \u2014 use \u25c6 to match the dashboard's "needs attention"
+                # diamond. ``\u2022`` (U+2022) and the idle ``\u00b7`` (U+00B7) are
+                # visually indistinguishable in many terminal fonts, so a
+                # held-task project read as idle in the rail.
+                return "\u25c6", PALETTE["inbox_has"]
             if item.state == "project-green":
                 return "\u2022", PALETTE["live_indicator"]
             if item.state == "project-working":

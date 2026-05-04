@@ -747,7 +747,11 @@ class RailItem(ListItem):
             if self.item.state == "project-red":
                 return "▲", alert_color
             if self.item.state == "project-yellow":
-                return "•", "#f0a030"
+                # #1092 — use ◆ to match the dashboard's "needs attention"
+                # diamond. ``•`` and the idle ``·`` are visually
+                # indistinguishable in many terminal fonts, so a project
+                # with held tasks read as idle in the rail.
+                return "◆", "#f0a030"
             if self.item.state == "project-green":
                 return "•", "#3ddc84"
             if self.item.state == "project-working":

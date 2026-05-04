@@ -824,7 +824,9 @@ def test_cockpit_raw_rail_project_rollup_status_uses_indicator_not_label() -> No
     assert "booktalk" in row.text
     assert "🟡" not in row.text
     assert "⚙" not in row.text
-    assert "•" in row.text
+    # #1092 — yellow rollup uses ◆ to match the dashboard's "needs
+    # attention" diamond and stay visually distinct from idle ``·``.
+    assert "◆" in row.text
     assert "♡" not in row.text
 
 
@@ -854,7 +856,9 @@ def test_cockpit_ui_project_rollup_status_uses_indicator_not_label() -> None:
             assert "booktalk" in plain
             assert "🟡" not in plain
             assert "⚙" not in plain
-            assert "•" in plain
+            # #1092 — yellow rollup uses ◆ to match the dashboard's
+            # "needs attention" diamond.
+            assert "◆" in plain
 
     asyncio.run(exercise())
 
