@@ -486,6 +486,29 @@ def _plan_task_ref(item: InboxEntry) -> str:
     return ""
 
 
+def _task_user_approval_is_approved(task) -> bool:
+    """Return True when ``task``'s user_approval node-run is APPROVED.
+
+    Inspects the task's already-loaded ``executions`` list (no DB
+    fetch) for the canonical ``user_approval`` node and reports whether
+    the latest completed visit was APPROVED. Latest-wins matches the
+    binding-decision semantics used elsewhere. Returns False on any
+    structural surprise — fail-open so a transient anomaly never
+    silently hides a real action-needed row.
+    """
+    for execution in reversed(getattr(task, "executions", []) or []):
+        if getattr(execution, "node_id", None) != _PLAN_APPROVAL_NODE_ID:
+            continue
+        if getattr(execution, "status", None) is not ExecutionStatus.COMPLETED:
+            continue
+        decision = getattr(execution, "decision", None)
+        if decision is Decision.APPROVED:
+            return True
+        if decision is Decision.REJECTED:
+            return False
+    return False
+
+
 def _is_plan_task_approved(svc, project: str, task_number: int) -> bool:
     """Return True when ``project/task_number`` has user_approval = APPROVED.
 
@@ -506,17 +529,7 @@ def _is_plan_task_approved(svc, project: str, task_number: int) -> bool:
             exc_info=True,
         )
         return False
-    for execution in reversed(getattr(task, "executions", []) or []):
-        if getattr(execution, "node_id", None) != _PLAN_APPROVAL_NODE_ID:
-            continue
-        if getattr(execution, "status", None) is not ExecutionStatus.COMPLETED:
-            continue
-        decision = getattr(execution, "decision", None)
-        if decision is Decision.APPROVED:
-            return True
-        if decision is Decision.REJECTED:
-            return False
-    return False
+    return _task_user_approval_is_approved(task)
 
 
 # Sentinel key for the workspace-root state.db inside ``project_db_paths``.
@@ -730,6 +743,28 @@ def load_inbox_entries(
                 if task.task_id in seen_task_ids:
                     continue
                 seen_task_ids.add(task.task_id)
+                # Synth-source filter for plan_review (#1103, 4th
+                # attempt). The post-emission ``_filter_approved_plan_reviews``
+                # only catches notify-message rows that carry a
+                # ``plan_task:<project/number>`` ref label — task-backed
+                # synth rows (the ones produced here) don't carry that
+                # label, so the filter never sees them. Check the
+                # task's own user_approval execution directly: if it's
+                # COMPLETED + APPROVED, the plan review is already
+                # done and emitting the row would be a phantom action.
+                task_labels = {str(lbl) for lbl in (getattr(task, "labels", []) or [])}
+                if "plan_review" in task_labels:
+                    emit = not _task_user_approval_is_approved(task)
+                    logger.warning(
+                        "PLAN_REVIEW_SYNTH project=%s task_id=%s emit=%s "
+                        "reason=%s",
+                        getattr(task, "project", "") or "",
+                        task.task_id,
+                        emit,
+                        "user_approval_pending" if emit else "user_approval_approved",
+                    )
+                    if not emit:
+                        continue
                 items.append(
                     annotate_inbox_entry(
                         task_to_inbox_entry(task, db_path=db_path),
