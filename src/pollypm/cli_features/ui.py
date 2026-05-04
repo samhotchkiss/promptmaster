@@ -10,6 +10,7 @@ Contract:
 
 from __future__ import annotations
 
+import logging
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,49 @@ from pathlib import Path
 import typer
 
 from pollypm.config import DEFAULT_CONFIG_PATH
+
+
+def _install_cockpit_debug_log_handler(config_path: Path) -> None:
+    """Attach a ``FileHandler`` so cockpit-side ``logger.info``/``warning``
+    calls land in ``~/.pollypm/cockpit_debug.log``.
+
+    Closes #1108: previously only the boot ``--- START ... ---`` banner
+    (written directly to the file in ``cockpit()`` below) reached the
+    debug log. Library code calling ``logger.info(...)`` /
+    ``logger.warning(...)`` had no handler to receive it because the
+    cockpit's stdout/stderr is the user's TTY (not a captured pipe like
+    ``rail_daemon``'s) and nothing else attached a file sink. This made
+    it impossible to validate fixes like #1103 from logs.
+
+    The handler is attached to the root logger at ``INFO`` so any
+    ``getLogger(__name__)`` user across cockpit-side code is captured
+    without per-module wiring. Idempotent — multiple cockpit-pane
+    launches in the same process won't stack handlers.
+    """
+    debug_log = config_path.parent / "cockpit_debug.log"
+    try:
+        debug_log.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # If we can't create the dir, the open() below would fail too;
+        # logging is best-effort, never block cockpit boot on it.
+        return
+    sentinel = "_pollypm_cockpit_debug_log"
+    root = logging.getLogger()
+    for existing in root.handlers:
+        if getattr(existing, sentinel, False):
+            return  # already installed in this process
+    try:
+        handler = logging.FileHandler(debug_log, mode="a", encoding="utf-8")
+    except OSError:
+        return
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    )
+    setattr(handler, sentinel, True)
+    root.addHandler(handler)
+    if root.level == logging.NOTSET or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
 
 
 def _enforce_migration_gate(config_path: Path) -> None:
@@ -97,6 +141,7 @@ def register_ui_commands(app: typer.Typer) -> None:
     ) -> None:
         _enforce_migration_gate(config_path)
         _warn_on_plugin_load_errors(config_path)
+        _install_cockpit_debug_log_handler(config_path)
         crash_log = config_path.parent / "cockpit_crash.log"
         debug_log = config_path.parent / "cockpit_debug.log"
         try:
@@ -144,6 +189,7 @@ def register_ui_commands(app: typer.Typer) -> None:
         ),
     ) -> None:
         _enforce_migration_gate(config_path)
+        _install_cockpit_debug_log_handler(config_path)
         if kind == "settings" and target:
             from pollypm.cockpit_ui import PollyProjectSettingsApp
 
