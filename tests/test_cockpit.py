@@ -2137,7 +2137,11 @@ def test_cockpit_ui_bindings_expose_activity_and_pin_legend() -> None:
     bindings = {binding.key: binding.description for binding in PollyCockpitApp.BINDINGS}
 
     assert bindings["t"] == "Activity"
-    assert bindings["p"] == "Pin Project"
+    # #1088 — pin moved from ``p`` to ``P``; lowercase ``p`` now forwards
+    # to the project dashboard's ``p plan`` so the bottom hint matches
+    # the actual behaviour.
+    assert bindings["P"] == "Pin Project"
+    assert bindings["p"] == "Plan"
 
 
 def test_cockpit_new_worker_non_project_selection_updates_hint() -> None:
@@ -4639,6 +4643,29 @@ def test_cockpit_forwards_l_to_right_pane_only_on_project_surface() -> None:
     app.selected_key = "project:demo:dashboard"
     app.action_forward_project_log()
     assert sent == ["l"]
+
+
+def test_cockpit_forwards_p_to_right_pane_only_on_project_surface() -> None:
+    """``p`` from rail forwards to the right pane only on a project (#1088).
+
+    Before the fix, ``p`` was bound to ``toggle_project_pin`` and the
+    dashboard's advertised ``p plan`` keystroke never reached the
+    dashboard — pinning fired instead and the rail jumped to the
+    alphabetically-first project. After the fix ``p`` forwards to the
+    right pane on a project surface (so the dashboard's ``open_plan``
+    handler runs); pin moves to capital ``P``.
+    """
+    app = PollyCockpitApp.__new__(PollyCockpitApp)
+    sent: list[str] = []
+    app._send_key_to_right_pane = lambda key: sent.append(key)  # type: ignore[method-assign]
+
+    app.selected_key = "polly"
+    app.action_forward_project_plan()
+    assert sent == [], "should not forward p outside of project surfaces"
+
+    app.selected_key = "project:demo:dashboard"
+    app.action_forward_project_plan()
+    assert sent == ["p"]
 
 
 def test_cockpit_project_enter_advances_cursor_to_dashboard_subitem() -> None:

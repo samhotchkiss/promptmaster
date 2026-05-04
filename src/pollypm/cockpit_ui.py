@@ -964,7 +964,18 @@ class PollyCockpitApp(App[None]):
         Binding("n", "new_worker", "New Worker"),
         Binding("i", "open_inbox", "Inbox", show=False, priority=True),
         Binding("t", "open_activity", "Activity"),
-        Binding("p", "toggle_project_pin", "Pin Project"),
+        # #1088 — ``p`` from the rail used to fire ``toggle_project_pin``,
+        # which shadowed the project dashboard's advertised ``p plan``
+        # (the dashboard hint reads ``c chat · p plan · i inbox · l log
+        # · q home``). Forward ``p`` to the right pane on a project
+        # surface so the dashboard's own ``open_plan`` handler runs;
+        # capital ``P`` keeps the pin affordance available from the rail
+        # (mirrors the ``r``/``R`` split for refresh vs recovery).
+        Binding(
+            "p", "forward_project_plan", "Plan",
+            show=False, priority=True,
+        ),
+        Binding("P", "toggle_project_pin", "Pin Project"),
         Binding("r", "refresh", "Refresh"),
         Binding("s", "open_settings", "Settings"),
         Binding("tab", "forward_tab_to_right", "Right Pane", show=False, priority=True),
@@ -1046,6 +1057,7 @@ class PollyCockpitApp(App[None]):
         "forward_action_button_3",
         "forward_project_chat",  # c
         "forward_project_log",   # l
+        "forward_project_plan",  # p (#1088)
         "forward_workers_auto_refresh",  # A
         "view_alert_detail",     # !  (#989 — let the alert modal own ! when up)
     })
@@ -1073,6 +1085,7 @@ class PollyCockpitApp(App[None]):
         "forward_action_button_3",
         "forward_project_chat",  # c
         "forward_project_log",   # l
+        "forward_project_plan",  # p (#1088)
         "forward_workers_auto_refresh",  # A
         "view_alert_detail",     # !  (#989)
     })
@@ -2514,6 +2527,19 @@ class PollyCockpitApp(App[None]):
         if self._on_project_surface():
             self._send_key_to_right_pane("l")
 
+    def action_forward_project_plan(self) -> None:
+        """#1088 — forward ``p`` to the right pane so the project
+        dashboard's ``open_plan`` handler (which the bottom hint
+        advertises as ``p plan``) actually runs.
+
+        Without this, the rail's ``p`` was bound to ``toggle_project_pin``
+        and the keystroke never reached the dashboard. Pin still works
+        from the rail via capital ``P``. Off a project surface this is
+        a no-op — there is no plan to open.
+        """
+        if self._on_project_surface():
+            self._send_key_to_right_pane("p")
+
     def action_forward_recovery_action(self) -> None:
         """#1016 — forward ``R`` to the right pane so the project
         dashboard / Tasks pane can render the recovery block.
@@ -2536,10 +2562,12 @@ class PollyCockpitApp(App[None]):
         except Exception as exc:  # noqa: BLE001
             self.hint.update(f"Error: {exc}"[:60])
             return
-        # User feedback so a second ``p`` press is visibly an unpin
-        # rather than feeling like a silent no-op (#858).
+        # User feedback so a second ``P`` press is visibly an unpin
+        # rather than feeling like a silent no-op (#858). Pin moved
+        # from ``p`` to ``P`` in #1088 so the dashboard's ``p plan``
+        # binding could route through.
         if now_pinned:
-            self.hint.update(f"Pinned {project_key} — press p again to unpin.")
+            self.hint.update(f"Pinned {project_key} — press P again to unpin.")
         else:
             self.hint.update(f"Unpinned {project_key}.")
         self._refresh_rows()
