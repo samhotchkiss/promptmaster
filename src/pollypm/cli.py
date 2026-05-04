@@ -379,11 +379,11 @@ def main(
                 return
             _first_run_setup_and_launch(config_path=config_path)
             return
-        # #1111 — use ctx.invoke so Typer applies Option defaults
-        # (e.g. phantom_client=False). Calling up() directly leaves
-        # OptionInfo sentinels in place, which are truthy and trip the
-        # phantom-client launch path on bare `pm`.
-        ctx.invoke(up, config_path=config_path)
+        # #1111 — pass phantom_client=False explicitly. ctx.invoke alone
+        # didn't reliably apply the Typer Option default in production
+        # (the OptionInfo sentinel survived and tripped the phantom-client
+        # launch path on bare `pm`).
+        ctx.invoke(up, config_path=config_path, phantom_client=False)
 
 
 @app.command(help="Write the example PollyPM config to disk to bootstrap a new install.")
