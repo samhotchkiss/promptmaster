@@ -2341,6 +2341,101 @@ def test_inbox_filter_bridge_literal_slash_opens_input(inbox_env) -> None:
     _run(body())
 
 
+def test_inbox_bridge_n_keypress_toggles_notifications_visible(
+    inbox_env,
+) -> None:
+    """#1128: bridge-delivered ``n`` reaches the Inbox notification toggle."""
+    if not _load_config_compatible(inbox_env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    _seed_workspace_message(
+        inbox_env["project_path"].parent,
+        subject="Done: bridge-visible completion",
+        body="background completion FYI",
+        scope="demo",
+    )
+    from pollypm.cockpit_input_bridge import send_key
+    from pollypm.cockpit_ui import PollyInboxApp
+
+    app = PollyInboxApp(inbox_env["config_path"])
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            handle = getattr(app, "_input_bridge_handle", None)
+            assert handle is not None
+            assert not _has_title_substring(
+                _visible_titles(app),
+                "Done: bridge-visible completion",
+            )
+
+            send_key(handle.socket_path, "n")
+            await pilot.pause(0.2)
+
+            assert _has_title_substring(
+                _visible_titles(app),
+                "Done: bridge-visible completion",
+            )
+
+    _run(body())
+
+
+def test_inbox_bridge_jk_moves_list_cursor(inbox_env) -> None:
+    """#1137: bridge-delivered ``j``/``k`` navigate the Inbox list."""
+    if not _load_config_compatible(inbox_env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_input_bridge import send_key
+    from pollypm.cockpit_ui import PollyInboxApp
+
+    app = PollyInboxApp(inbox_env["config_path"])
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            handle = getattr(app, "_input_bridge_handle", None)
+            assert handle is not None
+            assert app.list_view.index == 0
+
+            send_key(handle.socket_path, "j")
+            await pilot.pause(0.2)
+            assert app.list_view.index == 1
+
+            send_key(handle.socket_path, "k")
+            await pilot.pause(0.2)
+            assert app.list_view.index == 0
+
+    _run(body())
+
+
+def test_inbox_bridge_dispatches_discuss_approve_archive_actions(
+    inbox_env, monkeypatch,
+) -> None:
+    """#1146/#1158/#1162: bridge keys invoke Inbox actions, not rail ones."""
+    if not _load_config_compatible(inbox_env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_input_bridge import send_key
+    from pollypm.cockpit_ui import PollyInboxApp
+
+    app = PollyInboxApp(inbox_env["config_path"])
+    calls: list[str] = []
+    monkeypatch.setattr(app, "action_jump_to_pm", lambda: calls.append("d"))
+    monkeypatch.setattr(app, "action_accept_proposal", lambda: calls.append("A"))
+    monkeypatch.setattr(app, "action_archive_selected", lambda: calls.append("a"))
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            handle = getattr(app, "_input_bridge_handle", None)
+            assert handle is not None
+
+            for key in ("d", "A", "a"):
+                send_key(handle.socket_path, key)
+                await pilot.pause(0.2)
+
+            assert calls == ["d", "A", "a"]
+
+    _run(body())
+
+
 def test_background_refresh_skips_when_content_unchanged(inbox_env, inbox_app) -> None:
     """The visible flash every ~8s was caused by the background refresh
     calling ListView.clear() and re-appending every row on every tick,
@@ -2444,7 +2539,6 @@ def test_inbox_ctrl_h_returns_focus_to_rail_without_exiting(
         async with inbox_app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
 
-            from pollypm import cockpit_ui as _ui_mod
             monkeypatch.setattr(
                 "pollypm.cockpit_rail.focus_cockpit_rail_pane",
                 lambda path: calls.append(path) or True,

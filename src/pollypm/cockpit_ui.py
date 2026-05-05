@@ -22,7 +22,6 @@ from __future__ import annotations
 import gc
 import asyncio
 import json
-import logging
 import os
 import resource
 from pathlib import Path
@@ -998,6 +997,7 @@ class PollyCockpitApp(App[None]):
         Binding("s", "open_settings", "Settings"),
         Binding("tab", "forward_tab_to_right", "Right Pane", show=False, priority=True),
         Binding("A", "forward_workers_auto_refresh", "Workers Auto", show=False, priority=True),
+        Binding("d", "forward_inbox_discuss", "Inbox discuss", show=False),
         # Forward Action Needed numbered buttons (1/2/3) from the rail
         # to the right pane (#862). The cards advertise "Use 1/2/3 for
         # the buttons below"; without this forward, those keystrokes are
@@ -1270,6 +1270,9 @@ class PollyCockpitApp(App[None]):
         self.call_after_refresh(self._show_palette_tip_once)
 
     def action_view_alerts(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("a")
+            return
         _action_view_alerts(self)
 
     def action_view_alert_detail(self) -> None:
@@ -1676,6 +1679,35 @@ class PollyCockpitApp(App[None]):
             self._send_key_to_right_pane(key)
         except Exception:  # noqa: BLE001
             pass
+
+    def _on_inbox_surface(self) -> bool:
+        key = getattr(self, "selected_key", None)
+        return isinstance(key, str) and (key == "inbox" or key.startswith("inbox:"))
+
+    def _send_key_to_inbox_pane(self, key: str) -> bool:
+        """Forward an Inbox-owned key to the right-pane Inbox app.
+
+        Prefer the pane's own input bridge so bridge-delivered keys do
+        not get reinterpreted by the rail. Fall back to tmux only when
+        the right pane is not a mounted live session; this preserves the
+        #918 guard against j/k bytes landing in an agent chat.
+        """
+        try:
+            from pollypm.cockpit_input_bridge import send_key_to_first_live
+            delivered = send_key_to_first_live(
+                self.config_path, key, kind="pane-inbox", timeout=0.2,
+            )
+        except Exception:  # noqa: BLE001
+            delivered = None
+        if delivered is not None:
+            return True
+        if self._right_pane_has_live_session():
+            return False
+        try:
+            self._send_key_to_right_pane(key)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     def _cancel_pending_route_selection(self) -> None:
         controller = getattr(self, "_navigation_controller", None)
@@ -2329,6 +2361,9 @@ class PollyCockpitApp(App[None]):
         if self.selected_key == "settings":
             self._send_key_to_settings_pane("j")
             return
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("j")
+            return
         self._align_nav_cursor_to_selected_key()
         last_idx = self._last_nav_index()
         # On the last selectable nav row + Settings is visible → step
@@ -2349,6 +2384,9 @@ class PollyCockpitApp(App[None]):
     def action_cursor_up(self) -> None:
         if self.selected_key == "settings":
             self._send_key_to_settings_pane("k")
+            return
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("k")
             return
         self._align_nav_cursor_to_selected_key()
         # Step up off the virtual Settings row onto the last
@@ -2628,10 +2666,17 @@ class PollyCockpitApp(App[None]):
         self._send_key_to_right_pane("Tab")
 
     def action_forward_workers_auto_refresh(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("A")
+            return
         if self.selected_key == "workers":
             self._send_key_to_right_pane("A")
             return
         self._schedule_route_selected("workers", label="Workers")
+
+    def action_forward_inbox_discuss(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("d")
 
     def action_forward_action_button_1(self) -> None:
         self._send_key_to_right_pane("1")
@@ -2732,6 +2777,9 @@ class PollyCockpitApp(App[None]):
         self._refresh_rows()
 
     def action_new_worker(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("n")
+            return
         key = self._selected_row_key()
         if key is None or not key.startswith("project:"):
             self.hint.update("Select a project first, then press n to launch a worker.")
@@ -2758,6 +2806,9 @@ class PollyCockpitApp(App[None]):
         self.call_from_thread(self._refresh_rows)
 
     def action_refresh(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("r")
+            return
         self._recover_cockpit_render(force_render=False)
 
     def on_resize(self, _event: events.Resize) -> None:
