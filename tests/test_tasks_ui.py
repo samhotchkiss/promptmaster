@@ -1175,6 +1175,115 @@ def test_task_app_filters_drive_table_contents(env, monkeypatch) -> None:
     _run(body())
 
 
+def test_task_app_done_only_project_defaults_to_done_filter(env, monkeypatch) -> None:
+    """#1171 — done-only projects should not open to an empty Active view."""
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    done_one = _task(
+        task_number=1,
+        node_id="research",
+        title="Done already",
+        status=WorkStatus.DONE,
+    )
+    done_two = _task(
+        task_number=2,
+        node_id="research",
+        title="Also done",
+        status=WorkStatus.DONE,
+    )
+    fake_svc = _FakeSvc(tasks_factory=lambda: [done_one, done_two], flow=_flow())
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#tasks-table", DataTable)
+            rows = _table_rows(table)
+            summary = str(app.query_one("#tasks-summary", Static).render())
+
+            assert app._status_filter == "done"
+            assert table.row_count == 2
+            assert [row[2] for row in rows] == ["🟠 Done already", "🟠 Also done"]
+            assert summary.startswith("2 tasks")
+            assert "0 of 2 shown" not in summary
+
+    _run(body())
+
+
+def test_task_app_active_empty_state_surfaces_done_count(env, monkeypatch) -> None:
+    """#1171 — explicit Active on done-only tasks explains where rows went."""
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    done_task = _task(
+        task_number=1,
+        node_id="research",
+        title="Done already",
+        status=WorkStatus.DONE,
+    )
+    fake_svc = _FakeSvc(tasks_factory=lambda: [done_task], flow=_flow())
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await pilot.pause()
+            app._status_filter = "active"
+            app._sync_filter_buttons()
+            app._render_table(select_first=True)
+            await pilot.pause()
+
+            table = app.query_one("#tasks-table", DataTable)
+            header = str(app.query_one("#task-header", Static).render())
+            assert table.row_count == 0
+            assert header == "No active tasks. 1 done task available."
+
+    _run(body())
+
+
+def test_task_app_chrome_omits_stray_rule_glyphs(env, monkeypatch) -> None:
+    """#1171 — the Tasks chrome should not render decorative rule shards."""
+    if not _load_config_compatible(env["config_path"]):
+        pytest.skip("minimal pollypm.toml fixture not supported by loader")
+    from pollypm.cockpit_smoke import SmokeHarness
+    from pollypm.cockpit_tasks import PollyTasksApp
+
+    done_task = _task(
+        task_number=1,
+        node_id="research",
+        title="Done already",
+        status=WorkStatus.DONE,
+    )
+    fake_svc = _FakeSvc(tasks_factory=lambda: [done_task], flow=_flow())
+
+    monkeypatch.setattr("pollypm.cockpit_tasks.create_tmux_client", lambda: _FakeTmux([]))
+
+    app = PollyTasksApp(env["config_path"], "demo")
+    app._get_svc = lambda: fake_svc  # type: ignore[method-assign]
+
+    async def body() -> None:
+        async with SmokeHarness.mount(app, size=(220, 80)) as smoke:
+            capture = smoke.snapshot()
+            for glyph in ("▔", "▁", "▎", "╸", "╺", "━"):
+                assert glyph not in capture.rendered_text
+            heading_line = next(
+                line for line in capture.visible_lines if "Tasks · Demo" in line
+            )
+            assert "▊" not in heading_line
+
+    _run(body())
+
+
 def test_task_app_surfaces_priority_glyphs_and_sorts_critical_first(env, monkeypatch) -> None:
     if not _load_config_compatible(env["config_path"]):
         pytest.skip("minimal pollypm.toml fixture not supported by loader")
