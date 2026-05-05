@@ -232,6 +232,41 @@ class TestGetPanePid:
         assert client.get_pane_pid("%42") is None
 
 
+class TestPaneHasStoppedDescendant:
+    def test_detects_stopped_child_process(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = TmuxClient()
+
+        def fake_run(*args, **kwargs):
+            return _ok(
+                "100 1 Ss\n"
+                "101 100 S\n"
+                "102 101 T+\n"
+                "200 1 S\n"
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        assert client.pane_has_stopped_descendant(pane_pid=100) is True
+
+    def test_returns_false_when_process_tree_is_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = TmuxClient()
+
+        def fake_run(*args, **kwargs):
+            return _ok(
+                "100 1 Ss\n"
+                "101 100 S\n"
+                "102 101 S+\n"
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        assert client.pane_has_stopped_descendant(pane_pid=100) is False
+
+
 # ---------------------------------------------------------------------------
 # Teardown helper
 # ---------------------------------------------------------------------------

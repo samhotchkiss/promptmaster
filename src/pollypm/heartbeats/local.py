@@ -793,6 +793,27 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         else:
             api.clear_alert(context.session_name, "shell_returned")
 
+        stopped_reason = "Pane process is stopped (SIGSTOP)"
+        if context.pane_stopped:
+            _emit_routed_alert(
+                api,
+                session_name=context.session_name,
+                alert_type="pane_stopped",
+                severity="error",
+                message=(
+                    f"{context.session_name} appears stuck: "
+                    f"{stopped_reason}. Open Workers and resume or "
+                    "restart the stopped session."
+                ),
+                subject=f"{context.session_name} process stopped",
+                suggested_action=(
+                    "Open Workers and resume or restart the stopped session."
+                ),
+            )
+            alerts.append("pane_stopped")
+        else:
+            api.clear_alert(context.session_name, "pane_stopped")
+
         # Sessions parked at a prompt are legitimately idle — not an alert condition.
         # Only the suspected_loop detector (below) alerts on sustained identical snapshots.
         api.clear_alert(context.session_name, "idle_output")
@@ -991,7 +1012,17 @@ class LocalHeartbeatBackend(HeartbeatBackend):
         if context.pane_dead:
             status_locked = True
 
-        if mechanical_only:
+        if context.pane_stopped:
+            verdict, reason = ("stuck", stopped_reason)
+            api.clear_alert(context.session_name, "needs_followup")
+            if not status_locked:
+                self._set_session_status(
+                    api,
+                    context,
+                    "stuck",
+                    reason=reason,
+                )
+        elif mechanical_only:
             verdict, reason = ("healthy", "Heartbeat supervisor only checks mechanical session health")
             api.clear_alert(context.session_name, "needs_followup")
             if not status_locked:
