@@ -1128,7 +1128,17 @@ class PollyTasksApp(App[None]):
     }
     #tasks-search {
         width: 1fr;
+        height: 1;
+        min-height: 1;
         margin: 0 1 0 0;
+        padding: 0 1;
+        border: none;
+        background: #111820;
+        color: #d6dee5;
+    }
+    #tasks-search:focus {
+        border: none;
+        background: #14202a;
     }
     #tasks-filters {
         width: auto;
@@ -1138,6 +1148,10 @@ class PollyTasksApp(App[None]):
     #tasks-filters Button {
         margin-left: 1;
         min-width: 8;
+        height: 1;
+        min-height: 1;
+        border: none;
+        padding: 0 1;
     }
     #tasks-filter-chips {
         height: auto;
@@ -1146,13 +1160,17 @@ class PollyTasksApp(App[None]):
     }
     #tasks-filter-chips Button {
         margin-right: 1;
+        height: 1;
+        min-height: 1;
+        border: none;
+        padding: 0 1;
     }
     #tasks-body { height: 1fr; }
     #tasks-list-pane {
         width: 46;
         min-width: 38;
-        padding: 0 1;
-        border-right: tall #24303b;
+        padding: 0 2 0 1;
+        border-right: none;
     }
     #tasks-summary {
         height: auto;
@@ -1169,7 +1187,7 @@ class PollyTasksApp(App[None]):
     }
     #tasks-detail-pane {
         width: 1fr;
-        padding: 0 1;
+        padding: 0 1 0 2;
     }
     #task-header {
         height: auto;
@@ -1182,6 +1200,10 @@ class PollyTasksApp(App[None]):
     }
     #task-actions Button {
         margin-right: 1;
+        height: 1;
+        min-height: 1;
+        border: none;
+        padding: 0 1;
     }
     /* #767 — when a review action is pending undo, the morphed
        button gets a strong success tint so the click target reads
@@ -1245,6 +1267,12 @@ class PollyTasksApp(App[None]):
         background: #d93f3a;
     }
     #task-tabs { height: 1fr; }
+    #task-tabs ContentTabs {
+        height: 1;
+    }
+    #task-tabs Underline {
+        display: none;
+    }
     #task-detail-scroll,
     #task-review-scroll,
     #task-context-scroll,
@@ -1697,6 +1725,47 @@ class PollyTasksApp(App[None]):
             visible.append(task)
         return visible
 
+    def _done_task_count(self) -> int:
+        return sum(
+            1
+            for task in self._tasks
+            if _task_matches_status(
+                task,
+                "done",
+                plan_blocked=task.task_id in self._plan_blocked_task_ids,
+            )
+        )
+
+    def _active_task_count(self) -> int:
+        return sum(
+            1
+            for task in self._tasks
+            if _task_matches_status(
+                task,
+                "active",
+                plan_blocked=task.task_id in self._plan_blocked_task_ids,
+            )
+        )
+
+    def _use_done_filter_for_done_only_default(self) -> None:
+        if self._status_filter != "active" or self._search_query.strip():
+            return
+        if (
+            self._tasks
+            and self._active_task_count() == 0
+            and self._done_task_count() > 0
+        ):
+            self._status_filter = "done"
+            self._sync_filter_buttons()
+
+    def _empty_filter_message(self) -> str:
+        if self._status_filter == "active" and not self._search_query.strip():
+            done_count = self._done_task_count()
+            if done_count:
+                task_word = "task" if done_count == 1 else "tasks"
+                return f"No active tasks. {done_count} done {task_word} available."
+        return "No tasks match the current filter."
+
     def _summary_text(self, visible: list) -> str:
         counts = _task_counts(
             self._tasks,
@@ -1869,7 +1938,7 @@ class PollyTasksApp(App[None]):
         previous = self._selected_task_id
         self.task_table.clear()
         if not visible:
-            self._set_detail_empty("No tasks match the current filter.")
+            self._set_detail_empty(self._empty_filter_message())
             return
         for task in visible:
             owner = self._owner_by_task_id.get(task.task_id) or "—"
@@ -1955,6 +2024,8 @@ class PollyTasksApp(App[None]):
             self._plan_approval_task_id,
             self._recent_sweeper_ping_task_ids,
         ) = self._load_tasks()
+        if select_first:
+            self._use_done_filter_for_done_only_default()
         self._render_table(select_first=select_first)
 
     def _render_timeline(self, executions: list) -> None:
