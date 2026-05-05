@@ -14,8 +14,9 @@ def test_root_command_defaults_to_up(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "pollypm.toml"
     config_path.write_text("[project]\nname = \"pollypm\"\n")
 
-    def fake_up(config_path: Path) -> None:
+    def fake_up(config_path: Path, phantom_client: bool = False) -> None:
         called["config_path"] = config_path
+        called["phantom_client"] = phantom_client
 
     monkeypatch.setattr(cli, "up", fake_up)
 
@@ -24,6 +25,7 @@ def test_root_command_defaults_to_up(monkeypatch, tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert called["config_path"] == config_path
+    assert called["phantom_client"] is False
 
 
 def test_root_command_runs_onboarding_when_config_missing(monkeypatch, tmp_path: Path) -> None:
@@ -32,7 +34,7 @@ def test_root_command_runs_onboarding_when_config_missing(monkeypatch, tmp_path:
     def fake_first_run(config_path: Path) -> None:
         called["config_path"] = config_path
 
-    def fail_up(config_path: Path) -> None:
+    def fail_up(config_path: Path, phantom_client: bool = False) -> None:
         raise AssertionError("up should not run when config is missing")
 
     monkeypatch.setattr(cli, "_first_run_setup_and_launch", fake_first_run)

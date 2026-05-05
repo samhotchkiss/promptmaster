@@ -8,7 +8,6 @@ from pathlib import Path
 from pollypm.config import load_config
 from pollypm.models import AccountConfig, ProviderKind
 from pollypm.projects import slugify_project_key
-from pollypm.providers import get_provider
 from pollypm.storage.state import StateStore, TokenUsageHourlyRecord
 
 
@@ -279,6 +278,8 @@ def _scan_codex_transcript(path: Path, account_name: str, account: AccountConfig
 
 
 def _scan_account_transcripts(config, account_name: str) -> list[TranscriptScanResult]:
+    from pollypm.providers import get_provider
+
     account = config.accounts[account_name]
     provider = get_provider(account.provider, root_dir=config.project.root_dir)
     sources = provider.transcript_sources(account, None)

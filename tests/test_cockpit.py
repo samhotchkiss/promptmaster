@@ -1423,6 +1423,7 @@ def test_cockpit_router_primes_per_project_pm_session_distinctly() -> None:
             ]
 
     router = CockpitRouter.__new__(CockpitRouter)
+    router.config_path = Path("/tmp/pollypm.toml")
     router.tmux = _FakeTmux()
     router._right_pane_id = lambda window_target: "%right"  # type: ignore[assignment]
     router._load_state = lambda: dict(primed_state)  # type: ignore[assignment]
@@ -1924,6 +1925,7 @@ def test_cockpit_router_primes_workspace_operator_on_attach() -> None:
     pane_id_holder = {"id": "%right1"}
 
     router = CockpitRouter.__new__(CockpitRouter)
+    router.config_path = Path("/tmp/pollypm.toml")
     router.tmux = _FakeTmux()
     router._right_pane_id = lambda window_target: pane_id_holder["id"]  # type: ignore[assignment]
     router._load_state = lambda: dict(primed_state)  # type: ignore[assignment]

@@ -494,7 +494,7 @@ def test_cli_migrate_apply_reports_applied(
     # a non-empty "applied" list.
     config_path = _write_minimal_config(tmp_path)
     app = _build_cli_app()
-    result = runner.invoke(app, ["--apply", "--config", str(config_path)])
+    result = runner.invoke(app, ["--apply", "--force", "--config", str(config_path)])
     assert result.exit_code == 0
     combined = result.stdout + "\n" + (result.stderr or "")
     # Either "Applied N migration(s)..." on the bootstrap path or the

@@ -848,6 +848,9 @@ class CockpitRouter:
         return str(value) if isinstance(value, str) and value else "polly"
 
     def set_selected_key(self, key: str) -> None:
+        data = self._load_state()
+        if data.get("selected") == key:
+            return
         self._validate_state()
         data = self._load_state()
         if data.get("selected") == key:

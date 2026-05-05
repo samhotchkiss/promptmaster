@@ -74,7 +74,7 @@ def session_health_sweep_handler(payload: dict[str, Any]) -> dict[str, Any]:
             from pollypm.supervisor import Supervisor
 
             # #1067 — close the Supervisor on exit. ``Supervisor(config)``
-            # opens its own ``StateStore`` (supervisor.py line 349) which
+            # opens its own app-state store (supervisor.py line 349) which
             # in WAL mode allocates db + -wal file descriptors per
             # invocation. Without ``stop()`` each 10s health sweep leaked
             # one sqlite connection (≈12 fds/min once WAL handles are
@@ -188,7 +188,7 @@ def alerts_gc_handler(payload: dict[str, Any]) -> dict[str, Any]:
 
         # #1067 — close the Supervisor on exit. Same leak pattern as
         # ``session_health_sweep_handler``: ``Supervisor(config)`` opens
-        # its own ``StateStore`` and we must release the connection
+        # its own app-state store and we must release the connection
         # explicitly or it accumulates as the cadence fires.
         supervisor = Supervisor(config)
         try:
