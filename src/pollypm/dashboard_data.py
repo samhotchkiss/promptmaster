@@ -330,6 +330,25 @@ _NOW_EVENT_SIGNATURES: tuple[re.Pattern[str], ...] = (
 )
 
 
+_UPSTREAM_CLI_TIP_SUBSTRINGS = (
+    "try the codex app",
+    "visit https://chatgpt.com",
+)
+_UPSTREAM_CLI_TIP_COMMAND_RE = re.compile(r"^(?:new\s+)?use\s+/[a-z]", re.IGNORECASE)
+
+
+def _is_upstream_cli_tip(line: str) -> bool:
+    text = line.strip()
+    if not text:
+        return False
+    lower = text.lower()
+    return (
+        lower.startswith("tip:")
+        or _UPSTREAM_CLI_TIP_COMMAND_RE.search(text) is not None
+        or any(marker in lower for marker in _UPSTREAM_CLI_TIP_SUBSTRINGS)
+    )
+
+
 def _scan_for_event_signature(clean_lines: list[str]) -> str | None:
     """Return the most-recent line matching a recognized event
     signature, or None if no such line exists in the trailing window.
@@ -357,6 +376,8 @@ def _scan_for_event_signature(clean_lines: list[str]) -> str | None:
         # Skip lines that the existing fall-through filter would
         # already drop — same prompt prefixes, same TUI chrome.
         if stripped.startswith(("❯", "›", ">", "$", "%", *_BOX_DRAWING_PREFIXES)):
+            continue
+        if _is_upstream_cli_tip(stripped):
             continue
         for pattern in _NOW_EVENT_SIGNATURES:
             if pattern.search(stripped):
@@ -454,6 +475,8 @@ def _session_description(status: str, role: str, snapshot_path: str | None) -> s
                     or "shift+tab to cycle" in lower
                     or line.startswith("⏵⏵")
                 ):
+                    continue
+                if _is_upstream_cli_tip(line):
                     continue
                 # Codex idle-input placeholder hints — defensive net in
                 # case the ``›`` prompt arrow gets stripped during pane

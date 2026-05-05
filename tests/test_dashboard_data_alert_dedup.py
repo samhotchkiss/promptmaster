@@ -200,6 +200,45 @@ def test_session_description_skips_codex_idle_placeholder_without_arrow(
     assert desc == "idle"
 
 
+def test_session_description_skips_upstream_cli_tips(tmp_path) -> None:
+    """#1183: Codex tip-of-the-day banners are not project activity."""
+    from pollypm.dashboard_data import _session_description
+
+    tip_lines = (
+        "Tip: Use /compact when the conversation gets long to summarize…",
+        "Tip: Try the Codex App. Run 'codex app' or visit https://chatgpt.com/",
+        "Tip: New Use /fast to enable our fastest inference with increased…",
+        "Use /compact when the conversation gets long to summarize…",
+        "Use /fast to enable our fastest inference with increased…",
+        "Try the Codex App. Run 'codex app' or visit https://chatgpt.com/",
+    )
+    for tip in tip_lines:
+        snapshot = tmp_path / "snap.txt"
+        snapshot.write_text(f"{tip}\n")
+        desc = _session_description("healthy", "worker", str(snapshot))
+        assert "tip:" not in desc.lower()
+        assert "/compact" not in desc.lower()
+        assert "/fast" not in desc.lower()
+        assert "codex app" not in desc.lower()
+        assert "chatgpt.com" not in desc.lower()
+        assert desc == "idle"
+
+
+def test_session_description_uses_meaningful_line_before_cli_tip(tmp_path) -> None:
+    """A real activity line above a skipped tip should remain visible."""
+    from pollypm.dashboard_data import _session_description
+
+    snapshot = tmp_path / "snap.txt"
+    snapshot.write_text(
+        "Updated dashboard activity filtering tests.\n"
+        "Tip: Try the Codex App. Run 'codex app' or visit https://chatgpt.com/\n"
+    )
+
+    desc = _session_description("healthy", "worker", str(snapshot))
+
+    assert desc == "Updated dashboard activity filtering tests."
+
+
 def test_session_description_keeps_real_codex_working_status(tmp_path) -> None:
     """#994 negative: the fix must not regress working-session
     rendering. A pane snapshot showing Codex actively working (the
