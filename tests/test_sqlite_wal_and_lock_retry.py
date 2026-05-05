@@ -344,7 +344,10 @@ def test_pool_gives_up_after_exhausting_lock_retries(
 def test_is_database_locked_error_helper_in_sqlite_pragmas() -> None:
     """Public predicate exposed alongside ``apply_workspace_pragmas``."""
 
-    from pollypm.storage.sqlite_pragmas import is_database_locked_error
+    from pollypm.storage.sqlite_pragmas import (
+        is_closed_database_error,
+        is_database_locked_error,
+    )
 
     assert is_database_locked_error(sqlite3.OperationalError("database is locked"))
     assert is_database_locked_error(sqlite3.OperationalError("database is busy"))
@@ -352,6 +355,10 @@ def test_is_database_locked_error_helper_in_sqlite_pragmas() -> None:
     assert not is_database_locked_error(
         sqlite3.ProgrammingError("Cannot operate on a closed database")
     )
+    assert is_closed_database_error(
+        sqlite3.ProgrammingError("Cannot operate on a closed database")
+    )
+    assert not is_closed_database_error(sqlite3.OperationalError("database is locked"))
 
     # SQLAlchemy-style wrapper detection: a fake exception class named
     # ``OperationalError`` should match by class name (the real wrapper

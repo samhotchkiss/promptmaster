@@ -1423,6 +1423,7 @@ def test_cockpit_router_primes_per_project_pm_session_distinctly() -> None:
             ]
 
     router = CockpitRouter.__new__(CockpitRouter)
+    router.config_path = Path("/tmp/pollypm.toml")
     router.tmux = _FakeTmux()
     router._right_pane_id = lambda window_target: "%right"  # type: ignore[assignment]
     router._load_state = lambda: dict(primed_state)  # type: ignore[assignment]
@@ -1924,6 +1925,7 @@ def test_cockpit_router_primes_workspace_operator_on_attach() -> None:
     pane_id_holder = {"id": "%right1"}
 
     router = CockpitRouter.__new__(CockpitRouter)
+    router.config_path = Path("/tmp/pollypm.toml")
     router.tmux = _FakeTmux()
     router._right_pane_id = lambda window_target: pane_id_holder["id"]  # type: ignore[assignment]
     router._load_state = lambda: dict(primed_state)  # type: ignore[assignment]
@@ -4780,6 +4782,19 @@ def test_cockpit_escape_at_home_is_noop() -> None:
     app.action_back_to_home()
 
     assert calls == [], f"expected no-op at home but saw {calls}"
+
+
+def test_cockpit_escape_from_live_chat_focuses_rail_pane() -> None:
+    """#1151: Esc from a mounted chat returns tmux focus to the rail."""
+    app, calls = _build_back_to_home_app()
+    app.selected_key = "polly"
+    app._last_router_selected_key = "polly"
+    app.router._load_state = lambda: {"mounted_session": "operator"}  # type: ignore[attr-defined]
+    app.router.focus_rail_pane = lambda: calls.append("focus_rail")  # type: ignore[attr-defined]
+
+    app.action_back_to_home()
+
+    assert calls == ["focus_rail"]
 
 
 def test_cockpit_action_button_digits_forward_from_rail() -> None:

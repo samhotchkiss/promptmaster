@@ -1399,7 +1399,7 @@ class TestGetExecution:
         assert stored.artifacts[0].ref == "sha123"
         assert stored.artifacts[1].path == "src/main.py"
 
-    def test_get_execution_reuses_decoded_work_output(self, svc, monkeypatch):
+    def test_get_execution_reuses_decoded_work_output(self, svc):
         task = _create_task(svc)
         _claim_task(svc, task)
 
@@ -1409,22 +1409,24 @@ class TestGetExecution:
         svc.node_done(task.task_id, "pete", wo)
         svc._work_output_cache.clear()
 
-        loads = 0
-        original_loads = json.loads
+        class CountingCache(dict):
+            misses = 0
 
-        def counting_loads(raw, *args, **kwargs):
-            nonlocal loads
-            loads += 1
-            return original_loads(raw, *args, **kwargs)
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if value is default:
+                    self.misses += 1
+                return value
 
-        monkeypatch.setattr("pollypm.work.sqlite_service.json.loads", counting_loads)
+        cache = CountingCache()
+        svc._work_output_cache = cache
 
         first = svc.get_execution(task.task_id, node_id="implement")
         second = svc.get_execution(task.task_id, node_id="implement")
 
         assert len(first) == 2
         assert len(second) == 2
-        assert loads == 1
+        assert cache.misses == 1
 
     def test_get_execution_filters(self, svc):
         task = _create_task(svc)

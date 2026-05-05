@@ -24,7 +24,12 @@ from pollypm.rejection_feedback import (
 )
 from pollypm.store import SQLAlchemyStore
 from pollypm.work.inbox_view import inbox_tasks
-from pollypm.work.models import Decision, ExecutionStatus
+from pollypm.work.inbox_plan_reviews import (
+    PLAN_APPROVAL_NODE_ID,
+    approved_plan_review_refs,
+    is_plan_task_approved,
+    task_user_approval_is_approved,
+)
 from pollypm.work.sqlite_service import SQLiteWorkService
 
 logger = logging.getLogger(__name__)
@@ -38,7 +43,7 @@ logger = logging.getLogger(__name__)
 # that lands, filter at render time so the user's drain-action doesn't
 # hit dead items. Imported as a constant so tests can pin the node id
 # without depending on private flow internals.
-_PLAN_APPROVAL_NODE_ID = "user_approval"
+_PLAN_APPROVAL_NODE_ID = PLAN_APPROVAL_NODE_ID
 
 
 _MARKDOWN_DECORATION_RE = re.compile(r"[*_`#>\[\]]+")
@@ -402,30 +407,33 @@ def _dedupe_message_vs_task_plan_reviews(
     higher-fidelity surface — drop the bare task row when a message
     with ``plan_task:<task_id>`` already covers it.
     """
-    # Build the set of task_ids that a notify-message already covers.
-    message_covered_task_ids: set[str] = set()
+    # Build refs to plan tasks already covered by a richer handoff row.
+    message_covered_task_ids: dict[str, set[str]] = {}
     for item in items:
         labels = {str(lbl) for lbl in (getattr(item, "labels", []) or [])}
         if "plan_review" not in labels:
             continue
-        # Task-based entries also carry ``plan_review`` via annotation,
-        # but they don't carry the ``plan_task:<id>`` reference label
-        # the architect's notify includes. Only message rows have it.
+        # Task-backed notify rows can also carry ``plan_task:<id>``.
+        # Track who provides the coverage so a self-referential row
+        # never dedupes itself out of the rendered inbox.
         for label in labels:
             if label.startswith("plan_task:"):
                 ref = label.split(":", 1)[1].strip()
                 if ref:
-                    message_covered_task_ids.add(ref)
+                    coverer_id = str(getattr(item, "task_id", "") or "")
+                    message_covered_task_ids.setdefault(ref, set()).add(coverer_id)
                 break
     if not message_covered_task_ids:
         return items
     kept: list[InboxEntry] = []
     for item in items:
-        # Only drop task-based entries — message rows we keep no matter
-        # what (they may be the source of the coverage).
+        # Only drop task-based entries when a different row covers the
+        # same plan task — message rows and self-referential task rows
+        # remain visible.
         if is_task_inbox_entry(item):
             task_id = str(getattr(item, "task_id", "") or "")
-            if task_id in message_covered_task_ids:
+            coverers = message_covered_task_ids.get(task_id, set())
+            if any(coverer_id != task_id for coverer_id in coverers):
                 continue
         kept.append(item)
     return kept
@@ -496,17 +504,7 @@ def _task_user_approval_is_approved(task) -> bool:
     structural surprise — fail-open so a transient anomaly never
     silently hides a real action-needed row.
     """
-    for execution in reversed(getattr(task, "executions", []) or []):
-        if getattr(execution, "node_id", None) != _PLAN_APPROVAL_NODE_ID:
-            continue
-        if getattr(execution, "status", None) is not ExecutionStatus.COMPLETED:
-            continue
-        decision = getattr(execution, "decision", None)
-        if decision is Decision.APPROVED:
-            return True
-        if decision is Decision.REJECTED:
-            return False
-    return False
+    return task_user_approval_is_approved(task)
 
 
 def _is_plan_task_approved(svc, project: str, task_number: int) -> bool:
@@ -519,17 +517,7 @@ def _is_plan_task_approved(svc, project: str, task_number: int) -> bool:
     Returns False on any lookup failure — fail-open so a transient DB
     error never silently hides a real action-needed row.
     """
-    task_id = f"{project}/{task_number}"
-    try:
-        task = svc.get(task_id)
-    except Exception:  # noqa: BLE001
-        logger.debug(
-            "inbox: get(%s) failed during plan-review approval check",
-            task_id,
-            exc_info=True,
-        )
-        return False
-    return _task_user_approval_is_approved(task)
+    return is_plan_task_approved(svc, project, task_number)
 
 
 # Sentinel key for the workspace-root state.db inside ``project_db_paths``.
@@ -610,27 +598,11 @@ def _filter_approved_plan_reviews(
                 refs_unparsed,
             )
         return items
-    approved_refs: set[str] = set()
-    for db_key, refs in refs_by_db.items():
-        db_path, project_path = project_db_paths[db_key]
-        try:
-            svc = SQLiteWorkService(db_path=db_path, project_path=project_path)
-        except Exception:  # noqa: BLE001
-            logger.debug(
-                "inbox: open svc failed for db %s during plan-review check",
-                db_key,
-                exc_info=True,
-            )
-            continue
-        try:
-            for project, number in refs:
-                if _is_plan_task_approved(svc, project, number):
-                    approved_refs.add(f"{project}/{number}")
-        finally:
-            try:
-                svc.close()
-            except Exception:  # noqa: BLE001
-                pass
+    approved_refs = approved_plan_review_refs(
+        refs_by_db=refs_by_db,
+        project_db_paths=project_db_paths,
+        service_factory=SQLiteWorkService,
+    )
     kept: list[InboxEntry] = []
     dropped = 0
     for item in items:

@@ -201,7 +201,7 @@ class JobQueue:
         conn = sqlite3.connect(
             str(self._db_path), check_same_thread=False, isolation_level=None
         )
-        # #1018: same WAL + busy_timeout treatment as StateStore.
+        # #1018: same WAL + busy_timeout treatment as the app state DB.
         # JobQueue is one of the heaviest writers (claim+complete per job)
         # so we keep the historical 30 s timeout instead of the 5 s
         # workspace default.

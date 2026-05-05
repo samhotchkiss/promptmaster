@@ -72,6 +72,8 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+_CLOSED_DB_MARKER = "Cannot operate on a closed database"
+
 
 def apply_workspace_pragmas(
     conn: sqlite3.Connection,
@@ -145,6 +147,13 @@ def is_database_locked_error(exc: BaseException) -> bool:
         if base.__name__ == "OperationalError":
             return True
     return False
+
+
+def is_closed_database_error(exc: BaseException) -> bool:
+    """True iff ``exc`` looks like SQLite's closed-connection error."""
+    if not isinstance(exc, sqlite3.ProgrammingError):
+        return False
+    return _CLOSED_DB_MARKER in str(exc)
 
 
 def retry_on_database_locked(

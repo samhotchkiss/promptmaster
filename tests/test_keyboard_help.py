@@ -115,6 +115,15 @@ def _find_help_modal(app):
     return None
 
 
+async def _wait_for_help_modal(app, pilot, *, attempts: int = 5):
+    for _ in range(attempts):
+        modal = _find_help_modal(app)
+        if modal is not None:
+            return modal
+        await pilot.pause()
+    return _find_help_modal(app)
+
+
 # ---------------------------------------------------------------------------
 # 1. ``?`` opens KeyboardHelpModal from each cockpit App.
 # ---------------------------------------------------------------------------
@@ -425,7 +434,8 @@ def test_cockpit_rail_dismiss_keys_close_help_modal(
             await pilot.pause()
             await pilot.press("question_mark")
             await pilot.pause()
-            assert _find_help_modal(app) is not None, (
+            modal = await _wait_for_help_modal(app, pilot)
+            assert modal is not None, (
                 "expected help modal after ? on PollyCockpitApp"
             )
             await pilot.press(dismiss_key)
@@ -471,7 +481,8 @@ def test_cockpit_rail_jk_scrolls_help_modal(single_project_env) -> None:
                 await pilot.pause()
                 await pilot.press("question_mark")
                 await pilot.pause()
-                assert _find_help_modal(app) is not None
+                modal = await _wait_for_help_modal(app, pilot)
+                assert modal is not None
                 await pilot.press("j")
                 await pilot.pause()
         _run(body())

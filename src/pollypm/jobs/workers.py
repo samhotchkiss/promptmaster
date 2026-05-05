@@ -21,12 +21,16 @@ dict ``{handler_name: HandlerSpec}`` is fine.
 from __future__ import annotations
 
 import logging
-import sqlite3
 import threading
 import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
+
+from pollypm.storage.sqlite_pragmas import (
+    is_closed_database_error,
+    is_database_locked_error,
+)
 
 
 __all__ = [
@@ -37,13 +41,6 @@ __all__ = [
     "WorkerMetrics",
     "_is_database_locked_error",
 ]
-
-
-# Marker text for the SQLite ProgrammingError raised when an operation runs
-# against a connection that's already been closed. Matched by substring so a
-# future Python release that retunes the wording (or wraps it in a different
-# subclass) still trips the defensive branch.
-_CLOSED_DB_MARKER = "Cannot operate on a closed database"
 
 
 def _is_closed_db_error(exc: BaseException) -> bool:
@@ -57,9 +54,7 @@ def _is_closed_db_error(exc: BaseException) -> bool:
     full-traceback log spam, which is what was actually killing
     rail_daemon in the production trace.
     """
-    if not isinstance(exc, sqlite3.ProgrammingError):
-        return False
-    return _CLOSED_DB_MARKER in str(exc)
+    return is_closed_database_error(exc)
 
 
 def _is_database_locked_error(exc: BaseException) -> bool:
@@ -80,10 +75,7 @@ def _is_database_locked_error(exc: BaseException) -> bool:
     path — far less disruptive than escalating every transient lock
     to a critical alert.
     """
-    if not isinstance(exc, sqlite3.OperationalError):
-        return False
-    msg = str(exc).lower()
-    return "database is locked" in msg or "database is busy" in msg
+    return is_database_locked_error(exc)
 
 
 # #1018 — exponential backoff for the database-locked retry. Three
