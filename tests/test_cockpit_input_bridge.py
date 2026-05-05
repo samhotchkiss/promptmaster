@@ -190,6 +190,41 @@ def test_list_bridge_sockets_filters_by_kind(fake_config: Path) -> None:
         dashboard.stop()
 
 
+def test_cockpit_send_key_defaults_to_cockpit_socket(fake_config: Path) -> None:
+    import typer
+    from typer.testing import CliRunner
+
+    from pollypm.cli_features.ui import register_ui_commands
+
+    cockpit_app = _FakeApp()
+    dashboard_app = _FakeApp()
+    cockpit = start_input_bridge(cockpit_app, kind="cockpit", config_path=fake_config)
+    assert cockpit is not None
+    dashboard = start_input_bridge(
+        dashboard_app, kind="dashboard", config_path=fake_config
+    )
+    assert dashboard is not None
+    try:
+        # Simulate issue #1125: a dashboard bridge has the newest socket
+        # timestamp, but bare `pm cockpit-send-key` should still target
+        # the rail cockpit unless the caller explicitly passes `--kind`.
+        future = time.time() + 5
+        os.utime(dashboard.socket_path, (future, future))
+
+        app = typer.Typer()
+        register_ui_commands(app)
+        result = CliRunner().invoke(
+            app, ["cockpit-send-key", "I", "--config", str(fake_config)]
+        )
+        assert result.exit_code == 0, result.output
+        assert f"via {cockpit.socket_path}" in result.output
+        assert _wait_for(lambda: cockpit_app.keys == ["I"])
+        assert dashboard_app.keys == []
+    finally:
+        cockpit.stop()
+        dashboard.stop()
+
+
 def test_send_key_to_first_live_skips_stale_sockets(fake_config: Path, tmp_path: Path) -> None:
     bridge_dir = fake_config.parent / "cockpit_inputs"
     bridge_dir.mkdir(parents=True, exist_ok=True)

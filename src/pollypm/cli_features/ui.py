@@ -272,14 +272,14 @@ def register_ui_commands(app: typer.Typer) -> None:
         config_path: Path = typer.Option(
             DEFAULT_CONFIG_PATH, "--config", help="PollyPM config path."
         ),
-        kind: str | None = typer.Option(
-            None,
+        kind: str = typer.Option(
+            "cockpit",
             "--kind",
             "-k",
             help=(
                 "Restrict delivery to a specific cockpit surface "
-                "(`cockpit`, `dashboard`, `pane-inbox`, …). Omit to "
-                "target the most recently bound bridge socket."
+                "(`cockpit`, `dashboard`, `pane-inbox`, …). Defaults to "
+                "`cockpit` so stale dashboard sockets cannot steal rail input."
             ),
         ),
     ) -> None:
