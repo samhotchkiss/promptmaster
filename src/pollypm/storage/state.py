@@ -30,7 +30,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from pollypm.storage.fts_query import normalize_fts_query
-from pollypm.storage.sqlite_pragmas import apply_workspace_pragmas
+from pollypm.storage.sqlite_pragmas import (
+    apply_workspace_pragmas,
+    retry_on_database_locked,
+)
 
 
 SCHEMA = """
@@ -563,7 +566,10 @@ class StateStore:
                 # fresh DB — on existing DBs it's a no-op and the one-shot
                 # VACUUM below (gated on the current mode) actually flips
                 # the page format.
-                self.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                retry_on_database_locked(
+                    lambda: self.execute("PRAGMA auto_vacuum=INCREMENTAL"),
+                    label="StateStore.__init__.auto_vacuum",
+                )
                 try:
                     self._conn.executescript(SCHEMA)
                 except sqlite3.IntegrityError:
