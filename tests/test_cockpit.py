@@ -2286,6 +2286,17 @@ def test_cockpit_router_marks_palette_tip_seen(tmp_path: Path) -> None:
     assert router._load_state()["palette_tip_seen"] is True
 
 
+def test_cockpit_router_defaults_to_home_dashboard(tmp_path: Path) -> None:
+    """#1152: a fresh cockpit should land on Home, not Polly chat."""
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\nbase_dir = \"{tmp_path / '.pollypm'}\"\n"
+    )
+    router = CockpitRouter(config_path)
+
+    assert router.selected_key() == "dashboard"
+
+
 def test_cockpit_router_selected_key_bumps_epoch(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "pollypm.toml"
     config_path.write_text(
@@ -2825,7 +2836,7 @@ def test_cockpit_router_ensure_layout_splits_when_missing_right_pane(tmp_path: P
     router.ensure_cockpit_layout()
 
     assert calls["split"][0] == "pollypm:PollyPM"
-    assert "cockpit-pane polly" in calls["split"][1]
+    assert "cockpit-pane dashboard" in calls["split"][1]
 
 
 def test_ensure_cockpit_layout_project_selection_repairs_with_project_command(
@@ -4034,7 +4045,7 @@ def test_cockpit_ui_arrow_and_enter_route_selected(tmp_path: Path) -> None:
 
 
 def test_cockpit_send_key_inbox_shortcut_keeps_nav_cursor_on_inbox(tmp_path: Path) -> None:
-    """#1122: after global ``I``, bridge-delivered Down starts from Inbox."""
+    """#1122/#1137: after global ``I``, Down stays owned by Inbox."""
 
     class FakeRouter:
         def __init__(self) -> None:
@@ -4097,8 +4108,8 @@ def test_cockpit_send_key_inbox_shortcut_keeps_nav_cursor_on_inbox(tmp_path: Pat
 
             send_key(handle.socket_path, "<down>")
             await pilot.pause(0.4)
-            assert app.selected_key == "activity"
-            assert app._selected_row_key() == "activity"
+            assert app.selected_key == "inbox"
+            assert app._selected_row_key() == "inbox"
 
     asyncio.run(exercise())
 
@@ -4256,8 +4267,56 @@ def test_cockpit_enter_routes_visible_workers_selection_when_nav_cursor_lags() -
     assert calls == [("workers", "workers")]
 
 
+def test_cockpit_enter_routes_visible_settings_selection_when_nav_has_focus(
+    tmp_path: Path,
+) -> None:
+    """#1172: Enter follows the visible Settings marker, not nav.index."""
+
+    class FakeRouter:
+        def selected_key(self) -> str:
+            return "dashboard"
+
+        def _load_state(self) -> dict:
+            return {}
+
+        def build_items(self, *, spinner_index: int = 0):
+            from pollypm.cockpit_rail import CockpitItem
+
+            return [
+                CockpitItem("dashboard", "Home", "home"),
+                CockpitItem("workers", "Workers", "idle"),
+                CockpitItem("settings", "Settings", "config"),
+            ]
+
+    app = PollyCockpitApp(tmp_path / "pollypm.toml")
+    app.router = FakeRouter()  # type: ignore[assignment]
+    app._start_core_rail = lambda: None  # type: ignore[method-assign]
+    app._show_palette_tip_once = lambda: None  # type: ignore[method-assign]
+    app._enforce_rail_width_once = lambda: None  # type: ignore[method-assign]
+    calls: list[tuple[str, str | None]] = []
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.selected_key = "settings"
+            app._items = [
+                SimpleNamespace(key="dashboard", selectable=True),
+                SimpleNamespace(key="workers", selectable=True),
+                SimpleNamespace(key="settings", selectable=True),
+            ]
+            app._schedule_route_selected = (  # type: ignore[method-assign]
+                lambda key, *, label=None: calls.append((key, label))
+            )
+            await pilot.press("enter")
+            await pilot.pause()
+
+    asyncio.run(exercise())
+
+    assert calls == [("settings", "settings")]
+
+
 def test_cockpit_capital_a_opens_workers_then_forwards_auto_refresh() -> None:
-    """#1134: A is a rail shortcut to Workers; on Workers it reaches the pane."""
+    """#1134/#1158: A opens Workers except when Inbox owns the key."""
     app = PollyCockpitApp.__new__(PollyCockpitApp)
     calls: list[tuple[str, str]] = []
     app._schedule_route_selected = (  # type: ignore[method-assign]
@@ -4266,13 +4325,18 @@ def test_cockpit_capital_a_opens_workers_then_forwards_auto_refresh() -> None:
     app._send_key_to_right_pane = (  # type: ignore[method-assign]
         lambda key: calls.append(("send", key))
     )
+    app._send_key_to_inbox_pane = (  # type: ignore[method-assign]
+        lambda key: calls.append(("inbox", key)) or True
+    )
 
     app.selected_key = "dashboard"
     app.action_forward_workers_auto_refresh()
     app.selected_key = "workers"
     app.action_forward_workers_auto_refresh()
+    app.selected_key = "inbox"
+    app.action_forward_workers_auto_refresh()
 
-    assert calls == [("route", "workers"), ("send", "A")]
+    assert calls == [("route", "workers"), ("send", "A"), ("inbox", "A")]
 
 
 def test_cockpit_app_open_live_session_keeps_rail_focus_until_tab() -> None:
@@ -4731,8 +4795,8 @@ def test_cockpit_q_from_settings_returns_to_home_not_quit() -> None:
 
     app.action_request_quit()
 
-    assert ("route", "polly") in calls
-    assert app.selected_key == "polly"
+    assert ("route", "dashboard") in calls
+    assert app.selected_key == "dashboard"
     assert confirm_called == [], "should not show quit confirm from a sub-surface"
 
 
@@ -4769,8 +4833,20 @@ def test_cockpit_escape_routes_back_to_home_from_settings() -> None:
 
     app.action_back_to_home()
 
-    assert ("route", "polly") in calls
-    assert app.selected_key == "polly"
+    assert ("route", "dashboard") in calls
+    assert app.selected_key == "dashboard"
+
+
+def test_cockpit_capital_h_routes_back_to_home() -> None:
+    """#1163: capital H is an explicit global Home jump."""
+    app, calls = _build_back_to_home_app()
+    app.selected_key = "project:demo"
+    app._last_router_selected_key = "project:demo"
+
+    app.action_open_home()
+
+    assert ("route", "dashboard") in calls
+    assert app.selected_key == "dashboard"
 
 
 def test_cockpit_escape_at_home_is_noop() -> None:
@@ -4975,14 +5051,14 @@ def test_cockpit_pin_toggle_round_trips_and_reports_state() -> None:
     )
 
 
-def test_cockpit_jk_navigates_rail_on_inbox_surface() -> None:
-    """j/k always advance the rail cursor — never tmux-forward to right pane (#918).
+def test_cockpit_jk_navigates_rail_outside_inbox_surface() -> None:
+    """j/k advance the rail cursor outside active right-pane Inbox (#918).
 
     Earlier (#856) the rail forwarded ``j``/``k`` to the right pane while
     on Inbox/Activity so list scrolling worked from the rail. That blindly
     invoked ``tmux send-keys`` against pane 1, so once the right pane held
-    a Polly/Claude Code chat the bytes ended up typed into the chat box.
-    The fix returns j/k to plain rail navigation across every surface.
+    a Polly/Claude Code chat the bytes ended up typed into the chat box;
+    non-Inbox surfaces keep plain rail navigation.
     """
     app = PollyCockpitApp.__new__(PollyCockpitApp)
     sent: list[str] = []
@@ -5001,7 +5077,7 @@ def test_cockpit_jk_navigates_rail_on_inbox_surface() -> None:
 
     app.nav = _Nav()  # type: ignore[assignment]
 
-    for surface in ("polly", "inbox", "activity"):
+    for surface in ("polly", "activity"):
         app.selected_key = surface
         moves.clear()
         sent.clear()
@@ -5018,6 +5094,83 @@ def test_cockpit_jk_navigates_rail_on_inbox_surface() -> None:
         app.action_cursor_up()
         assert moves == ["nav_up", "sync"]
         assert sent == []
+
+
+def test_cockpit_inbox_surface_forwards_footer_keys_to_inbox_pane() -> None:
+    """#1128/#1137/#1146/#1158/#1162: active Inbox owns its footer keys."""
+    app = PollyCockpitApp.__new__(PollyCockpitApp)
+    forwarded: list[str] = []
+    routes: list[str] = []
+    app.selected_key = "inbox"
+    app._send_key_to_inbox_pane = (  # type: ignore[method-assign]
+        lambda key: forwarded.append(key) or True
+    )
+    app._send_key_to_right_pane = (  # type: ignore[method-assign]
+        lambda key: forwarded.append(f"right:{key}")
+    )
+    app._schedule_route_selected = (  # type: ignore[method-assign]
+        lambda key, *, label=None: routes.append(key)
+    )
+    app.hint = _CaptureWidget()
+    app._selected_row_key = lambda: "project:demo"  # type: ignore[method-assign]
+
+    app.action_new_worker()
+    app.action_cursor_down()
+    app.action_cursor_up()
+    app.action_forward_inbox_discuss()
+    app.action_forward_workers_auto_refresh()
+    app.action_view_alerts()
+    app.action_refresh()
+
+    assert forwarded == ["n", "j", "k", "d", "A", "a", "r"]
+    assert routes == []
+
+
+def test_cockpit_inbox_forward_prefers_pane_bridge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare cockpit bridge keys are relayed to the Inbox pane bridge first."""
+    app = PollyCockpitApp.__new__(PollyCockpitApp)
+    config_path = tmp_path / "pollypm.toml"
+    app.config_path = config_path
+    sent: list[str] = []
+    bridge_calls: list[tuple[Path, str, str | None]] = []
+
+    def fake_send_key_to_first_live(
+        config: Path, key: str, *, kind: str | None = None, timeout: float = 2.0,
+    ) -> Path | None:
+        bridge_calls.append((config, key, kind))
+        return tmp_path / "pane_inbox-123.sock"
+
+    monkeypatch.setattr(
+        "pollypm.cockpit_input_bridge.send_key_to_first_live",
+        fake_send_key_to_first_live,
+    )
+    app._send_key_to_right_pane = lambda key: sent.append(key)  # type: ignore[method-assign]
+    app._right_pane_has_live_session = lambda: False  # type: ignore[method-assign]
+
+    assert app._send_key_to_inbox_pane("n") is True
+
+    assert bridge_calls == [(config_path, "n", "pane-inbox")]
+    assert sent == []
+
+
+def test_cockpit_inbox_forward_does_not_tmux_forward_into_live_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the pane bridge is absent, do not type Inbox keys into live chats."""
+    app = PollyCockpitApp.__new__(PollyCockpitApp)
+    app.config_path = tmp_path / "pollypm.toml"
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "pollypm.cockpit_input_bridge.send_key_to_first_live",
+        lambda *args, **kwargs: None,
+    )
+    app._right_pane_has_live_session = lambda: True  # type: ignore[method-assign]
+    app._send_key_to_right_pane = lambda key: sent.append(key)  # type: ignore[method-assign]
+
+    assert app._send_key_to_inbox_pane("j") is False
+    assert sent == []
 
 
 class _StubItem:
@@ -5069,14 +5222,8 @@ class _StubNav:
                 return
 
 
-def test_cockpit_j_from_inbox_steps_into_first_project() -> None:
-    """Pressing ``j`` from Inbox advances the cursor into the project list,
-    stepping over the disabled ``── projects ──`` divider (#918 facet 1).
-
-    Reproduces the rail layout: Inbox row, then a disabled divider row,
-    then the first project row. ``ListView.action_cursor_down`` skips
-    disabled items, so one ``j`` lands on the project.
-    """
+def test_cockpit_j_from_inbox_forwards_to_inbox_cursor() -> None:
+    """#1137: pressing ``j`` from active Inbox moves the inbox cursor."""
     app = PollyCockpitApp.__new__(PollyCockpitApp)
     items = [
         _StubItem("inbox"),
@@ -5101,16 +5248,13 @@ def test_cockpit_j_from_inbox_steps_into_first_project() -> None:
     app._selected_row_key = _selected_row_key  # type: ignore[method-assign]
 
     captured: list[str] = []
-    app._send_key_to_right_pane = lambda key: captured.append(key)  # type: ignore[method-assign]
+    app._send_key_to_inbox_pane = lambda key: captured.append(key) or True  # type: ignore[method-assign]
 
     app.action_cursor_down()
 
-    assert nav.index == 2, (
-        "j from Inbox must skip the divider and land on the first project; "
-        f"got index={nav.index}"
-    )
-    assert app.selected_key == "project:booktalk"
-    assert captured == [], "j must never be tmux-forwarded to the right pane"
+    assert nav.index == 0
+    assert app.selected_key == "inbox"
+    assert captured == ["j"]
 
 
 def test_cockpit_j_at_last_item_is_silent_noop() -> None:
@@ -5320,6 +5464,21 @@ def test_cockpit_app_binds_action_button_digits_at_priority() -> None:
     for key, binding in bindings.items():
         assert getattr(binding, "priority", False), (
             f"{key!r} must be a priority binding to round-trip from rail"
+        )
+
+
+def test_cockpit_global_open_bindings_are_priority() -> None:
+    """#1131/#1174/#1176: global rail open keys must beat held panes."""
+    expected = {"enter,o", "I", "s", "H"}
+    bindings = {
+        binding.key: binding
+        for binding in PollyCockpitApp.BINDINGS
+        if binding.key in expected
+    }
+    assert set(bindings) == expected, f"missing open bindings: {bindings.keys()}"
+    for key, binding in bindings.items():
+        assert getattr(binding, "priority", False), (
+            f"{key!r} must be priority so a focused content pane cannot swallow it"
         )
 
 
@@ -5710,6 +5869,30 @@ def test_right_pane_command_uses_exec_to_avoid_orphans(tmp_path: Path) -> None:
         # of something else) — guards against an accidental refactor
         # that drops the cockpit-pane invocation entirely.
         assert "cockpit-pane" in command
+
+
+def test_default_repair_command_uses_home_dashboard(tmp_path: Path) -> None:
+    """#1152: cold/layout repair panes default to Home, not Polly chat."""
+    config_path = tmp_path / "pollypm.toml"
+    config_path.write_text(
+        f"[project]\nname = \"PollyPM\"\ntmux_session = \"pollypm\"\n"
+        f"base_dir = \"{tmp_path / '.pollypm'}\"\n"
+    )
+    router = CockpitRouter(config_path)
+
+    assert "cockpit-pane dashboard" in router._default_repair_command({})
+    assert "cockpit-pane workers" in router._default_repair_command(
+        {"selected": "workers"}
+    )
+    assert "cockpit-pane settings" in router._default_repair_command(
+        {"selected": "settings"}
+    )
+    assert "cockpit-pane inbox --project demo" in router._default_repair_command(
+        {"selected": "inbox:demo"}
+    )
+    assert "cockpit-pane polly" in router._default_repair_command(
+        {"selected": "polly"}
+    )
 
 
 def test_cockpit_pane_subprocess_dies_with_shell_wrapper(tmp_path: Path) -> None:

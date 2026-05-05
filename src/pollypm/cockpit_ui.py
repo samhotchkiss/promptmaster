@@ -22,7 +22,6 @@ from __future__ import annotations
 import gc
 import asyncio
 import json
-import logging
 import os
 import resource
 from pathlib import Path
@@ -965,7 +964,7 @@ class PollyCockpitApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("enter,o", "open_selected", "Open"),
+        Binding("enter,o", "open_selected", "Open", priority=True),
         Binding("n", "new_worker", "New Worker"),
         # #1089 — ``i`` from the rail used to fire ``open_inbox``, which
         # shadowed the project dashboard's advertised ``i inbox`` (the
@@ -980,7 +979,8 @@ class PollyCockpitApp(App[None]):
             "i", "forward_project_jump_inbox", "Inbox",
             show=False, priority=True,
         ),
-        Binding("I", "open_inbox", "Inbox"),
+        Binding("I", "open_inbox", "Inbox", priority=True),
+        Binding("H", "open_home", "Home", show=False, priority=True),
         Binding("t", "open_activity", "Activity"),
         # #1088 — ``p`` from the rail used to fire ``toggle_project_pin``,
         # which shadowed the project dashboard's advertised ``p plan``
@@ -995,9 +995,10 @@ class PollyCockpitApp(App[None]):
         ),
         Binding("P", "toggle_project_pin", "Pin Project"),
         Binding("r", "refresh", "Refresh"),
-        Binding("s", "open_settings", "Settings"),
+        Binding("s", "open_settings", "Settings", priority=True),
         Binding("tab", "forward_tab_to_right", "Right Pane", show=False, priority=True),
         Binding("A", "forward_workers_auto_refresh", "Workers Auto", show=False, priority=True),
+        Binding("d", "forward_inbox_discuss", "Inbox discuss", show=False),
         # Forward Action Needed numbered buttons (1/2/3) from the rail
         # to the right pane (#862). The cards advertise "Use 1/2/3 for
         # the buttons below"; without this forward, those keystrokes are
@@ -1074,6 +1075,10 @@ class PollyCockpitApp(App[None]):
     # wins over the modal's own priority binding for the same key.
     _HELP_MODAL_GATED_ACTIONS = frozenset({
         "request_quit",          # Q, ctrl+q (#1089 — q forwards instead)
+        "open_selected",         # enter/o
+        "open_home",             # H
+        "open_inbox",            # I
+        "open_settings",         # s
         "back_to_home",          # escape
         "show_keyboard_help",    # ?  (so reopening on top is suppressed,
                                  #     letting the modal close itself)
@@ -1103,6 +1108,10 @@ class PollyCockpitApp(App[None]):
     # — instead the existing one stays up and Esc still works.
     _PALETTE_MODAL_GATED_ACTIONS = frozenset({
         "request_quit",          # Q, ctrl+q (#1089 — q forwards instead)
+        "open_selected",         # enter/o
+        "open_home",             # H
+        "open_inbox",            # I
+        "open_settings",         # s
         "back_to_home",          # escape
         "open_command_palette",  # : / ctrl+k (no double-stack)
         "show_keyboard_help",    # ? (don't open help on top of palette)
@@ -1128,6 +1137,10 @@ class PollyCockpitApp(App[None]):
     # actions / dismiss without the rail eating the keystroke first.
     _ALERT_DETAIL_MODAL_GATED_ACTIONS = frozenset({
         "request_quit",          # Q, ctrl+q  (#1089 — q forwards instead)
+        "open_selected",         # enter/o
+        "open_home",             # H
+        "open_inbox",            # I
+        "open_settings",         # s
         "forward_project_home",  # q  (#1089 — modal binds it to dismiss)
         "back_to_home",          # escape
         "view_alert_detail",     # !  (no double-stack)
@@ -1196,8 +1209,8 @@ class PollyCockpitApp(App[None]):
         self._update_pill_dismissed = False
         self.spinner_index = 0
         self._ticker_started_at = time.monotonic()
-        self.selected_key = "polly"
-        self._last_router_selected_key = "polly"
+        self.selected_key = "dashboard"
+        self._last_router_selected_key = "dashboard"
         self._items: list[CockpitItem] = []
         self._row_widgets: dict[str, RailItem] = {}
         self._section_sep: ListItem | None = None
@@ -1270,6 +1283,9 @@ class PollyCockpitApp(App[None]):
         self.call_after_refresh(self._show_palette_tip_once)
 
     def action_view_alerts(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("a")
+            return
         _action_view_alerts(self)
 
     def action_view_alert_detail(self) -> None:
@@ -1676,6 +1692,35 @@ class PollyCockpitApp(App[None]):
             self._send_key_to_right_pane(key)
         except Exception:  # noqa: BLE001
             pass
+
+    def _on_inbox_surface(self) -> bool:
+        key = getattr(self, "selected_key", None)
+        return isinstance(key, str) and (key == "inbox" or key.startswith("inbox:"))
+
+    def _send_key_to_inbox_pane(self, key: str) -> bool:
+        """Forward an Inbox-owned key to the right-pane Inbox app.
+
+        Prefer the pane's own input bridge so bridge-delivered keys do
+        not get reinterpreted by the rail. Fall back to tmux only when
+        the right pane is not a mounted live session; this preserves the
+        #918 guard against j/k bytes landing in an agent chat.
+        """
+        try:
+            from pollypm.cockpit_input_bridge import send_key_to_first_live
+            delivered = send_key_to_first_live(
+                self.config_path, key, kind="pane-inbox", timeout=0.2,
+            )
+        except Exception:  # noqa: BLE001
+            delivered = None
+        if delivered is not None:
+            return True
+        if self._right_pane_has_live_session():
+            return False
+        try:
+            self._send_key_to_right_pane(key)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     def _cancel_pending_route_selection(self) -> None:
         controller = getattr(self, "_navigation_controller", None)
@@ -2329,6 +2374,9 @@ class PollyCockpitApp(App[None]):
         if self.selected_key == "settings":
             self._send_key_to_settings_pane("j")
             return
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("j")
+            return
         self._align_nav_cursor_to_selected_key()
         last_idx = self._last_nav_index()
         # On the last selectable nav row + Settings is visible → step
@@ -2349,6 +2397,9 @@ class PollyCockpitApp(App[None]):
     def action_cursor_up(self) -> None:
         if self.selected_key == "settings":
             self._send_key_to_settings_pane("k")
+            return
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("k")
             return
         self._align_nav_cursor_to_selected_key()
         # Step up off the virtual Settings row onto the last
@@ -2401,6 +2452,9 @@ class PollyCockpitApp(App[None]):
 
     def action_open_activity(self) -> None:
         self._schedule_route_selected("activity", label="Activity")
+
+    def action_open_home(self) -> None:
+        self._navigate_home()
 
     # ------------------------------------------------------------------
     # Async routing (#959)
@@ -2628,10 +2682,17 @@ class PollyCockpitApp(App[None]):
         self._send_key_to_right_pane("Tab")
 
     def action_forward_workers_auto_refresh(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("A")
+            return
         if self.selected_key == "workers":
             self._send_key_to_right_pane("A")
             return
         self._schedule_route_selected("workers", label="Workers")
+
+    def action_forward_inbox_discuss(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("d")
 
     def action_forward_action_button_1(self) -> None:
         self._send_key_to_right_pane("1")
@@ -2732,6 +2793,9 @@ class PollyCockpitApp(App[None]):
         self._refresh_rows()
 
     def action_new_worker(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("n")
+            return
         key = self._selected_row_key()
         if key is None or not key.startswith("project:"):
             self.hint.update("Select a project first, then press n to launch a worker.")
@@ -2758,6 +2822,9 @@ class PollyCockpitApp(App[None]):
         self.call_from_thread(self._refresh_rows)
 
     def action_refresh(self) -> None:
+        if self._on_inbox_surface():
+            self._send_key_to_inbox_pane("r")
+            return
         self._recover_cockpit_render(force_render=False)
 
     def on_resize(self, _event: events.Resize) -> None:
@@ -2795,8 +2862,8 @@ class PollyCockpitApp(App[None]):
         )
 
     def _navigate_home(self) -> bool:
-        """Switch to the Home (dashboard / polly) surface. Return True on success."""
-        self._schedule_route_selected("polly", label="Home")
+        """Switch to the Home dashboard surface. Return True on success."""
+        self._schedule_route_selected("dashboard", label="Home")
         return True
 
     def action_back_to_home(self) -> None:
@@ -2839,7 +2906,7 @@ class PollyCockpitApp(App[None]):
         selections (#959) so a slow supervisor load can never block the
         click handler / freeze cockpit input.
         """
-        self._schedule_route_selected("polly", label="Home")
+        self._schedule_route_selected("dashboard", label="Home")
 
     def action_detach(self) -> None:
         self.router.tmux.run("detach-client", check=False)
