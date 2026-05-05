@@ -17,9 +17,11 @@ These guard against the class of bugs that bloated Sam's live cockpit DB to
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pollypm.storage.state as state_mod
 from pollypm.storage.state import StateStore
 
 
@@ -31,6 +33,48 @@ def test_auto_vacuum_incremental_on_fresh_db(tmp_path: Path) -> None:
         row = store.execute("PRAGMA auto_vacuum").fetchone()
         assert row is not None
         assert int(row[0]) == 2, f"expected INCREMENTAL (2), got {row[0]}"
+    finally:
+        store.close()
+
+
+def test_state_store_retries_initial_auto_vacuum_lock(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """A transient lock on the first StateStore PRAGMA must not abort open."""
+
+    class _OneShotAutoVacuumLock:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+            self.fired = False
+
+        def execute(self, sql, *args, **kwargs):
+            if (
+                not self.fired
+                and str(sql).strip().upper() == "PRAGMA AUTO_VACUUM=INCREMENTAL"
+            ):
+                self.fired = True
+                raise sqlite3.OperationalError("database is locked")
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str):
+            return getattr(self._conn, name)
+
+    original_connect = state_mod.sqlite3.connect
+    wrapped: list[_OneShotAutoVacuumLock] = []
+
+    def _connect(*args, **kwargs):
+        wrapper = _OneShotAutoVacuumLock(original_connect(*args, **kwargs))
+        wrapped.append(wrapper)
+        return wrapper
+
+    monkeypatch.setattr(state_mod.sqlite3, "connect", _connect)
+
+    store = StateStore(tmp_path / "state.db")
+    try:
+        assert wrapped and wrapped[0].fired
+        row = store.execute("PRAGMA auto_vacuum").fetchone()
+        assert row is not None
+        assert int(row[0]) == 2
     finally:
         store.close()
 
