@@ -20,6 +20,7 @@ class TmuxWindow:
     pane_current_command: str
     pane_current_path: str
     pane_dead: bool
+    pane_pid: int | None = None
 
 
 @dataclass(slots=True)
@@ -412,12 +413,12 @@ class TmuxClient:
     def list_windows(self, name: str) -> list[TmuxWindow]:
         fmt = (
             "#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{pane_id}\t"
-            "#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}"
+            "#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}\t#{pane_pid}"
         )
         result = self.run("list-windows", "-t", self._exact_target(name), "-F", fmt)
         windows: list[TmuxWindow] = []
         for line in result.stdout.splitlines():
-            parts = line.split("\t", 7)
+            parts = line.split("\t", 8)
             if len(parts) < 8:
                 continue
             (
@@ -429,7 +430,14 @@ class TmuxClient:
                 pane_current_command,
                 pane_current_path,
                 pane_dead,
+                *rest,
             ) = parts
+            pane_pid: int | None = None
+            if rest:
+                try:
+                    pane_pid = int(rest[0])
+                except ValueError:
+                    pane_pid = None
             windows.append(
                 TmuxWindow(
                     session=session,
@@ -440,6 +448,7 @@ class TmuxClient:
                     pane_current_command=pane_current_command,
                     pane_current_path=pane_current_path,
                     pane_dead=pane_dead == "1",
+                    pane_pid=pane_pid,
                 )
             )
         return windows
@@ -448,17 +457,23 @@ class TmuxClient:
         """List windows across ALL tmux sessions in a single subprocess call."""
         fmt = (
             "#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{pane_id}\t"
-            "#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}"
+            "#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}\t#{pane_pid}"
         )
         result = self.run("list-windows", "-a", "-F", fmt, check=False)
         if result.returncode != 0:
             return []
         windows: list[TmuxWindow] = []
         for line in result.stdout.splitlines():
-            parts = line.split("\t", 7)
+            parts = line.split("\t", 8)
             if len(parts) < 8:
                 continue
-            session, index, window_name, active, pane_id, pane_cmd, pane_path, pane_dead = parts
+            session, index, window_name, active, pane_id, pane_cmd, pane_path, pane_dead, *rest = parts
+            pane_pid: int | None = None
+            if rest:
+                try:
+                    pane_pid = int(rest[0])
+                except ValueError:
+                    pane_pid = None
             windows.append(
                 TmuxWindow(
                     session=session,
@@ -469,6 +484,7 @@ class TmuxClient:
                     pane_current_command=pane_cmd,
                     pane_current_path=pane_path,
                     pane_dead=pane_dead == "1",
+                    pane_pid=pane_pid,
                 )
             )
         return windows
@@ -644,6 +660,65 @@ class TmuxClient:
                 except ValueError:
                     return None
         return None
+
+    def pane_has_stopped_descendant(
+        self,
+        *,
+        pane_pid: int | None = None,
+        pane_id: str | None = None,
+    ) -> bool:
+        """Return True if the pane process or one of its children is stopped.
+
+        ``tmux`` keeps a pane alive when its foreground agent process is
+        suspended with SIGSTOP, so ``pane_dead`` stays false. The heartbeat
+        needs the OS process state to distinguish that wedged-but-live pane
+        from a legitimately idle worker.
+        """
+        root_pid = pane_pid
+        if root_pid is None and pane_id:
+            root_pid = self.get_pane_pid(pane_id)
+        if root_pid is None or root_pid <= 0:
+            return False
+
+        try:
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,ppid=,stat="],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        if result.returncode != 0:
+            return False
+
+        statuses: dict[int, str] = {}
+        children: dict[int, list[int]] = {}
+        for line in result.stdout.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            try:
+                pid = int(parts[0])
+                ppid = int(parts[1])
+            except ValueError:
+                continue
+            statuses[pid] = parts[2]
+            children.setdefault(ppid, []).append(pid)
+
+        stack = [root_pid]
+        seen: set[int] = set()
+        while stack:
+            pid = stack.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            stat = statuses.get(pid, "")
+            if "T" in stat:
+                return True
+            stack.extend(children.get(pid, []))
+        return False
 
     # -- Teardown helper -------------------------------------------------------
 

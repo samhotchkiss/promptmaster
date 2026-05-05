@@ -38,6 +38,7 @@ class HeartbeatSessionContext:
     previous_log_bytes: int | None
     previous_snapshot_hash: str | None
     cursor: HeartbeatCursor | None = None
+    pane_stopped: bool = False
 
 
 @dataclass(slots=True)

@@ -308,10 +308,20 @@ class SupervisorHeartbeatAPI:
             pane_id: str | None = None
             pane_command: str | None = None
             pane_dead = False
+            pane_stopped = False
             if window is not None:
                 pane_id = window.pane_id
                 pane_command = window.pane_current_command
                 pane_dead = window.pane_dead
+                pane_pid = getattr(window, "pane_pid", None)
+                if pane_pid:
+                    try:
+                        pane_stopped = (
+                            self.supervisor.session_service.tmux
+                            .pane_has_stopped_descendant(pane_pid=int(pane_pid))
+                        )
+                    except Exception:  # noqa: BLE001
+                        pane_stopped = False
                 try:
                     raw_snapshot_path, pane_text = self.supervisor.write_snapshot(window, self.snapshot_lines)
                 except Exception:
@@ -344,6 +354,7 @@ class SupervisorHeartbeatAPI:
                     previous_log_bytes=previous.log_bytes if previous else None,
                     previous_snapshot_hash=previous.snapshot_hash if previous else None,
                     cursor=cursor,
+                    pane_stopped=pane_stopped,
                 )
             )
         return contexts

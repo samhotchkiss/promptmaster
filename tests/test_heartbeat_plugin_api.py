@@ -299,6 +299,49 @@ def test_supervisor_heartbeat_api_persists_cursor_and_reads_incremental_delta(tm
     assert "operator" in cursor_path.read_text()
 
 
+def test_supervisor_heartbeat_api_marks_stopped_pane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    supervisor = Supervisor(_config(tmp_path))
+    supervisor.ensure_layout()
+    launch = supervisor.plan_launches()[0]
+    launch.log_path.parent.mkdir(parents=True, exist_ok=True)
+    launch.log_path.write_text("")
+    snapshot_path = supervisor.config.project.snapshots_dir / "pm-operator-test.txt"
+    tmux_session = supervisor.tmux_session_for_launch(launch)
+    window = TmuxWindow(
+        session=tmux_session,
+        index=1,
+        name=launch.window_name,
+        active=True,
+        pane_id="%1",
+        pane_current_command="claude",
+        pane_current_path=str(tmp_path),
+        pane_dead=False,
+        pane_pid=12345,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "window_map",
+        lambda: {(tmux_session, launch.window_name): window},
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "write_snapshot",
+        lambda _window, _lines: (snapshot_path, "snapshot\n"),
+    )
+    monkeypatch.setattr(
+        supervisor.session_service.tmux,
+        "pane_has_stopped_descendant",
+        lambda *, pane_pid=None, pane_id=None: pane_pid == 12345,
+    )
+
+    api = SupervisorHeartbeatAPI(supervisor)
+    context = api.list_sessions()[0]
+
+    assert context.pane_stopped is True
+
+
 def test_supervisor_heartbeat_api_lists_unmanaged_windows(tmp_path: Path, monkeypatch) -> None:
     supervisor = Supervisor(_config(tmp_path))
     supervisor.ensure_layout()
@@ -1007,6 +1050,27 @@ def test_local_heartbeat_backend_clears_stale_unmanaged_window_alerts() -> None:
     assert ("heartbeat", "unmanaged_window:pollypm:e2e-sandbox") not in api.alerts
 
 
+def test_local_heartbeat_backend_marks_stopped_pane_stuck() -> None:
+    api = FakeHeartbeatAPI([
+        _context(
+            transcript_delta="",
+            pane_text="still visible but process stopped",
+            pane_stopped=True,
+        )
+    ])
+
+    LocalHeartbeatBackend().run(api)
+
+    alert = api.alerts[("worker_pollypm", "pane_stopped")]
+    assert alert.severity == "error"
+    assert "SIGSTOP" in alert.message
+    assert api.statuses["worker_pollypm"] == (
+        "stuck",
+        "Pane process is stopped (SIGSTOP)",
+    )
+    assert api.cursor_updates[-1]["verdict"] == "stuck"
+
+
 def test_worker_nudge_skips_repeat_for_same_snapshot_episode(monkeypatch) -> None:
     backend = LocalHeartbeatBackend()
     api = FakeHeartbeatAPI(
@@ -1351,4 +1415,3 @@ def test_heartbeat_unmanaged_window_event_routes_through_signal_envelope(
     # Legacy persistence path still records the event.
     persisted_subjects = {event_type for (_session, event_type, _msg) in api.events}
     assert "unmanaged_window" in persisted_subjects
-
